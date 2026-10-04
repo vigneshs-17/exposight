@@ -22,10 +22,10 @@
 - None.
 
 ## Next
-- None.
+- v3.6: deploy (scope to be planned).
 
 ## Skills Plan
-- **Installed**: Docker (x4: `docker-build-strategies`, `docker-compose-patterns`, `docker-destructive-guardrails`, `docker-project-foundations`), `arena`, `frontend-design`, `webapp-testing`, `security-and-hardening`.
+- **Installed**: Docker (x4: `docker-build-strategies`, `docker-compose-patterns`, `docker-destructive-guardrails`, `docker-project-foundations`), `arena`, `frontend-design`, `webapp-testing`, `security-and-hardening`, GSAP (x6: `gsap-core`, `gsap-performance`, `gsap-plugins`, `gsap-scrolltrigger`, `gsap-timeline`, `gsap-utils`).
 - **Later (each only when its phase starts)**:
   - `greensock/gsap-skills`: v3.5 landing page.
   - `coreyhaines31/marketingskills` or `claude-seo`: only if launching publicly.

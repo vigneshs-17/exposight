@@ -223,8 +223,8 @@
 - **What happened:** Code review of the v3.5 landing page caught five copy and test rigor issues before release:
   1. An invented claim that change detection caught "revoked certificates" when `changes.py` actually detects `certificate problems (expired, untrusted, self-signed, hostname mismatch)`.
   2. Hero node 02 described as "Dual-stack HTTP" when `prober.py` inspects `HTTP/HTTPS on 80/443`.
-  3. Probing source label cited `headers_inspect.py` instead of `scan_common.py`.
-  4. Heuristic scoring text contained duplicate phrasing ("by host impact").
+  3. Probing source label cited `headers_inspect.py` instead of `prober.py, scan_common.py`.
+  4. Scoring text made an unsupported "by host impact" claim; the real order is severity tier, score impact, then host.
   5. The DNS TXT verification example in the Trust card was hard-coded instead of dynamically computed via `get_expected_record_value`.
   6. Reduced-motion and no-JS tests spawned isolated Playwright browsers without attaching the global fixture listeners and teardown assertions (CSP violations, console errors, page errors, server response codes, and unexpected network egress).
   7. The initial GSAP browser test asserted opacity on `#hero h1` without verifying that ScrollTrigger instances actually existed for below-fold sections.
