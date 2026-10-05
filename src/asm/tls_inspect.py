@@ -11,9 +11,15 @@ import datetime
 import logging
 import socket
 import ssl
+import warnings
 from typing import Any
 
+import dns.resolver
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
 from asm.models import CertInfo
+from asm.scan_common import is_safe_public_ip, resolve_host_ips
 
 logger = logging.getLogger(__name__)
 
@@ -222,115 +228,241 @@ def parse_cert_dict(
     )
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# cryptography OID -> attribute names used by ssl.getpeercert(), so parse_cert_dict
+# handles certificates from both sources the same way.
+_GETPEERCERT_NAMES = {
+    NameOID.COMMON_NAME: "commonName",
+    NameOID.ORGANIZATION_NAME: "organizationName",
+    NameOID.ORGANIZATIONAL_UNIT_NAME: "organizationalUnitName",
+    NameOID.COUNTRY_NAME: "countryName",
+    NameOID.STATE_OR_PROVINCE_NAME: "stateOrProvinceName",
+    NameOID.LOCALITY_NAME: "localityName",
+}
+
+
+def _getpeercert_time(value: datetime.datetime) -> str:
+    """Format a UTC datetime the way ssl.getpeercert() does ('Jun  1 12:00:00 2026 GMT')."""
+    return (
+        f"{_MONTHS[value.month - 1]} {value.day:2d} "
+        f"{value.hour:02d}:{value.minute:02d}:{value.second:02d} {value.year} GMT"
+    )
+
+
+def _getpeercert_name(name: x509.Name) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Convert a cryptography Name into getpeercert()'s nested RDN tuple."""
+    return tuple(
+        tuple(
+            (_GETPEERCERT_NAMES.get(attr.oid, attr.oid.dotted_string), str(attr.value))
+            for attr in rdn
+        )
+        for rdn in name.rdns
+    )
+
+
+def cert_dict_from_der(der_bytes: bytes) -> dict[str, Any]:
+    """Parse a DER certificate into the dict format of ssl.getpeercert().
+
+    Used for untrusted certificates: with verification disabled, getpeercert()
+    returns {} and only the raw DER bytes are available.
+
+    Raises:
+        ValueError: If the bytes are not a valid X.509 certificate.
+    """
+    cert = x509.load_der_x509_certificate(der_bytes)
+    sans: list[tuple[str, str]] = []
+    try:
+        san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        sans += [("DNS", n) for n in san_ext.value.get_values_for_type(x509.DNSName)]
+        sans += [
+            ("IP Address", str(ip)) for ip in san_ext.value.get_values_for_type(x509.IPAddress)
+        ]
+    except x509.ExtensionNotFound:
+        pass
+    return {
+        "subject": _getpeercert_name(cert.subject),
+        "issuer": _getpeercert_name(cert.issuer),
+        "notBefore": _getpeercert_time(cert.not_valid_before_utc),
+        "notAfter": _getpeercert_time(cert.not_valid_after_utc),
+        "serialNumber": format(cert.serial_number, "X"),
+        "subjectAltName": tuple(sans),
+    }
+
+
+def resolve_safe_ip(
+    hostname: str, resolver: dns.resolver.Resolver | None = None
+) -> tuple[str | None, str | None]:
+    """Resolve hostname with the same SSRF rules as the main inspection path.
+
+    Returns (ip, None) with the first resolved IP when EVERY resolved address is
+    public, otherwise (None, reason). The caller connects to that IP itself, so
+    the socket cannot be steered to a different address by a second lookup.
+    """
+    ips = resolve_host_ips(hostname, resolver=resolver)
+    if not ips:
+        return None, f"'{hostname}' has no A/AAAA answer"
+    for ip in ips:
+        if not is_safe_public_ip(ip):
+            return None, f"'{hostname}' resolved to non-public/private IP: {ip}"
+    return ips[0], None
+
+
+def _legacy_context(verify: bool) -> ssl.SSLContext:
+    """TLS context that can still negotiate TLS 1.0/1.1 so old protocols are detected.
+
+    Python's default client context refuses anything below TLS 1.2, which made the
+    deprecated-protocol finding impossible to trigger. Whether TLS 1.0 really
+    works also depends on the OpenSSL build; @SECLEVEL=0 lifts OpenSSL's own floor.
+    """
+    ctx = ssl.create_default_context() if verify else ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+        except ValueError:
+            logger.debug("This OpenSSL build cannot lower the minimum TLS version")
+    try:
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except ssl.SSLError:
+        logger.debug("This OpenSSL build rejected @SECLEVEL=0")
+    return ctx
+
+
+def _handshake(
+    ip: str, hostname: str, port: int, timeout: float, ctx: ssl.SSLContext
+) -> tuple[str | None, dict[str, Any], bytes | None]:
+    """Connect to the already-validated IP with SNI = hostname.
+
+    Returns (tls_version, getpeercert(), DER bytes).
+    """
+    with socket.create_connection((ip, port), timeout=timeout) as sock:
+        with ctx.wrap_socket(sock, server_hostname=hostname) as sslsock:
+            return (
+                sslsock.version(),
+                sslsock.getpeercert() or {},
+                sslsock.getpeercert(binary_form=True),
+            )
+
+
+def _cert_info(
+    hostname: str,
+    tls_version: str | None,
+    cert_dict: dict[str, Any],
+    der: bytes | None,
+    trusted: bool,
+    verify_error: str | None,
+    now_utc: datetime.datetime | None,
+) -> CertInfo:
+    """Build CertInfo from a completed handshake, parsing DER when the dict is empty."""
+    if not cert_dict and der:
+        try:
+            cert_dict = cert_dict_from_der(der)
+        except ValueError as exc:
+            logger.debug("Could not parse DER certificate from %s: %s", hostname, exc)
+    if cert_dict:
+        return parse_cert_dict(
+            cert_dict=cert_dict,
+            hostname=hostname,
+            tls_version=tls_version,
+            is_trusted=trusted,
+            verify_error=None if trusted else verify_error,
+            source="from_socket",
+            now_utc=now_utc,
+        )
+    # No certificate bytes at all: fall back to what the verification error says.
+    err_lower = (verify_error or "").lower()
+    hostname_mismatch = "hostname" in err_lower or "match" in err_lower
+    return CertInfo(
+        subject_cn=None,
+        sans=[],
+        issuer="",
+        not_before="",
+        not_after="",
+        days_until_expiry=0.0,
+        serial_hex=None,
+        tls_version=tls_version,
+        hostname_matches=not hostname_mismatch,
+        is_trusted=trusted,
+        verify_error=verify_error,
+        source="from_socket",
+        expired="expired" in err_lower,
+        not_yet_valid=False,
+        issuer_equals_subject="self signed" in err_lower or "self-signed" in err_lower,
+        hostname_mismatch=hostname_mismatch,
+        expiring_soon=False,
+        deprecated_tls=bool(tls_version and tls_version in DEPRECATED_TLS_VERSIONS),
+    )
+
+
 def connect_and_inspect_cert_socket(
     hostname: str,
     port: int = 443,
     timeout: float = 5.0,
     now_utc: datetime.datetime | None = None,
+    resolver: dns.resolver.Resolver | None = None,
 ) -> CertInfo | None:
-    """Connect to a host via direct ssl+socket to retrieve and evaluate its certificate.
+    """Connect directly with ssl+socket to retrieve and evaluate a host's certificate.
 
-    Follows a two-pass strategy using only public standard library APIs:
-    - Pass 1 (Verified): Uses ssl.create_default_context(). If successful, reads
-      the parsed peer certificate dictionary and records is_trusted=True.
-    - Pass 2 (Unverified fallback): If verification fails, connects using a context
-      with verify_mode=ssl.CERT_NONE and check_hostname=False. Records is_trusted=False
-      and captures the verify error message.
+    SSRF: the host is resolved once and every address must be public (the same rule
+    as the main inspection path). All handshakes connect to that validated IP with
+    SNI set to the hostname, so a private, loopback or metadata address is never
+    contacted, not even by the legacy-protocol fallback.
 
-    Args:
-        hostname: Target domain or subdomain.
-        port: TCP port (default 443).
-        timeout: Socket connect timeout in seconds.
-        now_utc: Optional current UTC datetime for testing.
+    Passes:
+    1. Verified, modern defaults (TLS 1.2+).
+    2. If pass 1 failed for a protocol reason (not a certificate reason): verified
+       with TLS 1.0/1.1 allowed, so an old-protocol host with a valid certificate is
+       reported as trusted but deprecated.
+    3. Otherwise: unverified with TLS 1.0/1.1 allowed. Verification is off only to
+       read and report the bad certificate (is_trusted=False); nothing from this
+       connection is trusted. Details come from the DER bytes, because
+       getpeercert() returns {} when verification is off.
 
     Returns:
-        Populated CertInfo, or None if the host is genuinely unreachable.
+        Populated CertInfo, or None if the host is unsafe or unreachable.
     """
-    # Pass 1: Verified connection
-    try:
-        ctx_verified = ssl.create_default_context()
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
-            with ctx_verified.wrap_socket(sock, server_hostname=hostname) as sslsock:
-                cert_dict = sslsock.getpeercert()
-                tls_version = sslsock.version()
-                if cert_dict:
-                    return parse_cert_dict(
-                        cert_dict=cert_dict,
-                        hostname=hostname,
-                        tls_version=tls_version,
-                        is_trusted=True,
-                        verify_error=None,
-                        source="from_socket",
-                        now_utc=now_utc,
-                    )
-    except (ssl.SSLCertVerificationError, ssl.SSLError) as exc:
-        # TLS verification failed (e.g. self-signed, expired, invalid CA chain)
-        verify_error = str(exc)
-        logger.debug(
-            "TLS verification failed for %s: %s; trying unverified fallback", hostname, exc
+    ip, unsafe_reason = resolve_safe_ip(hostname, resolver=resolver)
+    if ip is None:
+        logger.info(
+            "TLS socket inspection refused for %s (SSRF guard): %s", hostname, unsafe_reason
         )
-
-        # Pass 2: Unverified connection using public standard library API
-        # verify_mode=ssl.CERT_NONE allows us to complete the handshake and inspect TLS version
-        try:
-            ctx_unverified = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            ctx_unverified.check_hostname = False
-            ctx_unverified.verify_mode = ssl.CERT_NONE
-
-            with socket.create_connection((hostname, port), timeout=timeout) as sock:
-                with ctx_unverified.wrap_socket(sock, server_hostname=hostname) as sslsock:
-                    tls_version = sslsock.version()
-                    cert_dict = sslsock.getpeercert()
-
-                    if cert_dict:
-                        return parse_cert_dict(
-                            cert_dict=cert_dict,
-                            hostname=hostname,
-                            tls_version=tls_version,
-                            is_trusted=False,
-                            verify_error=verify_error,
-                            source="from_socket",
-                            now_utc=now_utc,
-                        )
-
-                    # In standard OpenSSL/CPython, getpeercert() returns {} when CERT_NONE is set.
-                    # We infer key security flags directly from the verified failure message.
-                    err_lower = verify_error.lower()
-                    expired = "expired" in err_lower
-                    self_signed = "self signed" in err_lower or "self-signed" in err_lower
-                    hostname_mismatch = "hostname" in err_lower or "match" in err_lower
-
-                    deprecated_tls = bool(
-                        tls_version and tls_version in DEPRECATED_TLS_VERSIONS
-                    )
-
-                    return CertInfo(
-                        subject_cn=None,
-                        sans=[],
-                        issuer="",
-                        not_before="",
-                        not_after="",
-                        days_until_expiry=0.0,
-                        serial_hex=None,
-                        tls_version=tls_version,
-                        hostname_matches=not hostname_mismatch,
-                        is_trusted=False,
-                        verify_error=verify_error,
-                        source="from_socket",
-                        expired=expired,
-                        not_yet_valid=False,
-                        issuer_equals_subject=self_signed,
-                        hostname_mismatch=hostname_mismatch,
-                        expiring_soon=False,
-                        deprecated_tls=deprecated_tls,
-                    )
-        except Exception as unverified_exc:
-            logger.debug("Unverified socket fallback failed for %s: %s", hostname, unverified_exc)
-            return None
-
-    except (OSError, TimeoutError) as net_err:
-        # Port 443 is genuinely unreachable, refused, or timed out
-        logger.debug("Port 443 unreachable on %s: %s", hostname, net_err)
         return None
 
-    return None
+    verify_error: str | None = None
+    try:
+        version, cert_dict, der = _handshake(
+            ip, hostname, port, timeout, ssl.create_default_context()
+        )
+        return _cert_info(hostname, version, cert_dict, der, True, None, now_utc)
+    except ssl.SSLCertVerificationError as exc:
+        verify_error = str(exc)
+    except ssl.SSLError as exc:
+        verify_error = str(exc)
+        try:
+            version, cert_dict, der = _handshake(
+                ip, hostname, port, timeout, _legacy_context(verify=True)
+            )
+            return _cert_info(hostname, version, cert_dict, der, True, None, now_utc)
+        except ssl.SSLCertVerificationError as legacy_exc:
+            verify_error = str(legacy_exc)
+        except ssl.SSLError:
+            pass
+        except (OSError, TimeoutError) as net_err:
+            logger.debug("TLS port %d unreachable on %s: %s", port, hostname, net_err)
+            return None
+    except (OSError, TimeoutError) as net_err:
+        logger.debug("TLS port %d unreachable on %s: %s", port, hostname, net_err)
+        return None
+
+    try:
+        version, cert_dict, der = _handshake(
+            ip, hostname, port, timeout, _legacy_context(verify=False)
+        )
+    except (OSError, TimeoutError) as exc:  # ssl.SSLError is an OSError
+        logger.debug("Unverified TLS fallback failed for %s: %s", hostname, exc)
+        return None
+    return _cert_info(hostname, version, cert_dict, der, False, verify_error, now_utc)

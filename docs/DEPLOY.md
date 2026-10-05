@@ -142,7 +142,7 @@ The api, worker and admin CLI install a log filter (`src/asm/logredact.py`) that
 
 ### Database downgrades
 
-Downgrading migrations `0008` or `0007` permanently loses domain verification state or domain ownership. Those downgrades refuse to run when any domain exists unless `ALLOW_DATA_LOSS_DOWNGRADE=1` is set. Take a backup first (`scripts/backup_db.sh`).
+Downgrading migrations `0011` (organization invites), `0009` (the audit log), `0008` (domain verification state) or `0007` (domain ownership) permanently loses that data. Each of those downgrades refuses to run when its table has rows unless `ALLOW_DATA_LOSS_DOWNGRADE=1` is set. Take a backup first (`scripts/backup_db.sh`).
 
 ### Least-privilege database roles
 

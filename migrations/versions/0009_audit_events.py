@@ -12,6 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from asm.db.migration_guards import refuse_lossy_downgrade
+
 # revision identifiers, used by Alembic.
 revision: str = "0009_audit_events"
 down_revision: str | None = "0008_domain_verification"
@@ -85,6 +87,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Dropping audit_events destroys the append-only audit history.
+    refuse_lossy_downgrade(
+        op.get_bind(),
+        "SELECT count(*) FROM audit_events",
+        "the audit log (audit_events)",
+    )
+
     # 1. Drop trigger and function
     op.execute("DROP TRIGGER IF EXISTS trg_audit_events_append_only ON audit_events;")
     op.execute("DROP FUNCTION IF EXISTS prevent_audit_events_tampering();")

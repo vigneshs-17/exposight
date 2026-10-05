@@ -149,3 +149,40 @@ def test_empty_database_downgrades_without_the_flag(scratch_db_url):
 
     result = _alembic(scratch_db_url, "downgrade", "base")
     assert result.returncode == 0, result.stderr
+
+
+def test_audit_and_invite_downgrades_refused_unless_explicitly_allowed(scratch_db_url):
+    """B-2 extension: 0011 (org_invites) and 0009 (audit_events) refuse to drop data."""
+    assert _alembic(scratch_db_url, "upgrade", "head").returncode == 0
+    engine = sa.create_engine(scratch_db_url)
+    with engine.begin() as conn:
+        org_id = conn.execute(
+            text("INSERT INTO organizations (name, created_at) VALUES ('O', now()) RETURNING id")
+        ).scalar()
+        conn.execute(
+            text(
+                "INSERT INTO audit_events (org_id, actor_type, action, target_type, target_id) "
+                "VALUES (:o, 'system', 'org.created', 'org', :o)"
+            ),
+            {"o": org_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO org_invites (org_id, email, role, token_hash, created_at, "
+                "expires_at) VALUES (:o, 'x@example.com', 'viewer', :h, now(), "
+                "now() + interval '1 day')"
+            ),
+            {"o": org_id, "h": "a" * 64},
+        )
+    engine.dispose()
+
+    refused_0011 = _alembic(scratch_db_url, "downgrade", "0010_app_role_grants")
+    assert refused_0011.returncode != 0
+    assert "organization invites" in refused_0011.stderr
+    assert _alembic(scratch_db_url, "downgrade", "0010_app_role_grants", allow=True).returncode == 0
+
+    refused_0009 = _alembic(scratch_db_url, "downgrade", "0008_domain_verification")
+    assert refused_0009.returncode != 0
+    assert "the audit log" in refused_0009.stderr
+    allowed = _alembic(scratch_db_url, "downgrade", "0008_domain_verification", allow=True)
+    assert allowed.returncode == 0, allowed.stderr

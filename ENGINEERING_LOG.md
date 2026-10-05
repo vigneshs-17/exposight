@@ -331,6 +331,31 @@
 - **Fix:** `[Exposight]`, "so Exposight can verify", and the comment updated. Three test expectations of `[ASM]` were updated to `[Exposight]` (approved behaviour change, D10).
 - **Evidence:** `tests/test_brand_text.py` scans every served template, script and stylesheet (vendored libraries excluded).
 
+### Entry AZ: v3.6c B-2 — TLS 1.0/1.1 Was Never Detected; Untrusted Certificates Lost Their Details
+- **What happened:** Both TLS passes used Python's client defaults, whose minimum is TLS 1.2, so a host offering only TLS 1.0/1.1 failed both handshakes and was reported as having no certificate at all: the deprecated-protocol finding could never fire. In the unverified pass `getpeercert()` returns `{}`, so untrusted certificates were stored with empty expiry, names, issuer and serial, guessed only from the error text.
+- **Fix:** `connect_and_inspect_cert_socket` now runs explicit passes: verified with modern defaults; if that failed for a protocol (not certificate) reason, verified with TLS 1.0+ allowed (`minimum_version=TLSv1`, `@SECLEVEL=0`), so an old-protocol host with a valid certificate is trusted but flagged deprecated; otherwise unverified with TLS 1.0+, parsing the DER bytes with `cryptography` into the same dict format `getpeercert()` uses, so all existing flag logic is reused. `cryptography>=42.0.0` is now a declared dependency (D1); it was already installed through `pyjwt[crypto]`.
+- **Unverified pass:** verification is off only to read and report a bad certificate (`is_trusted=False`); nothing from that connection is trusted. A security-guidance hook flagged it; the behaviour is unchanged from before B-2 and intentional.
+- **Evidence:** `tests/test_tls_socket.py` runs real handshakes against local TLS servers capped at TLS 1.0 and TLS 1.1 (OpenSSL 3.5.7 here). Python 3.14 verifies with `VERIFY_X509_STRICT`, so the test CA and leaf carry Authority/Subject Key Identifiers. Real TLS 1.0 handshakes in CI depend on the runner's OpenSSL build: not run in CI yet.
+
+### Entry BA: v3.6c B-2 — TLS Fallback Bypassed the SSRF Guard (R2)
+- **What happened:** The socket fallback called `socket.create_connection((hostname, 443))`, a second, independent DNS lookup that the SSRF check never saw.
+- **Fix:** `resolve_safe_ip` resolves once with the same resolver and rule as the main path (`resolve_host_ips` + `is_safe_public_ip`, fail closed when unresolved or when any address is non-public); every pass connects to that validated IP with SNI set to the hostname.
+- **Evidence:** private, loopback, metadata (169.254.169.254), mixed public+private and unresolved answers are all refused with zero connection attempts; a test records that the only address ever dialled is the validated public IP.
+
+### Entry BB: v3.6c B-2 — Port-Scan DNS Blocked the Event Loop; Probe Deadline Ignored Connect and Headers
+- **What happened:** `scan_host_ports` called blocking dnspython inside the async scan, so one slow lookup stalled every host's port scan. The prober checked its 10 s deadline only before dispatch and between body chunks, while each request used fixed 5 s connect / 10 s read timeouts, on every redirect hop.
+- **Fix:** DNS runs via `asyncio.to_thread`. `hop_timeout(deadline)` splits the remaining time so connect + header read fit inside it, and raises `DeadlineExceeded` when nothing is left; one body-chunk read can still overrun by half of what was left (worst case 1.5 x 10 s), which is stated in the docstring.
+- **Evidence:** a 3-party barrier only passes if three lookups overlap; with the fix reverted all hosts end `SKIPPED_UNRESOLVED`. A fake-clock test asserts `connect + read <= remaining` on each of three hops, and that no request is sent after the deadline.
+
+### Entry BC: v3.6c B-2 — Two Revert Proofs Were Not Valid on the First Run
+- **What happened:** The overlap test passed with the bug reintroduced (the AAAA lookup still returned an IP after the barrier broke), and the private-IP test failed with `NotImplementedError` from a mocked socket instead of its own assertion.
+- **Fix:** AAAA now returns no answer, and the mocked connect raises `OSError`. Re-run: `AssertionError: assert ['SKIPPED_UNR...'] == ['SKIPPED_PRI...']` and `Expected 'create_connection' to not have been called. Called 1 times.`
+- **How to prevent it:** Read the first failure line of every proof; a pass, or a failure from test scaffolding, proves nothing.
+
+### Entry BD: v3.6c B-2 — 0009 and 0011 Downgrades Guarded
+- **Fix:** The same `refuse_lossy_downgrade` guard now protects downgrading `0011` (drops `org_invites`) and `0009` (drops `audit_events`) when those tables have rows.
+- **Evidence:** real Alembic chain on a scratch database: refused without `ALLOW_DATA_LOSS_DOWNGRADE=1`, allowed with it.
+
 ---
 
 ## Architectural Decisions
@@ -448,6 +473,7 @@
 - v3.6b A-2: default suite 523 -> 579 passed (+56); browser 15 -> 16 passed; 16 revert proofs plus 1 corrected behavioural re-proof failed as expected and restored byte-identical.
 - v3.6b A-2 terms correction: 579 -> 586 passed (+7).
 - v3.6c B-1: default suite 586 -> 601 passed (+15); browser 16 passed; 9 revert proofs failed on assertions and restored byte-identical.
+- v3.6c B-2: default suite 601 -> 618 passed (+17); browser 16 passed; 9 revert proofs failed on assertions (2 after test corrections) and restored byte-identical.
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.

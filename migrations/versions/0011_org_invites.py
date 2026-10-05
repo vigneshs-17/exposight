@@ -4,14 +4,16 @@ Revision ID: 0011_org_invites
 Revises: 0010_app_role_grants
 Create Date: 2026-10-05 13:00:00.000000+00:00
 
-Additive: one new table. Downgrade drops only that table (pending invites are lost,
-which is acceptable: they can be re-issued; memberships are untouched).
+Additive: one new table. Downgrade drops only that table; it refuses when invites exist
+unless ALLOW_DATA_LOSS_DOWNGRADE=1 (memberships are untouched).
 """
 
 from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+
+from asm.db.migration_guards import refuse_lossy_downgrade
 
 # revision identifiers, used by Alembic.
 revision: str = "0011_org_invites"
@@ -45,5 +47,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    refuse_lossy_downgrade(
+        op.get_bind(),
+        "SELECT count(*) FROM org_invites",
+        "organization invites (org_invites)",
+    )
+
     op.drop_index("ix_org_invites_org_id_email", table_name="org_invites")
     op.drop_table("org_invites")

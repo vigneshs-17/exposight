@@ -339,7 +339,11 @@ async def scan_host_ports(
             )
 
         # 2. DNS Resolution & SSRF Guard
-        resolved_ips = resolve_host_ips(validated_host, resolver=resolver)
+        # dnspython resolution is blocking; run it in a worker thread so one slow
+        # lookup does not stall the event loop (and every other host's port scan).
+        resolved_ips = await asyncio.to_thread(
+            resolve_host_ips, validated_host, resolver=resolver
+        )
         if not resolved_ips:
             # Per requirement 4: If a host fails DNS at scan time, record as SKIPPED_UNRESOLVED
             return HostPortScanResult(

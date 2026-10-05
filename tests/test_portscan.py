@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import dns.resolver
 import pytest
 
 from asm.models import HostProbeStatus, PortStatus
@@ -341,3 +343,32 @@ class TestHostScanFlowAndSafety:
         assert res.open_ports[0].port == 80
         assert len(res.closed_ports) == 15
         assert len(res.filtered_ports) == 0
+
+
+class TestDnsDoesNotBlockEventLoop:
+    """v3.6b B-2 (bug g): DNS lookups for different hosts run at the same time."""
+
+    def test_host_lookups_overlap(self):
+        barrier = threading.Barrier(3, timeout=5)
+
+        class OverlapResolver:
+            lifetime = timeout = 0
+
+            def resolve(self, hostname, rdtype):
+                if rdtype != "A":
+                    raise dns.resolver.NoAnswer()
+                # Passes only if 3 lookups are in flight together. If resolution ran on
+                # the event loop, they would run one by one, the barrier would break,
+                # and the host would end up SKIPPED_UNRESOLVED.
+                barrier.wait()
+                rdata = MagicMock()
+                rdata.to_text.return_value = "10.0.0.5"  # private: no port is touched
+                return [rdata]
+
+        results = run_port_scan(
+            ["a.example.com", "b.example.com", "c.example.com"],
+            "example.com",
+            resolver=OverlapResolver(),
+        )
+
+        assert [r.status for r in results] == [HostProbeStatus.SKIPPED_PRIVATE_IP.value] * 3

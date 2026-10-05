@@ -12,7 +12,9 @@ import pytest
 
 from asm.models import HostProbeStatus, ProbeErrorType
 from asm.prober import (
+    CONNECT_TIMEOUT,
     MAX_BODY_BYTES,
+    TOTAL_URL_TIMEOUT,
     _stream_and_read_body,
     check_host_for_ssrf,
     extract_title,
@@ -443,3 +445,49 @@ class TestSSRFFailClosedAndRedirectGuard:
             probe_host("web.example.com", "example.com", resolver=resolver)
 
         assert seen["accept-encoding"] == "identity"
+
+
+class TestDeadlineCoversConnectAndHeaders:
+    """v3.6b B-2 (bug h): every request gets timeouts that fit inside the 10 s deadline."""
+
+    def test_each_hop_timeout_fits_remaining_time(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr("asm.prober.time.perf_counter", lambda: clock[0])
+        seen: list[tuple[float, float, float]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            timeouts = request.extensions["timeout"]
+            remaining = (1000.0 + TOTAL_URL_TIMEOUT) - clock[0]
+            seen.append((timeouts["connect"], timeouts["read"], remaining))
+            clock[0] += 3.0  # each hop takes 3 s of the budget
+            hop = len(seen)
+            if hop < 3:
+                return httpx.Response(302, headers={"Location": f"/step{hop}"})
+            return httpx.Response(200, html="<title>done</title>")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        result = probe_url("https://api.example.com/", "example.com", client)
+
+        assert result.status_code == 200
+        assert len(seen) == 3
+        for connect, read, remaining in seen:
+            # Connect and header read together never exceed the time that is left.
+            assert connect + read <= remaining + 1e-9
+            assert connect <= CONNECT_TIMEOUT
+        assert seen[0][1] > seen[1][1] > seen[2][1]  # budgets shrink hop by hop
+
+    def test_no_request_is_sent_after_the_deadline(self, monkeypatch):
+        clock = [0.0]
+        monkeypatch.setattr("asm.prober.time.perf_counter", lambda: clock[0])
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url)
+            clock[0] += TOTAL_URL_TIMEOUT + 1  # the first hop eats the whole budget
+            return httpx.Response(302, headers={"Location": "/next"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        result = probe_url("https://api.example.com/", "example.com", client)
+
+        assert len(calls) == 1
+        assert result.reachable is False

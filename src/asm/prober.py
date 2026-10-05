@@ -56,6 +56,27 @@ class DeadlineExceeded(Exception):
     """Raised when the 10-second end-to-end deadline for probing a URL is exceeded."""
 
 
+def hop_timeout(deadline: float) -> httpx.Timeout:
+    """Per-request timeout that keeps connect + response headers within the deadline.
+
+    httpx timeouts apply to each network operation separately, so a request built
+    with the client's fixed 10 s timeout could connect for 5 s and then wait 10 s
+    for headers, on every redirect hop. Here the time left is split in half:
+    connecting (at most CONNECT_TIMEOUT) and reading the headers each get half,
+    so together they cannot pass the deadline. Body reads are also checked against
+    the deadline between chunks; one chunk read can still overrun it by at most
+    half of the time that was left (worst case 1.5 x TOTAL_URL_TIMEOUT overall).
+
+    Raises:
+        DeadlineExceeded: If no time is left.
+    """
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        raise DeadlineExceeded("10s total deadline exceeded before request dispatch")
+    half = remaining / 2
+    return httpx.Timeout(half, connect=min(CONNECT_TIMEOUT, half))
+
+
 def _find_exception_in_chain(
     exc: BaseException | None,
     target_type: type[BaseException],
@@ -260,12 +281,12 @@ def _execute_single_url_probe(
     original_host = urllib.parse.urlsplit(target_url).hostname
 
     while True:
-        if time.perf_counter() > deadline:
-            raise DeadlineExceeded("10s total deadline exceeded before request dispatch")
-
+        timeout = hop_timeout(deadline)
         start_time = time.perf_counter()
 
-        with client.stream("GET", current_url, follow_redirects=False) as response:
+        with client.stream(
+            "GET", current_url, follow_redirects=False, timeout=timeout
+        ) as response:
             response_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
             body_bytes = _stream_and_read_body(response, deadline)
 
