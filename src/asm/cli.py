@@ -1,4 +1,4 @@
-"""Command-line interface (CLI) for ASM SaaS."""
+"""Command-line interface (CLI) for Exposight."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Construct the command-line argument parser."""
     parser = argparse.ArgumentParser(
         prog="asm",
-        description="ASM SaaS - Attack Surface Management CLI",
+        description="Exposight - Attack Surface Management CLI",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -425,9 +425,7 @@ def handle_probe(report_file_arg: str, authorized: bool, output_dir_arg: str) ->
             and not (r.https is not None and r.https.reachable)
         )
     )
-    unreachable = sum(
-        1 for r in results if r.status == HostProbeStatus.PROBED.value and not r.live
-    )
+    unreachable = sum(1 for r in results if r.status == HostProbeStatus.PROBED.value and not r.live)
     tls_invalid = sum(1 for r in results if r.https is not None and r.https.tls_valid is False)
     skipped_untrusted = sum(
         1 for r in results if r.status == HostProbeStatus.SKIPPED_UNTRUSTED.value
@@ -487,9 +485,7 @@ def handle_probe(report_file_arg: str, authorized: bool, output_dir_arg: str) ->
         print("\n=== Live Hosts ===")
         for host_res in live_hosts:
             active_url_res = (
-                host_res.https
-                if (host_res.https and host_res.https.reachable)
-                else host_res.http
+                host_res.https if (host_res.https and host_res.https.reachable) else host_res.http
             )
             if active_url_res is not None:
                 url_display = active_url_res.final_url or active_url_res.url

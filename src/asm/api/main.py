@@ -1,4 +1,4 @@
-"""Main FastAPI application entrypoint for ASM SaaS."""
+"""Main FastAPI application entrypoint for Exposight."""
 
 import logging
 from contextlib import asynccontextmanager
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ASM SaaS API",
+    title="Exposight API",
     description="Attack Surface Management REST API - Reconnaissance & Surface Monitoring",
     version="0.2.0",
     lifespan=lifespan,

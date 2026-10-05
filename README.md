@@ -1,6 +1,6 @@
 ![CI](https://github.com/vigneshs-17/asm-saas/actions/workflows/ci.yml/badge.svg)
 
-# ASM SaaS - Attack Surface Management CLI
+# Exposight - Attack Surface Management CLI
 
 A lightweight, modular, and defensible Attack Surface Management (ASM) reconnaissance tool designed for cybersecurity engineers and students.
 
@@ -136,7 +136,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/output:/app/output" asm-sa
 
 ## Run the API (v2, local only)
 
-In v2, ASM SaaS expands into a modular reconnaissance service featuring a FastAPI REST API backed by PostgreSQL and SQLAlchemy 2.0.
+In v2, Exposight expands into a modular reconnaissance service featuring a FastAPI REST API backed by PostgreSQL and SQLAlchemy 2.0.
 
 ### 1. Environment Configuration
 Create a local `.env` configuration file from the template:

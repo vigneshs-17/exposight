@@ -100,6 +100,10 @@ def test_landing_page_content_invariants():
             expected_txt = escape(get_expected_record_value("<your-token>"))
             assert expected_txt in html
 
+            # Brand checks
+            assert "Exposight" in html
+            assert "ASM SaaS" not in html
+
             # Banned copy checks
             assert "tamper" not in html.lower()
             assert "v3.5" not in html

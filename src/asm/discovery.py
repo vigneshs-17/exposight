@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 CRTSH_BASE_URL = "https://crt.sh"
 CERTSPOTTER_BASE_URL = "https://api.certspotter.com/v1/issuances"
-USER_AGENT = "asm-saas/0.1 (student project)"
+USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/asm-saas)"
 REQUEST_TIMEOUT = 30.0
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = [1, 2]  # Wait 1s after attempt 1, 2s after attempt 2
@@ -483,9 +483,7 @@ def discover_subdomains(
             fallback_reason,
         )
         try:
-            cs_entries, truncated = fetch_certspotter_data(
-                domain, client=client, api_key=api_key
-            )
+            cs_entries, truncated = fetch_certspotter_data(domain, client=client, api_key=api_key)
             adapted_records = transform_certspotter_to_raw_records(cs_entries)
             subdomains = parse_subdomains(adapted_records, domain)
             return subdomains, "certspotter", fallback_reason, truncated
