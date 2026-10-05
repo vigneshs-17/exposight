@@ -68,7 +68,10 @@ def test_gate_failure_mid_scan_keeps_succeeded_stage(lifecycle_client, lifecycle
 @pytest.fixture
 def scratch_db_url():
     """A throwaway database (name ends in _test) for running the real Alembic chain."""
-    base = make_url(os.environ["TEST_DATABASE_URL"])
+    test_db_url = os.getenv("TEST_DATABASE_URL")
+    if not test_db_url:
+        pytest.skip("TEST_DATABASE_URL not set; skipping database integration tests")
+    base = make_url(test_db_url)
     name = "exposight_downgrade_guard_test"
     admin = sa.create_engine(base.set(database="postgres"), isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
