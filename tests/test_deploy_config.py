@@ -154,7 +154,7 @@ def test_env_production_example_variables_and_no_secrets():
 
 
 def test_caddyfile_content_invariants():
-    """Caddyfile must only contain {$DOMAIN} reverse_proxy api:8000 and not set CSP/HSTS."""
+    """Caddyfile proxies {$DOMAIN} to api:8000, adds only HSTS, and never touches CSP."""
     caddyfile_path = REPO_ROOT / "Caddyfile"
     assert caddyfile_path.is_file(), "Caddyfile must exist"
 
@@ -162,8 +162,13 @@ def test_caddyfile_content_invariants():
     assert "{$DOMAIN}" in content
     assert "reverse_proxy api:8000" in content
 
-    # Must NOT set or override CSP or HSTS headers (FastAPI manages CSP & HSTS)
+    # The app sets CSP itself, so Caddy must never set or override it.
     lower_content = content.lower()
     assert "content-security-policy" not in lower_content
-    assert "strict-transport-security" not in lower_content
-    assert "header" not in lower_content
+    # The app does NOT set HSTS, so Caddy (the HTTPS edge) must add it.
+    assert 'header strict-transport-security "max-age=31536000"' in lower_content
+    # HSTS is the only header directive Caddy is allowed to set.
+    header_lines = [
+        ln.strip() for ln in lower_content.splitlines() if ln.strip().startswith("header ")
+    ]
+    assert len(header_lines) == 1, f"Caddy must only add HSTS, found: {header_lines}"
