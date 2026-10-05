@@ -479,3 +479,75 @@ class TestInspectStreamingAndSSRF:
         assert report.counts["skipped_unresolved"] == 1
         assert report.counts["skipped_private_ip"] == 0
         assert report.results[0].status == HostProbeStatus.SKIPPED_UNRESOLVED.value
+
+
+class TestInspectDeadlineCoversConnectAndHeaders:
+    """v3.6c B-3: inspect_single_host uses the same per-hop deadline budget as the prober."""
+
+    def test_each_hop_timeout_fits_remaining_time(self, monkeypatch) -> None:
+        import httpx
+
+        clock = [500.0]
+        monkeypatch.setattr("time.perf_counter", lambda: clock[0])
+        seen: list[tuple[float, float, float]] = []
+        deadline = 500.0 + 10.0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            t = request.extensions["timeout"]
+            seen.append((t["connect"], t["read"], deadline - clock[0]))
+            clock[0] += 3.0
+            if len(seen) < 3:
+                return httpx.Response(
+                    302, headers={"Location": f"/hop{len(seen)}"}, stream=httpx.ByteStream(b"")
+                )
+            return httpx.Response(
+                200, headers={"X-Frame-Options": "DENY"}, stream=httpx.ByteStream(b"")
+            )
+
+        real_client = httpx.Client
+
+        def mock_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        with (
+            patch("asm.headers_inspect.httpx.Client", side_effect=mock_client),
+            patch(
+                "asm.headers_inspect.connect_and_inspect_cert_socket", return_value=None
+            ) as fallback,
+        ):
+            res = inspect_single_host("test.example.com", "example.com", total_deadline=10.0)
+
+        assert len(seen) == 3
+        for connect, read, remaining in seen:
+            assert connect + read <= remaining + 1e-9
+        assert seen[0][1] > seen[1][1] > seen[2][1]
+        assert res.headers is not None
+        # The certificate fallback gets at most the time that is left (1 s here).
+        assert fallback.call_args.kwargs["timeout"] <= 1.0 + 1e-9
+
+    def test_socket_fallback_skipped_after_deadline(self, monkeypatch) -> None:
+        import httpx
+
+        clock = [0.0]
+        monkeypatch.setattr("time.perf_counter", lambda: clock[0])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            clock[0] += 20.0  # the first request uses up the whole budget
+            return httpx.Response(
+                200, headers={"X-Frame-Options": "DENY"}, stream=httpx.ByteStream(b"")
+            )
+
+        real_client = httpx.Client
+
+        def mock_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_client(*args, **kwargs)
+
+        with (
+            patch("asm.headers_inspect.httpx.Client", side_effect=mock_client),
+            patch("asm.headers_inspect.connect_and_inspect_cert_socket") as fallback,
+        ):
+            inspect_single_host("test.example.com", "example.com", total_deadline=10.0)
+
+        fallback.assert_not_called()

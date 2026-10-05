@@ -56,7 +56,7 @@ class DeadlineExceeded(Exception):
     """Raised when the 10-second end-to-end deadline for probing a URL is exceeded."""
 
 
-def hop_timeout(deadline: float) -> httpx.Timeout:
+def hop_timeout(deadline: float, connect_cap: float = CONNECT_TIMEOUT) -> httpx.Timeout:
     """Per-request timeout that keeps connect + response headers within the deadline.
 
     httpx timeouts apply to each network operation separately, so a request built
@@ -67,6 +67,8 @@ def hop_timeout(deadline: float) -> httpx.Timeout:
     the deadline between chunks; one chunk read can still overrun it by at most
     half of the time that was left (worst case 1.5 x TOTAL_URL_TIMEOUT overall).
 
+    Also used by headers_inspect.inspect_single_host for the same reason.
+
     Raises:
         DeadlineExceeded: If no time is left.
     """
@@ -74,7 +76,7 @@ def hop_timeout(deadline: float) -> httpx.Timeout:
     if remaining <= 0:
         raise DeadlineExceeded("10s total deadline exceeded before request dispatch")
     half = remaining / 2
-    return httpx.Timeout(half, connect=min(CONNECT_TIMEOUT, half))
+    return httpx.Timeout(half, connect=min(connect_cap, half))
 
 
 def _find_exception_in_chain(

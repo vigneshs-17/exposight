@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from asm.models import CertInfo, HeaderInfo, HostInspectResult, HostProbeStatus, InspectReport
+from asm.prober import DeadlineExceeded, hop_timeout
 from asm.scan_common import (
     UNRESOLVED_REASON_PREFIX,
     check_host_for_ssrf,
@@ -203,6 +204,7 @@ def inspect_single_host(
         HostInspectResult.
     """
     start_time = time.perf_counter()
+    deadline = start_time + total_deadline
     headers_info: HeaderInfo | None = None
     cert_info: CertInfo | None = None
     initial_url = f"https://{hostname}/"
@@ -224,11 +226,11 @@ def inspect_single_host(
             redirect_hops = 0
 
             while redirect_hops <= MAX_REDIRECTS:
-                if (time.perf_counter() - start_time) > total_deadline:
-                    raise TimeoutError(f"Inspection deadline of {total_deadline}s exceeded")
-
                 next_url: str | None = None
-                with client.stream("GET", current_url) as resp:
+                # Connect + headers of every hop must fit in the time left (not the
+                # client's fixed per-operation timeouts); raises once time is up.
+                timeout = hop_timeout(deadline, connect_cap=timeout_config.connect or 5.0)
+                with client.stream("GET", current_url, timeout=timeout) as resp:
                     _drain_capped(resp, start_time, total_deadline)
 
                     if redirect_hops == 0:
@@ -269,7 +271,7 @@ def inspect_single_host(
         else:
             logger.debug("Connect failed on %s: %s", hostname, conn_err)
 
-    except (httpx.TimeoutException, TimeoutError) as t_err:
+    except (httpx.TimeoutException, TimeoutError, DeadlineExceeded) as t_err:
         logger.debug("Timeout connecting to %s: %s", hostname, t_err)
 
     except Exception as exc:
@@ -279,10 +281,10 @@ def inspect_single_host(
     # while each streamed response is still open.
 
     # Step C: Fallback to direct ssl+socket connection if cert could not be read from response
-    if cert_info is None:
+    remaining_time = deadline - time.perf_counter()
+    if cert_info is None and remaining_time > 0:
         # Either the verified GET failed with TLS error, stream read returned None/empty,
-        # or GET timed out
-        remaining_time = max(1.0, total_deadline - (time.perf_counter() - start_time))
+        # or GET timed out. Skipped entirely once the deadline has passed.
         cert_info = connect_and_inspect_cert_socket(
             hostname=hostname,
             port=443,
@@ -292,10 +294,7 @@ def inspect_single_host(
     # Step D: If verified request failed due to TLS error, try unverified GET to still get headers
     if headers_info is None and last_verify_error is not None:
         try:
-            remaining_time = max(1.0, total_deadline - (time.perf_counter() - start_time))
-            unverified_timeout = httpx.Timeout(
-                min(5.0, remaining_time), connect=min(3.0, remaining_time)
-            )
+            unverified_timeout = hop_timeout(deadline, connect_cap=3.0)
             with httpx.Client(
                 timeout=unverified_timeout,
                 follow_redirects=False,

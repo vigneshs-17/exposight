@@ -554,6 +554,8 @@ class ScoreReport:
         domain_band: Domain-wide severity band derived from host bands.
         counts: Summary statistics of findings by tier and host counts by band.
         hosts: List of HostScore entries sorted worst-first.
+        domain_findings: Findings about the domain as a whole (e.g. LARGE_ATTACK_SURFACE),
+            not tied to any one host, so they survive when the apex is not a host.
     """
 
     domain: str
@@ -563,6 +565,7 @@ class ScoreReport:
     domain_band: str
     counts: dict[str, int] = field(default_factory=dict)
     hosts: list[HostScore] = field(default_factory=list)
+    domain_findings: list[Finding] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert ScoreReport to dictionary for JSON export."""
@@ -574,4 +577,5 @@ class ScoreReport:
             "domain_band": self.domain_band,
             "counts": self.counts,
             "hosts": [h.to_dict() for h in self.hosts],
+            "domain_findings": [f.to_dict() for f in self.domain_findings],
         }

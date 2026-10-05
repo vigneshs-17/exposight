@@ -799,11 +799,14 @@ Hosts: 4 total (0 Critical, 2 High, 2 Medium, 0 Low, 0 Info)
    Rather than comparing raw report fields, portscan and inspect changes are derived by diffing findings produced by `src/asm/scoring.py` finding evaluators.
    - **Exposure Additions**: Take the exact severity tier (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`) of the finding they introduce.
    - **Exposure Reductions**: Are assigned `INFO` severity. A baseline finding is considered resolved only if the host was successfully evaluated in the new scan (`status == "PROBED"`).
+   - **Both scans must have inspected the host**: new TLS/header findings become changes only when the host was inspected successfully (`PROBED`) in the baseline *and* the new scan. A host that is new, or was unreachable last time, gets no "removed" or "weakened" changes; its findings still appear in the scan's risk report.
+   - **Weak HSTS is `SECURITY_HEADER_WEAKENED`** (since v3.6c): a header that is still present but weak is not "removed". Going from missing to weak HSTS is reported as `SECURITY_HEADER_ADDED`. Changes stored before v3.6c keep their original type (`SECURITY_HEADER_REMOVED`); the API, dashboard and alert emails display both types as stored.
 4. **"Unknown" is Not "Absent"**:
    Reconnaissance failures or non-definitive states never generate removal changes:
    - A DNS `TIMEOUT` or `ERROR` does not emit `STOPPED_RESOLVING` (only a definite `RESOLVED` $\rightarrow$ `NXDOMAIN` transition does).
    - An unreachable host or `FILTERED` port does not emit `PORT_NO_LONGER_OPEN` (only `OPEN` $\rightarrow$ `CLOSED` does).
    - A probe timeout does not emit `HTTPS_LOST` (only non-timeout connection/TLS errors do).
+   - `HTTPS_LOST` also requires that the baseline scan reached the host over HTTPS; a new host, or one whose HTTPS was already unreachable, is not a loss.
 5. **Source Awareness & Truncation Safety**:
    Subdomain removals (`REMOVED_SUBDOMAIN`) are evaluated **only** when both baseline and new scans used the same Certificate Transparency source (e.g. `crt.sh` vs `certspotter`) and neither report was truncated (`truncated: false`). If sources differ or either was truncated, removal detection is safely skipped with a descriptive `skip_reason`.
 6. **Atomic & Resilient Finalization**:

@@ -356,6 +356,27 @@
 - **Fix:** The same `refuse_lossy_downgrade` guard now protects downgrading `0011` (drops `org_invites`) and `0009` (drops `audit_events`) when those tables have rows.
 - **Evidence:** real Alembic chain on a scratch database: refused without `ALLOW_DATA_LOSS_DOWNGRADE=1`, allowed with it.
 
+### Entry BE: v3.6c B-3 — Change Detection Reported Losses With No Baseline
+- **What happened:** `HTTPS_LOST` fired for any host whose new probe showed HTTP-only without HTTPS, including hosts that were new in this scan or already unreachable over HTTPS in the baseline, while recording `previous_state: https_reachable True`. New TLS/header findings were diffed for every host in the new scan, so a newly discovered host produced `SECURITY_HEADER_REMOVED` for headers it never had.
+- **Fix:** `HTTPS_LOST` requires the baseline probe to show `https.reachable is True`. New inspect findings become changes only when the host was `PROBED` in both scans (`_was_probed`).
+- **Evidence:** `tests/test_b3_changes_scoring.py`; reverting gives `assert 'HTTPS_LOST' not in ['HTTPS_LOST']` and `assert [{'change_typ...}] == []`.
+
+### Entry BF: v3.6c B-3 — Weak HSTS Reported as "Removed"
+- **What happened:** `HEADER_WEAK_HSTS` mapped to `SECURITY_HEADER_REMOVED` although the header was still sent.
+- **Fix:** new change type `SECURITY_HEADER_WEAKENED` (D2). Missing -> weak HSTS is an addition (`SECURITY_HEADER_ADDED` from the resolved-finding path), not a weakening.
+- **Compatibility:** `change_type` is stored as free text with no enum or check constraint, and the API, dashboard template and alert digest print it as stored, so rows written before v3.6c keep `SECURITY_HEADER_REMOVED` and display correctly next to the new type. `tests/test_b3_change_type_compat_db.py` stores both kinds in one scan and checks the scan and domain change APIs (including the `change_type` filter), the scan detail page and the alert rule + email digest. These are regression guards: they would also have passed before B-3, so they have no revert proof.
+
+### Entry BG: v3.6c B-3 — LARGE_ATTACK_SURFACE Disappeared When the Apex Was Not a Host
+- **What happened:** The finding was attached only to the host equal to the apex domain; when discovery returned subdomains only, it was silently dropped.
+- **Fix:** score reports have a `domain_findings` list (D3); the finding always goes there, counts and `domain_score` include it, and `extract_fix_first_findings` shows it with the domain as host. Older stored reports without the key render unchanged.
+- **Evidence:** reverting either the scoring or the UI part fails `test_large_attack_surface_kept_when_apex_not_discovered`.
+
+### Entry BH: v3.6c B-3 — Header Inspection Deadline Ignored Connect and Headers
+- **What happened:** Same flaw as the prober (Entry BB): `inspect_single_host` checked its 10 s deadline only between hops, each request used fixed timeouts, and the certificate fallback was always granted at least 1 s even after the deadline (`max(1.0, ...)`).
+- **Fix:** each hop and the unverified-headers request use `prober.hop_timeout` (now with a `connect_cap` parameter); the socket fallback is skipped once no time is left.
+- **Evidence:** fake-clock tests: reverting gives `assert (5.0 + 10.0) <= (10.0 + 1e-09)` and `Expected 'connect_and_inspect_cert_socket' to not have been called. Called 1 times.`
+- **Test scaffolding note:** `httpx.MockTransport` responses built with `content=` are already read, and the code streams them, so the first test run failed with "content has already been streamed"; the tests use `httpx.ByteStream`.
+
 ---
 
 ## Architectural Decisions
@@ -474,6 +495,7 @@
 - v3.6b A-2 terms correction: 579 -> 586 passed (+7).
 - v3.6c B-1: default suite 586 -> 601 passed (+15); browser 16 passed; 9 revert proofs failed on assertions and restored byte-identical.
 - v3.6c B-2: default suite 601 -> 618 passed (+17); browser 16 passed; 9 revert proofs failed on assertions (2 after test corrections) and restored byte-identical.
+- v3.6c B-3: default suite 618 -> 635 passed (+17); browser 16 passed; 8 revert proofs failed on assertions and restored byte-identical; 3 compatibility guards (no revert proof possible).
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.

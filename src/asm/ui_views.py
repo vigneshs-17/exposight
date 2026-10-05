@@ -106,46 +106,53 @@ def extract_fix_first_findings(score_report: dict[str, Any] | None) -> FixFirstR
 
     all_findings: list[FormattedFinding] = []
     hosts = score_report.get("hosts", [])
-    if isinstance(hosts, list):
-        for host_entry in hosts:
-            if not isinstance(host_entry, dict):
+    groups: list[dict[str, Any]] = (
+        [h for h in hosts if isinstance(h, dict)] if isinstance(hosts, list) else []
+    )
+    # Domain-wide findings (v3.6c+); older reports have no such key and are unaffected.
+    groups.append(
+        {
+            "subdomain": score_report.get("domain") or "",
+            "findings": score_report.get("domain_findings") or [],
+        }
+    )
+    for host_entry in groups:
+        default_host = str(host_entry.get("subdomain") or host_entry.get("host") or "")
+        findings_list = host_entry.get("findings", [])
+        if not isinstance(findings_list, list):
+            continue
+        for item in findings_list:
+            if not isinstance(item, dict):
                 continue
-            default_host = str(host_entry.get("subdomain") or host_entry.get("host") or "")
-            findings_list = host_entry.get("findings", [])
-            if not isinstance(findings_list, list):
-                continue
-            for item in findings_list:
-                if not isinstance(item, dict):
-                    continue
-                raw_tier = str(item.get("tier", "INFO")).upper()
-                tier_display = TIER_DISPLAY_NAMES.get(raw_tier, raw_tier.capitalize())
-                raw_points = item.get("points", 0)
+            raw_tier = str(item.get("tier", "INFO")).upper()
+            tier_display = TIER_DISPLAY_NAMES.get(raw_tier, raw_tier.capitalize())
+            raw_points = item.get("points", 0)
+            try:
+                points = int(raw_points)
+            except (ValueError, TypeError):
+                points = 0
+
+            host = str(item.get("host") or default_host)
+            port = item.get("port")
+            if port is not None:
                 try:
-                    points = int(raw_points)
+                    port = int(port)
                 except (ValueError, TypeError):
-                    points = 0
+                    port = None
 
-                host = str(item.get("host") or default_host)
-                port = item.get("port")
-                if port is not None:
-                    try:
-                        port = int(port)
-                    except (ValueError, TypeError):
-                        port = None
-
-                all_findings.append(
-                    FormattedFinding(
-                        id=str(item.get("id", "")),
-                        title=str(item.get("title", "")),
-                        tier=raw_tier,
-                        tier_display=tier_display,
-                        points=points,
-                        host=host,
-                        port=port,
-                        evidence=str(item.get("evidence", "")),
-                        why_it_matters=str(item.get("why_it_matters", "")),
-                    )
+            all_findings.append(
+                FormattedFinding(
+                    id=str(item.get("id", "")),
+                    title=str(item.get("title", "")),
+                    tier=raw_tier,
+                    tier_display=tier_display,
+                    points=points,
+                    host=host,
+                    port=port,
+                    evidence=str(item.get("evidence", "")),
+                    why_it_matters=str(item.get("why_it_matters", "")),
                 )
+            )
 
     counts = dict.fromkeys(TIER_ORDER, 0)
     for finding in all_findings:

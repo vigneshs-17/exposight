@@ -41,7 +41,9 @@ FINDING_TO_CHANGE_TYPE: dict[str, str] = {
     "TLS_HOSTNAME_MISMATCH": "CERTIFICATE_HOSTNAME_MISMATCH",
     "TLS_CERT_EXPIRING_SOON": "CERTIFICATE_EXPIRING_SOON",
     "HEADER_MISSING_HSTS": "SECURITY_HEADER_REMOVED",
-    "HEADER_WEAK_HSTS": "SECURITY_HEADER_REMOVED",
+    # A weak HSTS header is still present: it was weakened, not removed. Changes stored
+    # before v3.6c keep their old SECURITY_HEADER_REMOVED type and still display as-is.
+    "HEADER_WEAK_HSTS": "SECURITY_HEADER_WEAKENED",
     "HEADER_MISSING_CSP": "SECURITY_HEADER_REMOVED",
     "HEADER_MISSING_X_FRAME_OPTIONS": "SECURITY_HEADER_REMOVED",
     "HEADER_MISSING_X_CONTENT_TYPE": "SECURITY_HEADER_REMOVED",
@@ -88,6 +90,11 @@ def evaluate_removal_eligibility(
         return False, "New discovery report was truncated"
 
     return True, None
+
+
+def _was_probed(inspect_entry: dict[str, Any] | None) -> bool:
+    """Return True if an inspect result entry shows the host was actually inspected."""
+    return bool(inspect_entry) and str(inspect_entry.get("status", "")).upper() == "PROBED"
 
 
 def _get_inspect_detail(finding: Finding) -> str:
@@ -221,6 +228,11 @@ def detect_changes(
         for r in new_reports.get("probe", {}).get("results", [])
         if "subdomain" in r
     }
+    base_probe_hosts = {
+        r["subdomain"]: r
+        for r in baseline_reports.get("probe", {}).get("results", [])
+        if "subdomain" in r
+    }
 
     base_port_hosts = {
         r["subdomain"]: r
@@ -267,6 +279,11 @@ def detect_changes(
         base_f_ids = {f.id for f in base_probe_findings.get(host, [])}
         for finding in n_findings:
             if finding.id == "HTTP_NO_HTTPS" and finding.id not in base_f_ids:
+                # HTTPS can only be "lost" if the baseline really reached it over HTTPS.
+                # New hosts and hosts unreachable in the baseline are not losses.
+                base_https = (base_probe_hosts.get(host) or {}).get("https") or {}
+                if base_https.get("reachable") is not True:
+                    continue
                 # Rule 5: HTTPS_LOST only on definite failure, never on a timeout
                 https_probe = new_probe_hosts.get(host, {}).get("https") or {}
                 error_type = https_probe.get("error_type")
@@ -345,15 +362,24 @@ def detect_changes(
                     })
 
     # C. Inspect Changes (TLS & Headers)
-    # 1. New findings present only in new scan
+    # 1. New findings present only in new scan.
+    # Only hosts inspected successfully (PROBED) in BOTH scans are compared: a host that
+    # is new, or was unreachable last time, has no baseline to have "lost" anything from.
     for host, n_findings in new_inspect_findings.items():
-        base_f_keys = {
-            (f.id, _get_inspect_detail(f)) for f in base_inspect_findings.get(host, [])
-        }
+        if not (_was_probed(base_insp_hosts.get(host)) and _was_probed(new_insp_hosts.get(host))):
+            continue
+        base_findings_for_host = base_inspect_findings.get(host, [])
+        base_f_keys = {(f.id, _get_inspect_detail(f)) for f in base_findings_for_host}
         for finding in n_findings:
             detail = _get_inspect_detail(finding)
             key = (finding.id, detail)
             if key not in base_f_keys:
+                if finding.id == "HEADER_WEAK_HSTS" and any(
+                    f.id == "HEADER_MISSING_HSTS" for f in base_findings_for_host
+                ):
+                    # Missing -> weak is an addition (reported as SECURITY_HEADER_ADDED
+                    # below), not a weakening.
+                    continue
                 change_type = FINDING_TO_CHANGE_TYPE.get(finding.id)
                 if change_type:
                     changes.append({

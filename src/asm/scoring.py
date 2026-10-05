@@ -732,12 +732,13 @@ def score_domain_payloads(
         for h in inspect_findings_map:
             all_hosts.add(h.lower())
 
-    # Check for large attack surface (domain observation)
-    large_attack_surface_finding: Finding | None = None
+    # Domain-wide observations are reported once, at domain level, whether or not
+    # the apex itself is one of the hosts.
+    domain_findings: list[Finding] = []
     if len(all_hosts) >= LARGE_ATTACK_SURFACE_THRESHOLD:
         evidence = f"Domain has {len(all_hosts)} discovered host assets."
-        large_attack_surface_finding = create_finding(
-            "LARGE_ATTACK_SURFACE", target_domain, "discover", evidence
+        domain_findings.append(
+            create_finding("LARGE_ATTACK_SURFACE", target_domain, "discover", evidence)
         )
 
     # 2. Compile findings per host
@@ -748,10 +749,6 @@ def score_domain_payloads(
         host_findings.extend(probe_findings_map.get(host, []))
         host_findings.extend(portscan_findings_map.get(host, []))
         host_findings.extend(inspect_findings_map.get(host, []))
-
-        # Attach large attack surface finding to root domain if present
-        if large_attack_surface_finding and host == target_domain:
-            host_findings.append(large_attack_surface_finding)
 
         # Sort findings within host: highest tier first, then points desc, then id
         host_findings.sort(
@@ -778,7 +775,10 @@ def score_domain_payloads(
 
     # 4. Derive domain band and summary counts
     domain_band, is_escalated = derive_domain_band(evaluated_hosts)
-    total_domain_score = sum(h.score for h in evaluated_hosts)
+    total_domain_score = sum(h.score for h in evaluated_hosts) + sum(
+        f.points for f in domain_findings
+    )
+    every_finding = [f for h in evaluated_hosts for f in h.findings] + domain_findings
 
     counts = {
         "hosts_evaluated": len(evaluated_hosts),
@@ -788,20 +788,12 @@ def score_domain_payloads(
         "hosts_low": sum(1 for h in evaluated_hosts if h.band == SeverityTier.LOW.value),
         "hosts_info": sum(1 for h in evaluated_hosts if h.band == SeverityTier.INFO.value),
         "findings_critical": sum(
-            1 for h in evaluated_hosts for f in h.findings if f.tier == SeverityTier.CRITICAL.value
+            1 for f in every_finding if f.tier == SeverityTier.CRITICAL.value
         ),
-        "findings_high": sum(
-            1 for h in evaluated_hosts for f in h.findings if f.tier == SeverityTier.HIGH.value
-        ),
-        "findings_medium": sum(
-            1 for h in evaluated_hosts for f in h.findings if f.tier == SeverityTier.MEDIUM.value
-        ),
-        "findings_low": sum(
-            1 for h in evaluated_hosts for f in h.findings if f.tier == SeverityTier.LOW.value
-        ),
-        "findings_info": sum(
-            1 for h in evaluated_hosts for f in h.findings if f.tier == SeverityTier.INFO.value
-        ),
+        "findings_high": sum(1 for f in every_finding if f.tier == SeverityTier.HIGH.value),
+        "findings_medium": sum(1 for f in every_finding if f.tier == SeverityTier.MEDIUM.value),
+        "findings_low": sum(1 for f in every_finding if f.tier == SeverityTier.LOW.value),
+        "findings_info": sum(1 for f in every_finding if f.tier == SeverityTier.INFO.value),
         "high_escalation": 1 if is_escalated else 0,
     }
 
@@ -815,4 +807,5 @@ def score_domain_payloads(
         domain_band=domain_band,
         counts=counts,
         hosts=evaluated_hosts,
+        domain_findings=domain_findings,
     )
