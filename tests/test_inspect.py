@@ -23,6 +23,14 @@ from asm.tls_inspect import (
 )
 
 
+def _stream_cm(response: MagicMock) -> MagicMock:
+    """Wrap a mock response so it can stand in for ``httpx.Client.stream(...)``."""
+    cm = MagicMock()
+    cm.__enter__.return_value = response
+    cm.__exit__.return_value = False
+    return cm
+
+
 class TestTLSCertificateParsing:
     """Test suite for parsing getpeercert() dictionaries and evaluating flags."""
 
@@ -261,7 +269,7 @@ class TestSingleHostInspectionAndFallbacks:
             "Strict-Transport-Security": "max-age=31536000",
             "Content-Security-Policy": "default-src 'self'",
         }
-        mock_response.read.return_value = b"<html>Test</html>"
+        mock_response.iter_raw.return_value = [b"<html>Test</html>"]
 
         mock_stream = MagicMock()
         mock_ssl_sock = MagicMock()
@@ -276,7 +284,7 @@ class TestSingleHostInspectionAndFallbacks:
         mock_stream.get_extra_info.return_value = mock_ssl_sock
         mock_response.extensions = {"network_stream": mock_stream}
 
-        with patch("httpx.Client.get", return_value=mock_response):
+        with patch("httpx.Client.stream", return_value=_stream_cm(mock_response)):
             res = inspect_single_host("test.example.com", "example.com")
 
         assert res.status == HostProbeStatus.PROBED.value
@@ -291,7 +299,7 @@ class TestSingleHostInspectionAndFallbacks:
         mock_response = MagicMock()
         mock_response.is_redirect = False
         mock_response.headers = {"X-Frame-Options": "DENY"}
-        mock_response.read.return_value = b""
+        mock_response.iter_raw.return_value = [b""]
 
         mock_stream = MagicMock()
         mock_ssl_sock = MagicMock()
@@ -304,7 +312,7 @@ class TestSingleHostInspectionAndFallbacks:
         fallback_cert.source = "from_socket"
 
         with (
-            patch("httpx.Client.get", return_value=mock_response),
+            patch("httpx.Client.stream", return_value=_stream_cm(mock_response)),
             patch(
                 "asm.headers_inspect.connect_and_inspect_cert_socket", return_value=fallback_cert
             ) as mock_fallback,
@@ -320,14 +328,14 @@ class TestSingleHostInspectionAndFallbacks:
         mock_response = MagicMock()
         mock_response.is_redirect = False
         mock_response.headers = {"X-Frame-Options": "DENY"}
-        mock_response.read.return_value = b""
+        mock_response.iter_raw.return_value = [b""]
         mock_response.extensions = {}  # No network_stream!
 
         fallback_cert = MagicMock()
         fallback_cert.source = "from_socket"
 
         with (
-            patch("httpx.Client.get", return_value=mock_response),
+            patch("httpx.Client.stream", return_value=_stream_cm(mock_response)),
             patch(
                 "asm.headers_inspect.connect_and_inspect_cert_socket", return_value=fallback_cert
             ) as mock_fallback,
@@ -341,7 +349,9 @@ class TestSingleHostInspectionAndFallbacks:
     def test_port_443_genuinely_closed_returns_null_cert(self) -> None:
         """User Requirement 2: Port 443 closed -> cert=None with clear reason, no hang."""
         with (
-            patch("httpx.Client.get", side_effect=ConnectionRefusedError("Connection refused")),
+            patch(
+                "httpx.Client.stream", side_effect=ConnectionRefusedError("Connection refused")
+            ),
             patch("asm.headers_inspect.connect_and_inspect_cert_socket", return_value=None),
         ):
             res = inspect_single_host("closed.example.com", "example.com")
@@ -356,7 +366,7 @@ class TestSingleHostInspectionAndFallbacks:
         mock_cert.source = "from_socket"
 
         with (
-            patch("httpx.Client.get", side_effect=Exception("Read timeout")),
+            patch("httpx.Client.stream", side_effect=Exception("Read timeout")),
             patch("asm.headers_inspect.connect_and_inspect_cert_socket", return_value=mock_cert),
         ):
             res = inspect_single_host("timeout.example.com", "example.com")
@@ -411,3 +421,61 @@ class TestRunInspectionWorkflowAndSafety:
         assert report.counts["skipped_not_https"] == 2
         assert report.results[0].status == HostProbeStatus.SKIPPED_NOT_HTTPS.value
         assert report.results[1].status == HostProbeStatus.SKIPPED_NOT_HTTPS.value
+
+
+class TestInspectStreamingAndSSRF:
+    """P1 hardening: bounded body reads, first-hop certificate, SSRF-checked redirects."""
+
+    def test_body_read_is_capped(self) -> None:
+        """A huge body is never read past MAX_RESPONSE_BYTES."""
+        consumed = {"chunks": 0}
+
+        def endless_body():
+            for _ in range(10_000):  # ~40 MB if fully read
+                consumed["chunks"] += 1
+                yield b"X" * 4096
+
+        mock_response = MagicMock()
+        mock_response.is_redirect = False
+        mock_response.headers = {"Strict-Transport-Security": "max-age=31536000"}
+        mock_response.iter_raw.return_value = endless_body()
+        mock_response.extensions = {}
+
+        with (
+            patch("httpx.Client.stream", return_value=_stream_cm(mock_response)),
+            patch("asm.headers_inspect.connect_and_inspect_cert_socket", return_value=None),
+        ):
+            res = inspect_single_host("big.example.com", "example.com")
+
+        assert consumed["chunks"] <= (65536 // 4096) + 1
+        assert res.headers is not None
+
+    def test_redirect_to_private_ip_host_is_not_followed(self) -> None:
+        """An in-scope redirect target that resolves to a metadata IP is never requested."""
+        first = MagicMock()
+        first.is_redirect = True
+        first.headers = {"location": "https://meta.example.com/", "X-Frame-Options": "DENY"}
+        first.iter_raw.return_value = [b""]
+        first.extensions = {}
+
+        with (
+            patch("httpx.Client.stream", return_value=_stream_cm(first)) as mock_stream,
+            patch("asm.scan_common.resolve_host_ips", return_value=["169.254.169.254"]),
+            patch("asm.headers_inspect.connect_and_inspect_cert_socket", return_value=None),
+        ):
+            res = inspect_single_host("sso.example.com", "example.com")
+
+        assert mock_stream.call_count == 1
+        assert res.headers is not None
+
+    def test_unresolved_host_reported_as_unresolved(self) -> None:
+        """run_inspection reports hosts with no DNS answer as SKIPPED_UNRESOLVED."""
+        probe_results = [
+            {"subdomain": "ghost.example.com", "status": "PROBED", "https": {"reachable": True}}
+        ]
+        with patch("asm.scan_common.resolve_host_ips", return_value=[]):
+            report = run_inspection(probe_results, "example.com", "test_report.json")
+
+        assert report.counts["skipped_unresolved"] == 1
+        assert report.counts["skipped_private_ip"] == 0
+        assert report.results[0].status == HostProbeStatus.SKIPPED_UNRESOLVED.value

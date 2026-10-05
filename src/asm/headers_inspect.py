@@ -13,12 +13,17 @@ import re
 import ssl
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
 from asm.models import CertInfo, HeaderInfo, HostInspectResult, HostProbeStatus, InspectReport
-from asm.scan_common import check_host_for_ssrf, validate_host_and_scope
+from asm.scan_common import (
+    UNRESOLVED_REASON_PREFIX,
+    check_host_for_ssrf,
+    is_redirect_target_safe,
+    validate_host_and_scope,
+)
 from asm.tls_inspect import connect_and_inspect_cert_socket, parse_cert_dict
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,46 @@ MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 65536
 USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/exposight)"
 HSTS_MIN_RECOMMENDED_MAX_AGE = 15552000  # 180 days in seconds
+# Ask for uncompressed bodies so the read cap bounds memory (no decompression blow-up).
+REQUEST_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
+
+
+def _drain_capped(response: httpx.Response, start_time: float, total_deadline: float) -> None:
+    """Read at most MAX_RESPONSE_BYTES of a streamed body, enforcing the total deadline.
+
+    The body itself is not needed; reading a bounded amount lets the connection settle
+    without ever buffering an attacker-sized response in memory.
+    """
+    read = 0
+    for chunk in response.iter_raw():
+        read += len(chunk)
+        if (time.perf_counter() - start_time) > total_deadline:
+            raise TimeoutError(f"Inspection deadline of {total_deadline}s exceeded")
+        if read >= MAX_RESPONSE_BYTES:
+            break
+
+
+def _cert_from_open_response(response: httpx.Response, hostname: str) -> CertInfo | None:
+    """Extract the peer certificate from a still-open HTTPS response, or None."""
+    try:
+        stream = response.extensions.get("network_stream")
+        ssl_object = stream.get_extra_info("ssl_object") if stream else None
+        if ssl_object is None:
+            return None
+        cert_dict = ssl_object.getpeercert()
+        if not cert_dict:
+            return None
+        return parse_cert_dict(
+            cert_dict=cert_dict,
+            hostname=hostname,
+            tls_version=ssl_object.version(),
+            is_trusted=True,
+            verify_error=None,
+            source="from_response",
+        )
+    except Exception as stream_err:
+        logger.debug("Could not read cert from network_stream on %s: %s", hostname, stream_err)
+        return None
 
 
 def parse_hsts_header(hsts_value: str | None) -> tuple[int | None, bool]:
@@ -162,9 +207,10 @@ def inspect_single_host(
     cert_info: CertInfo | None = None
     initial_url = f"https://{hostname}/"
 
-    # Step A: Attempt primary HTTPS GET with TLS verification enabled
-    headers = {"User-Agent": USER_AGENT}
-    response: httpx.Response | None = None
+    # Step A: Attempt primary HTTPS GET with TLS verification enabled.
+    # Responses are STREAMED: at most MAX_RESPONSE_BYTES are read per hop, and the
+    # certificate is taken from the FIRST hop (the host being inspected) while the
+    # connection is still open. Headers are taken from the last HTTPS response.
     last_verify_error: str | None = None
 
     try:
@@ -172,7 +218,7 @@ def inspect_single_host(
             timeout=timeout_config,
             follow_redirects=False,
             verify=True,
-            headers=headers,
+            headers=REQUEST_HEADERS,
         ) as client:
             current_url = initial_url
             redirect_hops = 0
@@ -181,22 +227,29 @@ def inspect_single_host(
                 if (time.perf_counter() - start_time) > total_deadline:
                     raise TimeoutError(f"Inspection deadline of {total_deadline}s exceeded")
 
-                resp = client.get(current_url)
+                next_url: str | None = None
+                with client.stream("GET", current_url) as resp:
+                    _drain_capped(resp, start_time, total_deadline)
 
-                # Read body up to 64KB
-                _ = resp.read()[:MAX_RESPONSE_BYTES]
-                response = resp
+                    if redirect_hops == 0:
+                        cert_info = _cert_from_open_response(resp, hostname)
+                    if current_url.lower().startswith("https://"):
+                        headers_info = extract_header_info(resp.headers)
 
-                # Handle manual in-scope redirects
-                has_loc = "location" in resp.headers
-                if resp.is_redirect and has_loc and redirect_hops < MAX_REDIRECTS:
-                    loc = resp.headers["location"]
-                    next_url = str(resp.url.join(loc))
-                    if is_redirect_in_scope(next_url, base_domain):
-                        current_url = next_url
-                        redirect_hops += 1
-                        continue
-                break
+                    has_loc = "location" in resp.headers
+                    if resp.is_redirect and has_loc and redirect_hops < MAX_REDIRECTS:
+                        next_url = urljoin(current_url, resp.headers["location"])
+
+                if next_url is None or not is_redirect_in_scope(next_url, base_domain):
+                    break
+                hop_safe, hop_reason = is_redirect_target_safe(next_url, hostname)
+                if not hop_safe:
+                    logger.info(
+                        "Redirect not followed for %s (SSRF guard): %s", hostname, hop_reason
+                    )
+                    break
+                current_url = next_url
+                redirect_hops += 1
 
     except httpx.ConnectError as conn_err:
         # Walk exception chain to detect underlying TLS verification failures
@@ -222,29 +275,8 @@ def inspect_single_host(
     except Exception as exc:
         logger.debug("Unexpected error connecting to %s: %s", hostname, exc)
 
-    # Step B: If verified GET succeeded, extract headers and attempt to extract cert from stream
-    if response is not None:
-        headers_info = extract_header_info(response.headers)
-
-        # Attempt to read cert from the underlying response network_stream
-        try:
-            stream = response.extensions.get("network_stream")
-            ssl_object = stream.get_extra_info("ssl_object") if stream else None
-            if ssl_object is not None:
-                cert_dict = ssl_object.getpeercert()
-                tls_version = ssl_object.version()
-                if cert_dict:
-                    cert_info = parse_cert_dict(
-                        cert_dict=cert_dict,
-                        hostname=hostname,
-                        tls_version=tls_version,
-                        is_trusted=True,
-                        verify_error=None,
-                        source="from_response",
-                    )
-        except Exception as stream_err:
-            logger.debug("Could not read cert from network_stream on %s: %s", hostname, stream_err)
-            cert_info = None
+    # Step B is folded into Step A: headers and the first-hop certificate are captured
+    # while each streamed response is still open.
 
     # Step C: Fallback to direct ssl+socket connection if cert could not be read from response
     if cert_info is None:
@@ -268,10 +300,11 @@ def inspect_single_host(
                 timeout=unverified_timeout,
                 follow_redirects=False,
                 verify=False,
-                headers=headers,
+                headers=REQUEST_HEADERS,
             ) as unverified_client:
-                unverified_resp = unverified_client.get(initial_url)
-                headers_info = extract_header_info(unverified_resp.headers)
+                with unverified_client.stream("GET", initial_url) as unverified_resp:
+                    _drain_capped(unverified_resp, start_time, total_deadline)
+                    headers_info = extract_header_info(unverified_resp.headers)
         except Exception as unverified_hdr_err:
             headers_info = HeaderInfo(error=f"Could not fetch headers: {unverified_hdr_err}")
 
@@ -319,6 +352,7 @@ def run_inspection(
     hosts_missing_hsts = 0
     skipped_untrusted = 0
     skipped_private_ip = 0
+    skipped_unresolved = 0
     skipped_not_https = 0
 
     for entry in probe_results:
@@ -355,11 +389,19 @@ def run_inspection(
         # 2. SSRF check
         is_safe, ssrf_reason = check_host_for_ssrf(validated_host)
         if not is_safe:
-            skipped_private_ip += 1
+            unresolved = (ssrf_reason or "").startswith(UNRESOLVED_REASON_PREFIX)
+            if unresolved:
+                skipped_unresolved += 1
+            else:
+                skipped_private_ip += 1
             results.append(
                 HostInspectResult(
                     subdomain=validated_host,
-                    status=HostProbeStatus.SKIPPED_PRIVATE_IP.value,
+                    status=(
+                        HostProbeStatus.SKIPPED_UNRESOLVED.value
+                        if unresolved
+                        else HostProbeStatus.SKIPPED_PRIVATE_IP.value
+                    ),
                     skip_reason=ssrf_reason,
                 )
             )
@@ -392,6 +434,7 @@ def run_inspection(
         "hosts_missing_hsts": hosts_missing_hsts,
         "skipped_untrusted": skipped_untrusted,
         "skipped_private_ip": skipped_private_ip,
+        "skipped_unresolved": skipped_unresolved,
         "skipped_not_https": skipped_not_https,
     }
 

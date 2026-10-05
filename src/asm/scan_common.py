@@ -8,12 +8,22 @@ import logging
 import unicodedata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import dns.resolver
 
 from asm.validators import DomainValidationError, validate_domain
 
 logger = logging.getLogger(__name__)
+
+# Reason prefix returned by check_host_for_ssrf when a host has no A/AAAA answer.
+# Callers use it to report SKIPPED_UNRESOLVED instead of SKIPPED_PRIVATE_IP.
+UNRESOLVED_REASON_PREFIX = "Host did not resolve"
+
+# IPv6 ranges that embed an IPv4 address or are deprecated-internal.
+_NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+_SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
+_SITE_LOCAL_PREFIX = ipaddress.IPv6Network("fec0::/10")
 
 
 def sanitize_error_text(error: str | None, max_length: int = 300) -> str | None:
@@ -172,9 +182,22 @@ def is_safe_public_ip(ip_str: str) -> bool:
     except ValueError:
         return False
 
-    # Unwrap IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1 -> 127.0.0.1)
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            # IPv4-mapped (::ffff:127.0.0.1 -> 127.0.0.1)
+            ip = ip.ipv4_mapped
+        elif ip in _NAT64_PREFIX:
+            # NAT64 (64:ff9b::7f00:1 -> 127.0.0.1): judge the embedded IPv4 address
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip in _SIX_TO_FOUR_PREFIX:
+            # 6to4 (2002:7f00:1::/48 -> 127.0.0.1): IPv4 sits in bits 16-48
+            ip = ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
+        elif (int(ip) >> 32) == 0 and int(ip) > 1:
+            # Deprecated IPv4-compatible form (::7f00:1 -> 127.0.0.1); :: and ::1 stay IPv6
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        elif ip in _SITE_LOCAL_PREFIX:
+            # Deprecated site-local fec0::/10 is internal but not flagged by is_global
+            return False
 
     return bool(ip.is_global and not ip.is_multicast)
 
@@ -218,9 +241,13 @@ def check_host_for_ssrf(
 
     Maintains backward compatibility with Step 2 prober logic.
 
-    Note: This pre-probe check prevents the tool from probing internal networks (SSRF).
-    Protection against DNS rebinding (where an authoritative DNS server changes the
-    IP address to an internal IP between our DNS check and the request) will be handled in v2.
+    Fails CLOSED: a host with no A/AAAA answer (NXDOMAIN, timeout, SERVFAIL) is NOT
+    considered safe, because the HTTP/TLS client would resolve it again through a
+    different resolver path and could land on an internal address.
+
+    Known limitation: this is a check-then-connect design, so a DNS-rebinding
+    attacker can still return a different IP at connect time. Pinning connections
+    to the validated IP is tracked separately.
 
     Args:
         hostname: Subdomain to resolve and inspect.
@@ -232,8 +259,7 @@ def check_host_for_ssrf(
     resolved_ips = resolve_host_ips(hostname, resolver=resolver)
 
     if not resolved_ips:
-        # If no IPs resolve during pre-check, allow to proceed to prober/scanner
-        return True, None
+        return False, f"{UNRESOLVED_REASON_PREFIX}: '{hostname}' has no A/AAAA answer"
 
     for ip in resolved_ips:
         if not is_safe_public_ip(ip):
@@ -265,3 +291,33 @@ def validate_host_and_scope(
         return None, f"Host '{hostname}' is out of scope for root domain '{base_domain}'"
 
     return validated_host, None
+
+
+def is_redirect_target_safe(
+    target_url: str,
+    original_host: str | None,
+    resolver: dns.resolver.Resolver | None = None,
+) -> tuple[bool, str | None]:
+    """SSRF check for a redirect hop before it is followed.
+
+    The original host was already checked before the first request. Any hop to a
+    *different* hostname is resolved and checked again, so an in-scope host that
+    points at a private/metadata address (e.g. 169.254.169.254) is never contacted.
+
+    Args:
+        target_url: Absolute URL of the redirect target.
+        original_host: Hostname that was validated before the first request.
+        resolver: Optional Resolver instance for testing.
+
+    Returns:
+        (True, None) if the hop may be followed, otherwise (False, reason).
+    """
+    try:
+        hop_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False, "Redirect target URL could not be parsed"
+    if not hop_host:
+        return False, "Redirect target has no hostname"
+    if original_host and hop_host == original_host.lower().rstrip("."):
+        return True, None
+    return check_host_for_ssrf(hop_host, resolver=resolver)

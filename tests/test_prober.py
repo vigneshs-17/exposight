@@ -6,6 +6,7 @@ import ssl
 import time
 from unittest.mock import MagicMock, patch
 
+import dns.resolver
 import httpx
 import pytest
 
@@ -20,6 +21,23 @@ from asm.prober import (
     probe_host,
     probe_url,
 )
+from asm.scan_common import UNRESOLVED_REASON_PREFIX
+
+
+def _resolver_returning(ip_by_host: dict[str, str]) -> MagicMock:
+    """Fake dnspython resolver: answers A/AAAA from a dict, NXDOMAIN otherwise."""
+
+    def _resolve(hostname: str, rdtype: str):
+        ip = ip_by_host.get(hostname)
+        if ip is None:
+            raise dns.resolver.NXDOMAIN()
+        rdata = MagicMock()
+        rdata.to_text.return_value = ip
+        return [rdata]
+
+    resolver = MagicMock()
+    resolver.resolve.side_effect = _resolve
+    return resolver
 
 
 class TestIPAndSSRFValidation:
@@ -33,6 +51,8 @@ class TestIPAndSSRFValidation:
             "1.1.1.1",
             "2606:4700:4700::1111",
             "::ffff:93.184.216.34",  # IPv4-mapped IPv6 pointing to public IP
+            "64:ff9b::808:808",  # NAT64 embedding 8.8.8.8
+            "2002:808:808::1",  # 6to4 embedding 8.8.8.8
         ],
     )
     def test_safe_public_ips_allowed(self, public_ip: str):
@@ -55,6 +75,11 @@ class TestIPAndSSRFValidation:
             "224.0.0.1",              # Multicast
             "ff02::1",                # IPv6 multicast
             "invalid_ip",             # Malformed string
+            "::7f00:1",               # Deprecated IPv4-compatible form of 127.0.0.1
+            "64:ff9b::7f00:1",        # NAT64 embedding 127.0.0.1
+            "64:ff9b::a9fe:a9fe",     # NAT64 embedding 169.254.169.254 (metadata)
+            "2002:7f00:1::1",         # 6to4 embedding 127.0.0.1
+            "fec0::1",                # Deprecated IPv6 site-local
         ],
     )
     def test_private_and_restricted_ips_rejected(self, private_or_restricted_ip: str):
@@ -325,10 +350,96 @@ class TestProbeHostIntegration:
             )
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        res = probe_host("web.example.com", "example.com", client=client)
+        resolver = _resolver_returning({"web.example.com": "93.184.216.34"})
+        res = probe_host("web.example.com", "example.com", resolver=resolver, client=client)
 
         assert res.status == HostProbeStatus.PROBED.value
         assert res.live is True
         assert res.https is not None and res.https.reachable is False
         assert res.http is not None and res.http.reachable is True
         assert res.preferred_url == "http://web.example.com/"
+
+
+class TestSSRFFailClosedAndRedirectGuard:
+    """P1 hardening: unresolved hosts fail closed; redirect hops are SSRF-checked."""
+
+    def test_check_host_for_ssrf_fails_closed_when_unresolved(self):
+        """A host with no A/AAAA answer must NOT be treated as safe."""
+        safe, reason = check_host_for_ssrf(
+            "ghost.example.com", resolver=_resolver_returning({})
+        )
+        assert safe is False
+        assert (reason or "").startswith(UNRESOLVED_REASON_PREFIX)
+
+    def test_probe_host_unresolved_is_skipped_unresolved(self):
+        """Unresolvable hosts are reported as SKIPPED_UNRESOLVED and never contacted."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(200)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        res = probe_host(
+            "ghost.example.com", "example.com", resolver=_resolver_returning({}), client=client
+        )
+        assert res.status == HostProbeStatus.SKIPPED_UNRESOLVED.value
+        assert calls["n"] == 0
+
+    def test_redirect_to_in_scope_host_with_private_ip_is_not_followed(self):
+        """sso.example.com -> meta.example.com (169.254.169.254) must stop before the hop."""
+        requested_hosts: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_hosts.append(request.url.host)
+            if request.url.host == "sso.example.com":
+                return httpx.Response(302, headers={"Location": "https://meta.example.com/"})
+            return httpx.Response(200, html="<title>metadata</title>")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        resolver = _resolver_returning(
+            {"sso.example.com": "93.184.216.34", "meta.example.com": "169.254.169.254"}
+        )
+        result = probe_url("https://sso.example.com/", "example.com", client, resolver=resolver)
+
+        assert requested_hosts == ["sso.example.com"]
+        assert result.redirect_chain[-1].out_of_scope is True
+        assert "SSRF" in (result.error_message or "")
+        assert result.title is None
+
+    def test_redirect_to_in_scope_public_host_is_followed(self):
+        """A redirect to a different in-scope host with a public IP is still followed."""
+        requested_hosts: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_hosts.append(request.url.host)
+            if request.url.host == "example.com":
+                return httpx.Response(301, headers={"Location": "https://www.example.com/"})
+            return httpx.Response(200, html="<title>Home</title>")
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        resolver = _resolver_returning({"www.example.com": "93.184.216.34"})
+        result = probe_url("https://example.com/", "example.com", client, resolver=resolver)
+
+        assert requested_hosts == ["example.com", "www.example.com"]
+        assert result.title == "Home"
+        assert result.final_url == "https://www.example.com/"
+
+    def test_probe_requests_uncompressed_bodies(self):
+        """Accept-Encoding: identity keeps the 64 KB cap meaningful (no decompression bombs)."""
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["accept-encoding"] = request.headers.get("accept-encoding", "")
+            return httpx.Response(200)
+
+        transport = httpx.MockTransport(handler)
+        resolver = _resolver_returning({"web.example.com": "93.184.216.34"})
+        real_client = httpx.Client  # capture before patching (patch replaces httpx.Client)
+        with patch(
+            "asm.prober.httpx.Client",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ):
+            probe_host("web.example.com", "example.com", resolver=resolver)
+
+        assert seen["accept-encoding"] == "identity"

@@ -23,7 +23,9 @@ from asm.models import (
     UrlProbeResult,
 )
 from asm.scan_common import (
+    UNRESOLVED_REASON_PREFIX,
     check_host_for_ssrf,
+    is_redirect_target_safe,
     is_safe_public_ip,
     validate_host_and_scope,
 )
@@ -46,6 +48,8 @@ MAX_REDIRECT_HOPS = 5
 MAX_BODY_BYTES = 64 * 1024  # 64 KB body streaming limit
 MAX_TITLE_LENGTH = 200
 DEFAULT_MAX_WORKERS = 10
+# Ask for uncompressed bodies so the 64 KB cap bounds memory (no decompression blow-up).
+REQUEST_HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "identity"}
 
 
 class DeadlineExceeded(Exception):
@@ -234,6 +238,7 @@ def _execute_single_url_probe(
     base_domain: str,
     client: httpx.Client,
     deadline: float,
+    resolver: dns.resolver.Resolver | None = None,
 ) -> UrlProbeResult:
     """Perform HTTP probe with manual redirect following and deadline enforcement.
 
@@ -252,6 +257,7 @@ def _execute_single_url_probe(
     current_url = target_url
     redirect_chain: list[RedirectHop] = []
     follow_count = 0
+    original_host = urllib.parse.urlsplit(target_url).hostname
 
     while True:
         if time.perf_counter() > deadline:
@@ -307,6 +313,27 @@ def _execute_single_url_probe(
                         response_time_ms=response_time_ms,
                     )
 
+                # SSRF: an in-scope hostname may still point at a private/metadata IP.
+                hop_safe, hop_reason = is_redirect_target_safe(
+                    next_url, original_host, resolver=resolver
+                )
+                if not hop_safe:
+                    redirect_chain.append(
+                        RedirectHop(url=next_url, status_code=status_code, out_of_scope=True)
+                    )
+                    return UrlProbeResult(
+                        url=target_url,
+                        reachable=True,
+                        status_code=status_code,
+                        final_url=current_url,
+                        redirect_chain=redirect_chain,
+                        server=server_hdr,
+                        x_powered_by=x_powered_hdr,
+                        content_type=content_type_hdr,
+                        response_time_ms=response_time_ms,
+                        error_message=f"Redirect not followed (SSRF guard): {hop_reason}",
+                    )
+
                 # In-scope redirect: record hop
                 redirect_chain.append(
                     RedirectHop(url=next_url, status_code=status_code, out_of_scope=False)
@@ -352,6 +379,7 @@ def probe_url(
     target_url: str,
     base_domain: str,
     client: httpx.Client,
+    resolver: dns.resolver.Resolver | None = None,
 ) -> UrlProbeResult:
     """Probe a single URL with error classification and TLS verification fallback.
 
@@ -372,7 +400,9 @@ def probe_url(
     is_https = target_url.lower().startswith("https://")
 
     try:
-        result = _execute_single_url_probe(target_url, base_domain, client, deadline)
+        result = _execute_single_url_probe(
+            target_url, base_domain, client, deadline, resolver=resolver
+        )
         if is_https:
             result.tls_valid = True
         return result
@@ -389,11 +419,11 @@ def probe_url(
             retry_client = httpx.Client(
                 verify=False,
                 timeout=httpx.Timeout(TOTAL_URL_TIMEOUT, connect=CONNECT_TIMEOUT),
-                headers={"User-Agent": USER_AGENT},
+                headers=REQUEST_HEADERS,
             )
             try:
                 retry_result = _execute_single_url_probe(
-                    target_url, base_domain, retry_client, deadline
+                    target_url, base_domain, retry_client, deadline, resolver=resolver
                 )
                 retry_result.tls_valid = False
                 retry_result.error_type = ProbeErrorType.TLS_ERROR.value
@@ -468,9 +498,14 @@ def probe_host(
     # 2. SSRF Protection: Pre-probe private IP check
     safe_ip, reason = check_host_for_ssrf(validated_host, resolver=resolver)
     if not safe_ip:
+        unresolved = (reason or "").startswith(UNRESOLVED_REASON_PREFIX)
         return HostProbeResult(
             subdomain=validated_host,
-            status=HostProbeStatus.SKIPPED_PRIVATE_IP.value,
+            status=(
+                HostProbeStatus.SKIPPED_UNRESOLVED.value
+                if unresolved
+                else HostProbeStatus.SKIPPED_PRIVATE_IP.value
+            ),
             skip_reason=reason,
         )
 
@@ -482,7 +517,7 @@ def probe_host(
         else httpx.Client(
             verify=True,
             timeout=httpx.Timeout(TOTAL_URL_TIMEOUT, connect=CONNECT_TIMEOUT),
-            headers={"User-Agent": USER_AGENT},
+            headers=REQUEST_HEADERS,
         )
     )
 
@@ -491,8 +526,8 @@ def probe_host(
         https_url = f"https://{validated_host}/"
         http_url = f"http://{validated_host}/"
 
-        https_res = probe_url(https_url, base_domain, active_client)
-        http_res = probe_url(http_url, base_domain, active_client)
+        https_res = probe_url(https_url, base_domain, active_client, resolver=resolver)
+        http_res = probe_url(http_url, base_domain, active_client, resolver=resolver)
 
         is_live = bool(https_res.reachable or http_res.reachable)
 

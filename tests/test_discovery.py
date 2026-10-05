@@ -437,3 +437,18 @@ class TestDiscoverSubdomainsOrchestrator:
             assert "crt.sh error: crt.sh 502 Bad Gateway" in str(err)
             assert "Cert Spotter error: Cert Spotter 429 rate limit" in str(err)
 
+
+class TestCrtshTransportErrors:
+    """P1: protocol-level disconnects from crt.sh are retried, then raise CrtshError."""
+
+    def test_remote_protocol_error_raises_crtsh_error(self, mock_sleep):
+        """'Server disconnected' must become CrtshError so the Cert Spotter fallback runs."""
+        client_mock = MagicMock(spec=httpx.Client)
+        client_mock.get.side_effect = httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+
+        with pytest.raises(CrtshError):
+            fetch_crtsh_data("example.com", client=client_mock)
+
+        assert client_mock.get.call_count == 3

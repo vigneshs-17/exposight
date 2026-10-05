@@ -190,7 +190,7 @@ def fetch_crtsh_data(domain: str, client: httpx.Client | None = None) -> list[di
                     MAX_ATTEMPTS,
                     exc,
                 )
-            except httpx.NetworkError as exc:
+            except httpx.TransportError as exc:
                 last_error = f"Network connection error: {exc}"
                 logger.warning(
                     "Network error querying crt.sh on attempt %d/%d: %s",
@@ -336,7 +336,7 @@ def _fetch_certspotter_page(
                 MAX_ATTEMPTS,
                 exc,
             )
-        except httpx.NetworkError as exc:
+        except httpx.TransportError as exc:
             last_error = f"Network connection error: {exc}"
             logger.warning(
                 "Network error querying Cert Spotter on attempt %d/%d: %s",
