@@ -24,6 +24,7 @@ from asm.alerts.rules import should_trigger_alerts
 from asm.audit import record_event
 from asm.db.models import Domain, ScanResult
 from asm.db.scans import enqueue_scan
+from asm.ratelimit import MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY
 from asm.scan_common import sanitize_error_text
 from asm.verification import (
     apply_check_outcome,
@@ -1425,6 +1426,47 @@ class ASMWorker:
         except Exception as exc:
             logger.error("Failed graceful release for scan_run_id=%d: %s", scan_run_id, exc)
 
+    def _defer_if_daily_alert_quota_reached(
+        self, session: Session, notification_id: int, domain_id: int
+    ) -> bool:
+        """Postpone a notification if its domain already sent the daily maximum.
+
+        The email is not dropped and no attempt is counted: next_attempt_at
+        moves to when the oldest send in the 24-hour window expires.
+        Returns True if the notification was deferred.
+        """
+        oldest_in_window = session.execute(
+            text(
+                """
+                SELECT count(*) AS sent, min(sent_at) AS oldest
+                FROM alert_notifications
+                WHERE domain_id = :domain_id AND status = 'sent'
+                  AND sent_at > now() - interval '24 hours'
+                """
+            ),
+            {"domain_id": domain_id},
+        ).mappings().one()
+        if oldest_in_window["sent"] < MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY:
+            return False
+        session.execute(
+            text(
+                """
+                UPDATE alert_notifications
+                SET next_attempt_at = :oldest + interval '24 hours'
+                WHERE id = :id
+                """
+            ),
+            {"id": notification_id, "oldest": oldest_in_window["oldest"]},
+        )
+        logger.warning(
+            "Daily alert email quota reached for domain_id=%d (%d per 24h); "
+            "notification id=%d deferred",
+            domain_id,
+            MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY,
+            notification_id,
+        )
+        return True
+
     def deliver_pending_alerts(self, batch_limit: int = 10) -> int:
         """Deliver pending alert notifications using transactional outbox pattern.
 
@@ -1459,6 +1501,10 @@ class ASMWorker:
                 row = session.execute(stmt).mappings().fetchone()
                 if not row:
                     break
+
+                if self._defer_if_daily_alert_quota_reached(session, row["id"], row["domain_id"]):
+                    session.commit()
+                    continue
 
                 delivery_error = None
                 try:

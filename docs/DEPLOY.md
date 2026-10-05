@@ -122,7 +122,7 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
      ```bash
      openssl rand -hex 24
      ```
-   - Update `POSTGRES_PASSWORD` and `DATABASE_URL` with this password.
+   - Generate three different passwords: `POSTGRES_PASSWORD` (superuser), `OWNER_DB_PASSWORD` and `APP_DB_PASSWORD`. Put the owner password into `MIGRATION_DATABASE_URL` and the app password into `DATABASE_URL`. See "Least-privilege database roles" below.
    - Set `DOMAIN=exposight.dev`.
    - Set `ENVIRONMENT=production`. In this mode the api and worker **refuse to start** if `DATABASE_URL` points to a `_test` database or localhost, or still contains a placeholder, and the api also refuses a non-https or placeholder `SUPABASE_URL` and an empty or placeholder `SUPABASE_PUBLISHABLE_KEY`. Error messages name the setting, never its value. `/docs`, `/redoc` and `/openapi.json` are disabled. An unknown `ENVIRONMENT` value (for example `prod`) also stops startup.
    - Populate `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
@@ -131,9 +131,57 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
 4. **Supabase Auth URLs (production project):** in the Supabase dashboard → Authentication → URL Configuration, set:
    - Site URL: `https://exposight.dev`
    - Redirect URLs: `https://exposight.dev/app` only (no `localhost` entries in the production project)
-   - Signups: decided in v3.6b (planned: invite-only).
+   - **Confirm email: must be ON** (Supabase docs: "This option can be found in the email provider under the provider-specific configuration"). Exposight invites (v3.6b) are accepted only when the signed-in user's email equals the invite email. Supabase access tokens carry no verified-email claim the API can trust (`user_metadata` is editable by the user), so the API relies on Supabase refusing sign-in until the email is confirmed. With Confirm email off, someone could sign up with another person's address and accept their invite.
+   - Signups may stay open: a new account can see nothing until an org owner or admin invites it.
 
 ---
+
+### Least-privilege database roles
+
+Three PostgreSQL roles are used. None of the application processes runs as the superuser.
+
+| Role | Used by | Privileges |
+|---|---|---|
+| `POSTGRES_USER` (superuser) | first-boot init, backups and restores only | everything |
+| `OWNER_DB_USER` (`exposight_owner`) | `migrate` service (Alembic) | owns the database, every table, sequence and trigger; `NOSUPERUSER` |
+| `APP_DB_USER` (`exposight_app`) | `api` and `worker` (`DATABASE_URL`) | owns nothing; `SELECT/INSERT/UPDATE/DELETE` on data tables; only `SELECT/INSERT` on `audit_events`; `NOSUPERUSER NOINHERIT` |
+
+Because the app role does not own `audit_events`, it cannot `UPDATE`, `DELETE`, `TRUNCATE`, `ALTER TABLE ... DISABLE TRIGGER` or drop the append-only trigger (proved by `tests/test_db_roles_db.py`). Only the owner role can disable the trigger.
+
+**Fresh volume (normal case):** `deploy/postgres-init/10-roles.sh` runs automatically the first time the `db` container starts with an empty `pgdata` volume. It creates both roles and makes the owner role the database owner. Migration `0010_app_role_grants` then grants the app role its privileges, including `ALTER DEFAULT PRIVILEGES FOR ROLE` the owner, so tables added by later migrations are granted automatically. With `ENVIRONMENT=production` the migration fails if the app role does not exist.
+
+**Existing volume (manual runbook):** Docker only runs `docker-entrypoint-initdb.d` on an empty volume, so an already-initialised database needs these steps once. Back up first (`scripts/backup_db.sh`).
+
+1. Open a superuser shell:
+   ```bash
+   docker compose -f compose.prod.yml exec db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+   ```
+2. Create the roles (type the passwords at the prompts; nothing is stored in shell history):
+   ```sql
+   CREATE ROLE exposight_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+   \password exposight_owner
+   CREATE ROLE exposight_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+   \password exposight_app
+   ```
+3. Transfer ownership of the application tables to the owner role, then make it the database owner (replace `postgres` and `exposight` if your `POSTGRES_USER`/`POSTGRES_DB` differ):
+   ```sql
+   DO $$ DECLARE r record; BEGIN FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP EXECUTE format('ALTER TABLE public.%I OWNER TO exposight_owner', r.tablename); END LOOP; FOR r IN SELECT p.oid::regprocedure AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' LOOP EXECUTE format('ALTER FUNCTION %s OWNER TO exposight_owner', r.fn); END LOOP; END $$;
+   ALTER DATABASE exposight OWNER TO exposight_owner;
+   REVOKE ALL ON DATABASE exposight FROM PUBLIC;
+   GRANT CONNECT, TEMPORARY ON DATABASE exposight TO exposight_owner;
+   GRANT CONNECT ON DATABASE exposight TO exposight_app;
+   ```
+   The `DO` block moves every table (with its sequences) and function in `public`. `REASSIGN OWNED BY postgres` is not used because PostgreSQL refuses it for the bootstrap superuser, which also owns the system catalogs.
+4. As the owner role (`SET ROLE exposight_owner;`), apply the app-role grants. If migration `0010` has not run yet, `alembic upgrade head` in the `migrate` service does this for you; otherwise run exactly the SQL from migration `0010`:
+   ```sql
+GRANT USAGE ON SCHEMA public TO exposight_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO exposight_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO exposight_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON audit_events FROM exposight_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO exposight_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO exposight_app;
+   ```
+5. Update `.env` with `OWNER_DB_*`, `APP_DB_*`, `MIGRATION_DATABASE_URL` and the new `DATABASE_URL`, then `docker compose -f compose.prod.yml up -d`.
 
 ## 5. Deployment & Release Management
 
@@ -151,7 +199,9 @@ command:
   - "--proxy-headers"
   - "--forwarded-allow-ips=10.89.0.0/24"
 ```
-*Rationale*: in-memory rate limiting is **planned for v3.6b and not implemented yet**. Running multiple worker processes without an external Redis instance would shard in-memory counters across processes, allowing clients to bypass rate quotas.
+*Rationale*: request rate limits (60 requests/minute per user; 20/minute per IP for unauthenticated requests and failed sign-ins; `429` with `Retry-After`) are kept **in memory** in `src/asm/ratelimit.py`. Running several worker processes would give each its own counters and multiply the effective limit; that would need a shared store such as Redis, which is not used. Counters reset when the api restarts. The client IP comes from `X-Forwarded-For` only because uvicorn trusts that header from the Caddy subnet (`--forwarded-allow-ips=10.89.0.0/24`).
+
+Quotas are counted in PostgreSQL and survive restarts: 10 domains per organization, 5 owned organizations per user (`403`), 3 manual scans per domain per hour (`429` with `Retry-After`), and 20 alert emails per domain per 24 hours (further alerts are delayed, not dropped).
 
 Additionally, `--proxy-headers` and `--forwarded-allow-ips=10.89.0.0/24` ensure that Uvicorn trusts `X-Forwarded-For` and `X-Forwarded-Proto` only when delivered from Caddy running on the fixed `10.89.0.0/24` Docker network subnet, preventing spoofed IP injection by direct clients.
 

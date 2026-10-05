@@ -502,6 +502,51 @@ class Membership(Base):
     user: Mapped["User"] = relationship(back_populates="memberships")
 
 
+class OrgInvite(Base):
+    """Single-use invitation to join an organization (v3.6b A2).
+
+    Only the SHA-256 hash of the invite token is stored; the token itself is
+    shown once to the inviter. Accepting requires the signed-in user's email
+    to match `email`. Invites never look up existing users by email, so they
+    cannot be used to discover who has an account.
+    """
+
+    __tablename__ = "org_invites"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'admin', 'viewer')",
+            name="ck_org_invites_role",
+        ),
+        Index("ix_org_invites_org_id_email", "org_id", "email"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    invited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AuditEvent(Base):
     """Append-only audit event recording actions taken by users, operators, or the system."""
 

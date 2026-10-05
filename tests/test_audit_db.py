@@ -455,7 +455,9 @@ def test_all_mutating_routes_map_to_audit_action():
     """Every mutating route in the application (excluding /health) maps to an audit action."""
     route_action_map = {
         ("POST", "/orgs"): "org.created",
-        ("POST", "/orgs/{org_id}/members"): "membership.added",
+        ("POST", "/orgs/{org_id}/invites"): "invite.created",
+        ("DELETE", "/orgs/{org_id}/invites/{invite_id}"): "invite.revoked",
+        ("POST", "/invites/accept"): "membership.added",
         ("PATCH", "/orgs/{org_id}/members/{user_id}"): "membership.role_changed",
         ("DELETE", "/orgs/{org_id}/members/{user_id}"): "membership.removed",
         ("POST", "/orgs/{org_id}/domains"): "domain.created",
@@ -480,8 +482,13 @@ def test_all_mutating_routes_map_to_audit_action():
                 if m in ("POST", "PUT", "PATCH", "DELETE"):
                     found_mutating_routes.add((m, path))
 
+    # 410 Gone (v3.6b): changes nothing, so it records nothing.
+    gone_routes = {("POST", "/orgs/{org_id}/members")}
+    assert gone_routes <= found_mutating_routes
+    found_mutating_routes -= gone_routes
+
     # All discovered routes must be in our map and map to a recognized audit action
-    assert len(found_mutating_routes) == 10
+    assert len(found_mutating_routes) == 12
     for method, path in found_mutating_routes:
         assert (method, path) in route_action_map, f"Unmapped mutating route: {method} {path}"
         action = route_action_map[(method, path)]
@@ -491,16 +498,24 @@ def test_all_mutating_routes_map_to_audit_action():
 def test_api_membership_added_audit_event(
     client: TestClient, db_session: Session, test_org: Organization
 ):
-    """POST /orgs/{org_id}/members writes exactly one membership.added audit event."""
+    """Accepting an invite writes exactly one membership.added audit event (v3.6b A2)."""
     target_user = User(id=uuid.uuid4(), email="newbie@example.com")
     db_session.add(target_user)
     db_session.commit()
 
-    resp = client.post(
-        f"/orgs/{test_org.id}/members",
+    invite = client.post(
+        f"/orgs/{test_org.id}/invites",
         json={"email": "newbie@example.com", "role": "viewer"},
     )
-    assert resp.status_code == 201
+    assert invite.status_code == 201
+
+    inviter_override = app.dependency_overrides[get_current_user]
+    app.dependency_overrides[get_current_user] = lambda: target_user
+    try:
+        resp = client.post("/invites/accept", json={"token": invite.json()["token"]})
+    finally:
+        app.dependency_overrides[get_current_user] = inviter_override
+    assert resp.status_code == 200
 
     events = db_session.scalars(
         select(AuditEvent).where(
@@ -511,9 +526,14 @@ def test_api_membership_added_audit_event(
     assert len(events) == 1
     ev = events[0]
     assert ev.actor_type == "user"
-    assert ev.actor_user_id == uuid.UUID("00000000-0000-0000-0000-000000000001")
+    assert ev.actor_user_id == target_user.id  # the person who accepted
     assert ev.target_type == "membership"
-    assert ev.metadata_ == {"user_id": str(target_user.id), "role": "viewer"}
+    assert ev.metadata_ == {
+        "user_id": str(target_user.id),
+        "role": "viewer",
+        "via": "invite",
+        "invite_id": invite.json()["id"],
+    }
     assert ev.target_id.isdigit()
 
 

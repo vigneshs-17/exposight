@@ -48,6 +48,7 @@ def test_clean_production_config_has_no_problems():
             "placeholder",
         ),
         ("not a url", "not a valid database URL"),
+        ("postgresql+psycopg://postgres:s3cret@db:5432/exposight", "superuser"),
     ],
 )
 def test_unsafe_database_url_is_reported(database_url, expected):

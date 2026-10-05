@@ -24,8 +24,8 @@ def test_audit_module_docstring():
     assert "append-only against the application; the table owner can disable the trigger" in doc
 
 
-def test_15_audit_actions():
-    """Verify exact 15 audit actions exist in AUDIT_ACTIONS."""
+def test_17_audit_actions():
+    """Verify exact 17 audit actions exist in AUDIT_ACTIONS (v3.6b added invite.*)."""
     expected_actions = {
         "org.created",
         "membership.added",
@@ -42,9 +42,11 @@ def test_15_audit_actions():
         "verification.override_expired",
         "domain.moved",
         "scan.queued",
+        "invite.created",
+        "invite.revoked",
     }
     assert AUDIT_ACTIONS == expected_actions
-    assert len(AUDIT_ACTIONS) == 15
+    assert len(AUDIT_ACTIONS) == 17
 
 
 def test_redact_sensitive_text():

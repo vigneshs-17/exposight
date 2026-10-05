@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,11 @@ from asm.auth.token import (
 from asm.auth.upsert import upsert_user
 from asm.db.models import Domain, Membership, Organization, ScanRun, User
 from asm.db.session import get_db
+from asm.ratelimit import (
+    API_REQUESTS_PER_MINUTE_PER_USER,
+    UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP,
+    enforce_rate_limit,
+)
 
 DbSession = Annotated[Session, Depends(get_db)]
 
@@ -62,21 +67,53 @@ def get_current_jwks_manager() -> JWKSManager:
     return _jwks_manager
 
 
+def client_ip(request: Request) -> str:
+    """Return the client IP for rate limiting.
+
+    In production uvicorn runs with --proxy-headers and trusts X-Forwarded-For
+    only from the Caddy subnet (--forwarded-allow-ips), so a client cannot
+    choose this value by sending its own header.
+    """
+    return request.client.host if request.client else "unknown"
+
+
 def get_current_user(
+    request: Request,
     db: DbSession,
     authorization: Annotated[str | None, Header()] = None,
     settings: Annotated[AuthSettings, Depends(get_current_auth_settings)] = None,  # type: ignore[assignment]
     jwks_manager: Annotated[JWKSManager, Depends(get_current_jwks_manager)] = None,  # type: ignore[assignment]
 ) -> User:
-    """Verify Supabase JWT token and just-in-time upsert user.
+    """Authenticate the request and apply the request rate limits.
 
-    Returns:
-        User: Database model representing the authenticated user.
+    A failed authentication counts against the client IP's unauthenticated
+    limit (so invalid tokens cannot be sprayed without limit); a successful
+    one counts against the user's per-minute limit.
 
     Raises:
         HTTPException(401): Missing, malformed, invalid, or expired token.
+        HTTPException(429): Rate limit used up (Retry-After header set).
         HTTPException(503): Misconfigured auth or upstream JWKS endpoint unreachable.
     """
+    try:
+        user = _authenticate(db, authorization, settings, jwks_manager)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            enforce_rate_limit(
+                f"ip:{client_ip(request)}", UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP
+            )
+        raise
+    enforce_rate_limit(f"user:{user.id}", API_REQUESTS_PER_MINUTE_PER_USER)
+    return user
+
+
+def _authenticate(
+    db: Session,
+    authorization: str | None,
+    settings: AuthSettings,
+    jwks_manager: JWKSManager,
+) -> User:
+    """Verify Supabase JWT token and just-in-time upsert user."""
     if not settings.is_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

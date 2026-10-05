@@ -192,7 +192,11 @@ All application API endpoints (except `/health`) require authentication via a va
 | `/orgs/{org_id}/domains/{domain_id}/alerts` | PUT | `admin` | Configure email alert recipients and minimum severity |
 | `/orgs/{org_id}/domains/{domain_id}/alert-notifications` | GET | `viewer` | List alert delivery history |
 | `/orgs/{org_id}/members` | GET | `viewer` | List members of the organization |
-| `/orgs/{org_id}/members` | POST | `admin` | Add a member by email (`owner` only to appoint owners) |
+| `/orgs/{org_id}/members` | POST | `admin` | **410 Gone** since v3.6b: use invites |
+| `/orgs/{org_id}/invites` | POST | `admin` | Create a single-use invite (`owner` only to invite owners); returns the token once |
+| `/orgs/{org_id}/invites` | GET | `admin` | List pending invites (tokens never returned) |
+| `/orgs/{org_id}/invites/{invite_id}` | DELETE | `admin` | Revoke a pending invite |
+| `/invites/accept` | POST | any signed-in user | Accept an invite; the signed-in email must equal the invite email |
 | `/orgs/{org_id}/members/{user_id}` | PATCH | `owner` | Update member role (enforces last-owner rule) |
 | `/orgs/{org_id}/members/{user_id}` | DELETE | `owner` / self | Remove member or leave organization |
 | `/orgs/{org_id}/audit-events` | GET | `admin` | List organization audit events with keyset cursor pagination |
@@ -213,11 +217,18 @@ curl -i http://127.0.0.1:8000/orgs \
 curl -i http://127.0.0.1:8000/orgs/1/members \
   -H "Authorization: Bearer <token>"
 
-# 4. Add a member by email (user must have logged into the platform at least once)
-curl -i -X POST http://127.0.0.1:8000/orgs/1/members \
+# 4. Invite someone (the response contains a one-time "token"; send it to them yourself).
+#    The response is the same whether or not the email already has an account.
+curl -i -X POST http://127.0.0.1:8000/orgs/1/invites \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"email": "analyst@example.com", "role": "viewer"}'
+
+# 4b. The invitee signs in with that email address and accepts (single use, expires in 7 days)
+curl -i -X POST http://127.0.0.1:8000/invites/accept \
+  -H "Authorization: Bearer <invitee-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "<invite-token>"}'
 
 # 5. Update a member's role (owner only)
 curl -i -X PATCH http://127.0.0.1:8000/orgs/1/members/<user-uuid> \

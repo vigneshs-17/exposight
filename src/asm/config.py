@@ -63,6 +63,10 @@ def find_production_config_problems(
             problems.append("DATABASE_URL points to localhost (development database)")
         if _looks_like_placeholder(database_url):
             problems.append("DATABASE_URL still contains an example placeholder")
+        if (url.username or "").lower() == "postgres":
+            problems.append(
+                "DATABASE_URL connects as the postgres superuser; use the app role (APP_DB_USER)"
+            )
 
     if supabase_url is not None:
         parsed = urlparse(supabase_url.strip())

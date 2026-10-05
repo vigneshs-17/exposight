@@ -271,6 +271,43 @@
 - **Fix:** The test replaces `ASMWorker` with a function that raises, so a missing guard fails in 0.23 s with `AssertionError: worker started: production guard did not run first`.
 - **How to prevent it:** A test for a guard in front of a long-running loop must stub the loop.
 
+### Entry AP: v3.6a Backfill — Deploy and Security Commits Had No Log Entries
+- **What happened:** Six commits on 2026-10-05 (`4fcae3c` production compose, Caddy, ARM64 CI build, backups and runbook; `78982a0` and `2d87c22` Exposight brand rename; `16d8007` SMTP TLS certificate verification, bounded query params, CI least privilege, HSTS; `7bf998b` Caddy HSTS/CSP test; `f4dbf34` scanner SSRF hardening) were committed without ENGINEERING_LOG entries. The commit messages have subjects only, and test counts were not recorded at the time.
+- **Root cause:** The log step was skipped while working through review findings in quick succession.
+- **Fix:** This backfill records what is verifiable from `git show --stat`: 9 / 11 / 5 / 13 / 1 / 7 files changed respectively. No metrics are invented for those commits.
+- **How to prevent it:** Every checkpoint report now ends with the log entry, before the commit is proposed.
+
+### Entry AQ: v3.6b A-2 — App Ran as the Postgres Superuser and Could Disable the Audit Trigger
+- **What happened:** `.env.production.example` pointed `DATABASE_URL` at `postgres`, the superuser that also owned `audit_events`. Any SQL injection or app bug could `ALTER TABLE audit_events DISABLE TRIGGER` and rewrite history.
+- **Root cause:** One database role for migrations, runtime and administration.
+- **Fix:** Three roles. `deploy/postgres-init/10-roles.sh` (fresh volume) creates `exposight_owner` (NOSUPERUSER, database owner, runs Alembic) and `exposight_app` (NOSUPERUSER NOINHERIT, owns nothing). Migration `0010_app_role_grants` grants the app DML on data tables, only `SELECT, INSERT` on `audit_events`, sequence usage, and `ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER` (the owner) so future tables are granted; it fails in production if the app role is missing. `compose.prod.yml` runs `migrate` with `MIGRATION_DATABASE_URL`; api and worker use the app role. The production guard now also refuses a `postgres` `DATABASE_URL`. DEPLOY.md has an existing-volume runbook; its SQL is generated from `asm.db.roles` and a test fails if the doc drifts.
+- **Correction during work:** The first runbook draft used `REASSIGN OWNED BY postgres`, which PostgreSQL refuses for the bootstrap superuser. It was replaced by an explicit `ALTER TABLE/FUNCTION ... OWNER` loop, and that loop is exercised by `test_existing_volume_runbook_flow`.
+- **Evidence:** `tests/test_db_roles_db.py` (21 tests) proves as the app role: UPDATE/DELETE/TRUNCATE on `audit_events`, `DISABLE TRIGGER`, `DROP TRIGGER`, `DROP TABLE`, `ALTER TABLE`, `CREATE TABLE` all fail with `InsufficientPrivilege`, and the role owns 0 objects. The real Alembic chain 0001→0010 was run on a scratch database (`upgrade`, `downgrade -1`, `upgrade`, production-mode refusal); `has_table_privilege` showed UPDATE/DELETE on `audit_events` = False. The Docker init script itself was not run (no Docker in this environment).
+
+### Entry AR: v3.6b A-2 — Adding Members by Email Enumerated Accounts and Skipped Consent
+- **What happened:** `POST /orgs/{id}/members` returned 404 "has not logged in yet" for unknown emails and 201 for known ones, and added people without asking them. `users.email` is not unique, so two rows with one email made `scalar_one_or_none()` raise (500).
+- **Root cause:** Membership was granted by looking up another user's account by email.
+- **Fix:** Single-use invites (`org_invites`, migration `0011`): only the SHA-256 of a `secrets.token_urlsafe(32)` token is stored; the token is returned once to the inviter; 7-day expiry; revocation; `POST /invites/accept` locks the invite row (`FOR UPDATE`) and requires the signed-in email to equal the invite email. Users are never looked up by email. The old endpoint keeps its auth and role checks and then returns 410. Audit adds `invite.created` and `invite.revoked` (role only, no email); `membership.added` records `via: invite` and `invite_id`. `upsert_user` now writes a changed email immediately instead of up to 5 minutes later.
+- **Verified-email decision:** Supabase's JWT claims reference lists no verified-email claim; `user_metadata` "can be updated by the authenticated user ... It is not a good place to store authorization data." Fallback used: email match + single-use token + Supabase "Confirm email" enabled (documented in DEPLOY.md).
+- **Test changes (old behaviour now intentionally removed):** `test_add_member_requires_existing_user` became `test_add_member_endpoint_is_gone_and_does_not_enumerate_accounts`; the role-matrix steps that added members now use invites; `test_api_membership_added_audit_event` goes through invite acceptance; the route inventory test lists the invite routes and treats the 410 route as recording nothing; the audit action count test went from 15 to 17.
+- **Evidence:** `tests/test_invites_db.py` (15 tests). Reverting the endpoint behaviour gives `assert 404 == 201` — unknown and known emails answered differently, which is the enumeration.
+
+### Entry AS: v3.6b A-2 — No Rate Limits or Quotas
+- **What happened:** Apart from the verification-check cooldown, nothing limited request rates, domains, organizations, manual scans or alert emails.
+- **Fix:** `src/asm/ratelimit.py`: in-memory sliding window. Middleware limits requests without an `Authorization` header to 20/min per IP (static assets and `/health` exempt); `get_current_user` limits verified users to 60/min and counts failed sign-ins against the IP. Responses are 429 with `Retry-After`. Database quotas: 10 domains per org and 5 owned orgs per user (403, counted under a row lock), 3 manual scans per domain per hour (429 + `Retry-After`), 20 alert emails per domain per 24 h (the worker postpones further alerts instead of dropping them). A test fixture resets the counters per test.
+- **Limitation:** Single process only (`--workers 1`); counters reset on restart. Documented in DEPLOY.md.
+- **Evidence:** `tests/test_ratelimit.py` (15 tests).
+
+### Entry AT: v3.6b A-2 — No Acceptable-Use Terms
+- **What happened:** The public landing page did not say that only owned or authorised targets may be scanned.
+- **Fix:** `GET /terms` (`terms.html`, strict CSP, no inline script or style), linked from the landing footer. It describes DNS TXT proof of control, prohibited use, stored data, limits, no warranty and contact. The text is the project owner's to review; it is not legal advice.
+- **Evidence:** `tests/test_terms_page.py` (3 tests) and browser test `test_browser_terms_page_linked_from_landing_footer`.
+
+### Entry AU: v3.6b A-2 — Revert Proof Reported a Pass Reason That Was an Import Error
+- **What happened:** Reverting `routes_orgs.py` alone to HEAD made the guarding test "fail" with `ImportError: cannot import name 'OrgMemberAdd'` — a failure, but not a behavioural one.
+- **Fix:** Re-ran the proof with `routes_orgs.py`, `schemas.py` and `main.py` reverted together; the test then failed on behaviour (`assert 404 == 201`).
+- **How to prevent it:** A revert proof counts only if the failure message shows the guarded behaviour, not a collection or import error.
+
 ---
 
 ## Architectural Decisions
@@ -385,6 +422,7 @@
 - v3.4d: browser tests 10 passed; default suite 441 passed (owner-verified).
 - v3.5: browser tests 10 -> 15 passed; default suite 441 -> 443 passed.
 - v3.6b A-1: default suite 463 -> 523 passed (+60); browser 15 passed; 9 revert proofs failed as expected and restored byte-identical.
+- v3.6b A-2: default suite 523 -> 579 passed (+56); browser 15 -> 16 passed; 16 revert proofs plus 1 corrected behavioural re-proof failed as expected and restored byte-identical.
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.

@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -12,8 +12,9 @@ from asm.db.models import User
 def upsert_user(session: Session, user_id: uuid.UUID, email: str) -> User:
     """Upsert user record just-in-time on authenticated request.
 
-    Only updates last_seen_at when it is older than 5 minutes to avoid
-    wasteful database write amplification on rapid consecutive requests.
+    Updates last_seen_at only when it is older than 5 minutes, to avoid write
+    amplification on rapid consecutive requests. A changed email is written
+    immediately, because invite acceptance compares it to the invite email.
     """
     stmt = insert(User).values(
         id=user_id,
@@ -27,7 +28,12 @@ def upsert_user(session: Session, user_id: uuid.UUID, email: str) -> User:
             "email": stmt.excluded.email,
             "last_seen_at": func.now(),
         },
-        where=(User.last_seen_at < func.now() - text("INTERVAL '5 minutes'")),
+        # Always write a changed email at once (invites compare it); otherwise
+        # throttle last_seen_at writes to once per 5 minutes.
+        where=or_(
+            User.last_seen_at < func.now() - text("INTERVAL '5 minutes'"),
+            User.email.is_distinct_from(stmt.excluded.email),
+        ),
     )
     session.execute(stmt)
     user = session.get(User, user_id)

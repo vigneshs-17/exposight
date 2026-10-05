@@ -519,3 +519,27 @@ button:focus-visible {
     transform: none !important;
   }
 }
+
+/* Terms & acceptable-use page (v3.6b A8) */
+.terms-content {
+  max-width: 760px;
+  line-height: 1.65;
+}
+
+.terms-content h2 {
+  margin-top: 2rem;
+  font-size: 1.15rem;
+}
+
+.terms-content ul {
+  padding-left: 1.25rem;
+}
+
+.terms-content li {
+  margin-bottom: 0.4rem;
+}
+
+.terms-updated {
+  color: var(--color-muted-text);
+  font-size: 0.9rem;
+}

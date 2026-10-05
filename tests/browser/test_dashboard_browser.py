@@ -755,3 +755,18 @@ def test_browser_landing_page_cta_navigation(
     expect(page.locator("#auth-section")).to_be_visible()
     expect(page.locator("#signin-form")).to_be_visible()
     assert "/app" in page.url
+
+
+def test_browser_terms_page_linked_from_landing_footer(
+    page: Page,
+    live_server: str,
+) -> None:
+    """v3.6b A8: the landing footer links to /terms, which renders under the strict CSP."""
+    page.goto(f"{live_server}/")
+    link = page.locator("footer a[href='/terms']")
+    expect(link).to_be_visible()
+    link.click()
+
+    expect(page.locator("#terms-title")).to_have_text("Terms & Acceptable Use")
+    expect(page.locator("main")).to_contain_text("Only scan what you own")
+    assert page.url.endswith("/terms")

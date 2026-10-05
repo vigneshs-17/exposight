@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
@@ -42,6 +42,12 @@ from asm.db.models import (
     ScanRun,
 )
 from asm.db.scans import enqueue_scan
+from asm.ratelimit import (
+    MAX_DOMAINS_PER_ORG,
+    MAX_MANUAL_SCANS_PER_DOMAIN_PER_HOUR,
+    quota_exceeded,
+    too_many_requests,
+)
 from asm.validators import DomainValidationError, normalize_domain, validate_domain
 from asm.verification import (
     VERIFICATION_CHECK_COOLDOWN_SECONDS,
@@ -108,6 +114,14 @@ def create_domain(
         ) from err
 
     normalized = normalize_domain(validated_name)
+
+    # Lock the org row so concurrent creates cannot both pass the quota count.
+    db.execute(select(Organization.id).where(Organization.id == org_id).with_for_update())
+    domain_count = db.scalar(select(func.count(Domain.id)).where(Domain.org_id == org_id))
+    if (domain_count or 0) >= MAX_DOMAINS_PER_ORG:
+        raise quota_exceeded(
+            f"Domain quota reached: at most {MAX_DOMAINS_PER_ORG} domains per organization."
+        )
 
     existing = db.scalar(
         select(Domain).where(
@@ -459,6 +473,28 @@ def queue_scan(
         if existing_idempotent:
             response.status_code = status.HTTP_200_OK
             return existing_idempotent
+
+    # Manual scan quota (scheduled scans are not counted). Only one scan can be
+    # active per domain (unique index), so this count cannot race far past the limit.
+    window_start = datetime.now(UTC) - timedelta(hours=1)
+    recent_manual = db.scalars(
+        select(ScanRun.created_at)
+        .where(
+            ScanRun.domain_id == domain.id,
+            ScanRun.trigger == "manual",
+            ScanRun.created_at > window_start,
+        )
+        .order_by(ScanRun.created_at.asc())
+    ).all()
+    if len(recent_manual) >= MAX_MANUAL_SCANS_PER_DOMAIN_PER_HOUR:
+        retry_after = (recent_manual[0] - window_start).total_seconds()
+        raise too_many_requests(
+            retry_after,
+            detail=(
+                f"Manual scan quota reached: at most {MAX_MANUAL_SCANS_PER_DOMAIN_PER_HOUR} "
+                "per domain per hour."
+            ),
+        )
 
     try:
         scan_run = enqueue_scan(db, domain.id, trigger="manual", idempotency_key=idempotency_key)

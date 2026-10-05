@@ -125,6 +125,12 @@ def test_env_production_example_variables_and_no_secrets():
         "SMTP_USERNAME",
         "SMTP_PASSWORD",
         "SMTP_STARTTLS",
+        "SMTP_SSL",
+        "OWNER_DB_USER",
+        "OWNER_DB_PASSWORD",
+        "MIGRATION_DATABASE_URL",
+        "APP_DB_USER",
+        "APP_DB_PASSWORD",
     ]
 
     for var in required_vars:
@@ -172,3 +178,31 @@ def test_caddyfile_content_invariants():
         ln.strip() for ln in lower_content.splitlines() if ln.strip().startswith("header ")
     ]
     assert len(header_lines) == 1, f"Caddy must only add HSTS, found: {header_lines}"
+
+
+def test_compose_prod_least_privilege_database_roles():
+    """migrate runs as the owner role; api and worker use the app role; init script mounted."""
+    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    services = config["services"]
+
+    assert "./deploy/postgres-init:/docker-entrypoint-initdb.d:ro" in services["db"]["volumes"]
+    for var in ("OWNER_DB_USER", "OWNER_DB_PASSWORD", "APP_DB_USER", "APP_DB_PASSWORD"):
+        assert var in services["db"]["environment"], f"db service is missing {var}"
+
+    assert services["migrate"]["environment"]["DATABASE_URL"] == "${MIGRATION_DATABASE_URL}"
+    for svc in ("api", "worker"):
+        assert services[svc]["environment"]["DATABASE_URL"] == "${DATABASE_URL}"
+
+    env = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
+    database_url = next(
+        line.split("=", 1)[1] for line in env.splitlines() if line.startswith("DATABASE_URL=")
+    )
+    assert database_url.startswith("postgresql+psycopg://exposight_app:"), (
+        "api/worker DATABASE_URL must use the least-privilege app role, never the superuser"
+    )
+    migration_url = next(
+        line.split("=", 1)[1]
+        for line in env.splitlines()
+        if line.startswith("MIGRATION_DATABASE_URL=")
+    )
+    assert migration_url.startswith("postgresql+psycopg://exposight_owner:")

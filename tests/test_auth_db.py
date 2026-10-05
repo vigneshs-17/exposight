@@ -102,17 +102,30 @@ def test_non_member_gets_404_not_403(client: TestClient, db_session: Session):
     assert res3.status_code == 404
 
 
-def test_add_member_requires_existing_user(client: TestClient):
-    """POST /orgs/{id}/members rejects adding email of user who never logged in."""
+def test_add_member_endpoint_is_gone_and_does_not_enumerate_accounts(
+    client: TestClient, db_session: Session
+):
+    """v3.6b A2: POST /orgs/{id}/members is 410 Gone for every email.
+
+    It used to return 404 "has not logged in yet" for unknown emails and 201 for
+    known ones, which revealed who has an account. Now both answers are identical.
+    """
+    db_session.add(User(id=uuid.uuid4(), email="known_user@example.com"))
+    db_session.commit()
     res = client.post("/orgs", json={"name": "Dev Org"})
     org_id = res.json()["id"]
 
-    add_res = client.post(
+    unknown = client.post(
         f"/orgs/{org_id}/members",
         json={"email": "nonexistent_user@example.com", "role": "viewer"},
     )
-    assert add_res.status_code == 404
-    assert "not logged in" in add_res.json()["detail"]
+    known = client.post(
+        f"/orgs/{org_id}/members", json={"email": "known_user@example.com", "role": "viewer"}
+    )
+    assert unknown.status_code == known.status_code == 410
+    assert unknown.json() == known.json()
+    members = client.get(f"/orgs/{org_id}/members").json()
+    assert [m["email"] for m in members] == ["testuser@example.com"]
 
 
 def test_role_matrix_and_self_removal(db_session: Session):
@@ -155,22 +168,25 @@ def test_role_matrix_and_self_removal(db_session: Session):
         json={"email": "new@example.com", "role": "viewer"},
     ).status_code == 403
 
-    # 2. Admin can add a viewer
+    # 2. Admin can invite a viewer (v3.6b: invites replace direct adds)
     admin_client = make_client_for(admin_user)
     res_add = admin_client.post(
-        f"/orgs/{org.id}/members",
+        f"/orgs/{org.id}/invites",
         json={"email": "new@example.com", "role": "viewer"},
     )
     assert res_add.status_code == 201
 
-    # 3. Admin CANNOT add an owner (403)
-    extra_user = User(id=uuid.uuid4(), email="extra@example.com")
-    db_session.add(extra_user)
-    db_session.commit()
+    # 3. Admin CANNOT invite an owner (403); viewer cannot invite at all (403)
     assert admin_client.post(
-        f"/orgs/{org.id}/members",
+        f"/orgs/{org.id}/invites",
         json={"email": "extra@example.com", "role": "owner"},
     ).status_code == 403
+    viewer_client = make_client_for(viewer_user)
+    assert viewer_client.post(
+        f"/orgs/{org.id}/invites",
+        json={"email": "extra@example.com", "role": "viewer"},
+    ).status_code == 403
+    admin_client = make_client_for(admin_user)
 
     # 4. Admin CANNOT remove another member (403)
     assert admin_client.delete(f"/orgs/{org.id}/members/{viewer_user.id}").status_code == 403

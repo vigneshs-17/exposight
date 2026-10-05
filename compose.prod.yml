@@ -6,6 +6,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Least-privilege roles, created once on a fresh volume by deploy/postgres-init.
+      OWNER_DB_USER: ${OWNER_DB_USER:-exposight_owner}
+      OWNER_DB_PASSWORD: ${OWNER_DB_PASSWORD}
+      APP_DB_USER: ${APP_DB_USER:-exposight_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -14,6 +19,7 @@ services:
     volumes:
       # Official postgres 18 image volume path is /var/lib/postgresql (PGDATA=/var/lib/postgresql/18/docker)
       - pgdata:/var/lib/postgresql
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       app-tier:
     # Port 5432 is strictly internal to app-tier; no host port publishing.
@@ -26,7 +32,10 @@ services:
     command: ["upgrade", "head"]
     restart: "no"
     environment:
-      DATABASE_URL: ${DATABASE_URL}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      # Migrations run as the owner role; api and worker use the app role (DATABASE_URL).
+      DATABASE_URL: ${MIGRATION_DATABASE_URL}
+      APP_DB_USER: ${APP_DB_USER:-exposight_app}
     depends_on:
       db:
         condition: service_healthy
@@ -38,7 +47,7 @@ services:
       context: .
       dockerfile: Dockerfile
     entrypoint: ["uvicorn"]
-    # Single worker (--workers 1): in-memory rate limiting is PLANNED for v3.6b (not implemented yet).
+    # Single worker (--workers 1): rate limits are kept in memory (src/asm/ratelimit.py).
     # Multiple worker processes would each keep their own in-memory counters.
     # --proxy-headers and --forwarded-allow-ips restrict trusted upstream proxy headers strictly
     # to the fixed app-tier subnet (10.89.0.0/24), preventing client IP header spoofing.

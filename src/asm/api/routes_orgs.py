@@ -1,7 +1,10 @@
 """Organization and membership management routes."""
 
+import hashlib
 import logging
+import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -10,18 +13,24 @@ from sqlalchemy import func, select
 from asm.api.deps import CurrentUser, DbSession, require_org_role
 from asm.api.schemas import (
     OrgCreate,
-    OrgMemberAdd,
+    OrgInviteAccept,
+    OrgInviteCreate,
+    OrgInviteCreated,
+    OrgInviteRead,
     OrgMemberRead,
     OrgMemberUpdate,
     OrgRead,
     OrgWithRoleRead,
 )
 from asm.audit import record_event
-from asm.db.models import Membership, Organization, User
+from asm.db.models import Membership, Organization, OrgInvite, User
+from asm.ratelimit import MAX_OWNED_ORGS_PER_USER, quota_exceeded
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orgs", tags=["Organizations"])
+
+INVITE_TTL = timedelta(days=7)
 
 
 @router.post(
@@ -40,6 +49,18 @@ def create_organization(
     db: DbSession,
 ) -> OrgRead:
     """Create a new organization and assign creator as owner."""
+    # Lock the user row so concurrent creates cannot both pass the quota count.
+    db.execute(select(User.id).where(User.id == current_user.id).with_for_update())
+    owned = db.scalar(
+        select(func.count(Membership.id)).where(
+            Membership.user_id == current_user.id, Membership.role == "owner"
+        )
+    )
+    if (owned or 0) >= MAX_OWNED_ORGS_PER_USER:
+        raise quota_exceeded(
+            f"Organization quota reached: you can own at most {MAX_OWNED_ORGS_PER_USER}."
+        )
+
     org = Organization(name=payload.name)
     db.add(org)
     db.flush()  # populate org.id
@@ -137,63 +158,72 @@ def list_organization_members(
 
 @router.post(
     "/{org_id}/members",
-    response_model=OrgMemberRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="Add a member to an organization",
+    status_code=status.HTTP_410_GONE,
+    summary="Removed: add members with an invite instead",
     responses={
-        201: {"description": "Member added successfully"},
         401: {"description": "Authentication required"},
         403: {"description": "Insufficient permissions"},
-        404: {"description": "Organization not found (or non-member), or user not found"},
-        409: {"description": "User already a member"},
+        404: {"description": "Organization not found (or non-member)"},
+        410: {"description": "Use POST /orgs/{org_id}/invites"},
     },
 )
 def add_organization_member(
     org_id: int,
-    payload: OrgMemberAdd,
+    auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
+) -> Response:
+    """Removed in v3.6b: adding members by email revealed which emails had accounts and
+    added people without their consent. Membership checks still run first, so
+    non-members keep getting 404 and viewers 403.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Adding members directly was removed. Create an invite: POST /orgs/{org_id}/invites",
+    )
+
+
+def hash_invite_token(token: str) -> str:
+    """Return the SHA-256 hex digest stored for an invite token (the token is never stored)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@router.post(
+    "/{org_id}/invites",
+    response_model=OrgInviteCreated,
+    status_code=status.HTTP_201_CREATED,
+    summary="Invite someone to the organization by email",
+    responses={
+        201: {"description": "Invite created; the token is shown only in this response"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Insufficient permissions"},
+        404: {"description": "Organization not found (or non-member)"},
+    },
+)
+def create_invite(
+    org_id: int,
+    payload: OrgInviteCreate,
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
     db: DbSession,
-) -> OrgMemberRead:
-    """Add a member to an organization by email.
-
-    - Target user must have logged into the platform at least once.
-    - Admins can add viewers or admins. Only owners can appoint owners.
+) -> OrgInviteCreated:
+    """Create a single-use invite. The response is the same whether or not the email
+    belongs to an existing account: users are never looked up by email.
     """
     _, caller_membership = auth_context
-
     if caller_membership.role != "owner" and payload.role == "owner":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only owners can appoint other owners",
+            detail="Only owners can invite other owners",
         )
 
-    target_user = db.execute(
-        select(User).where(User.email == payload.email)
-    ).scalar_one_or_none()
-    if target_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User with this email has not logged in to the platform yet",
-        )
-
-    existing = db.execute(
-        select(Membership).where(
-            Membership.org_id == org_id,
-            Membership.user_id == target_user.id,
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User is already a member of this organization",
-        )
-
-    membership = Membership(
+    token = secrets.token_urlsafe(32)
+    invite = OrgInvite(
         org_id=org_id,
-        user_id=target_user.id,
+        email=str(payload.email).strip().lower(),
         role=payload.role,
+        token_hash=hash_invite_token(token),
+        invited_by_user_id=caller_membership.user_id,
+        expires_at=datetime.now(UTC) + INVITE_TTL,
     )
-    db.add(membership)
+    db.add(invite)
     db.flush()
 
     record_event(
@@ -201,21 +231,188 @@ def add_organization_member(
         org_id=org_id,
         actor_type="user",
         actor_user_id=caller_membership.user_id,
+        action="invite.created",
+        target_type="invite",
+        target_id=str(invite.id),
+        metadata={"role": invite.role, "expires_at": invite.expires_at.isoformat()},
+    )
+    db.commit()
+    db.refresh(invite)
+    logger.info("Created invite %d for org %d with role %s", invite.id, org_id, invite.role)
+    return OrgInviteCreated(
+        id=invite.id,
+        email=invite.email,
+        role=invite.role,
+        created_at=invite.created_at,
+        expires_at=invite.expires_at,
+        token=token,
+    )
+
+
+@router.get(
+    "/{org_id}/invites",
+    response_model=list[OrgInviteRead],
+    summary="List pending invites",
+    responses={
+        401: {"description": "Authentication required"},
+        403: {"description": "Insufficient permissions"},
+        404: {"description": "Organization not found (or non-member)"},
+    },
+)
+def list_invites(
+    org_id: int,
+    auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
+    db: DbSession,
+) -> list[OrgInviteRead]:
+    """List invites that can still be accepted. Tokens are never returned."""
+    invites = db.scalars(
+        select(OrgInvite)
+        .where(
+            OrgInvite.org_id == org_id,
+            OrgInvite.accepted_at.is_(None),
+            OrgInvite.revoked_at.is_(None),
+            OrgInvite.expires_at > func.now(),
+        )
+        .order_by(OrgInvite.id.desc())
+    ).all()
+    return [OrgInviteRead.model_validate(i) for i in invites]
+
+
+@router.delete(
+    "/{org_id}/invites/{invite_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Revoke a pending invite",
+    responses={
+        204: {"description": "Invite revoked"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Insufficient permissions"},
+        404: {"description": "Organization or invite not found"},
+        409: {"description": "Invite was already accepted or revoked"},
+    },
+)
+def revoke_invite(
+    org_id: int,
+    invite_id: int,
+    auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
+    db: DbSession,
+) -> Response:
+    """Revoke an invite so its token can no longer be used."""
+    _, caller_membership = auth_context
+    invite = db.scalar(
+        select(OrgInvite)
+        .where(OrgInvite.id == invite_id, OrgInvite.org_id == org_id)
+        .with_for_update()
+    )
+    if invite is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invite not found")
+    if invite.accepted_at is not None or invite.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Invite is no longer pending"
+        )
+
+    invite.revoked_at = datetime.now(UTC)
+    record_event(
+        db,
+        org_id=org_id,
+        actor_type="user",
+        actor_user_id=caller_membership.user_id,
+        action="invite.revoked",
+        target_type="invite",
+        target_id=str(invite.id),
+        metadata={"role": invite.role},
+    )
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+invites_router = APIRouter(prefix="/invites", tags=["Organizations"])
+
+INVALID_INVITE_DETAIL = "Invite not found or no longer valid"
+
+
+@invites_router.post(
+    "/accept",
+    response_model=OrgWithRoleRead,
+    summary="Accept an organization invite",
+    responses={
+        200: {"description": "Joined the organization"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Invite was issued to a different email address"},
+        404: {"description": "Invite not found, expired, revoked or already used"},
+        409: {"description": "Already a member of this organization"},
+    },
+)
+def accept_invite(
+    payload: OrgInviteAccept,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> OrgWithRoleRead:
+    """Join an organization with a single-use invite token.
+
+    The signed-in user's email (from the verified Supabase JWT) must equal the
+    invite email. Supabase must have "Confirm email" enabled so that email is
+    proven (see docs/DEPLOY.md). The invite row is locked so a token can only
+    be used once, even by concurrent requests.
+    """
+    invite = db.scalar(
+        select(OrgInvite)
+        .where(OrgInvite.token_hash == hash_invite_token(payload.token))
+        .with_for_update()
+    )
+    now = datetime.now(UTC)
+    if (
+        invite is None
+        or invite.accepted_at is not None
+        or invite.revoked_at is not None
+        or invite.expires_at <= now
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVALID_INVITE_DETAIL)
+
+    user_email = (current_user.email or "").strip().lower()
+    if not user_email or user_email != invite.email:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This invite was issued to a different email address",
+        )
+
+    already = db.scalar(
+        select(Membership.id).where(
+            Membership.org_id == invite.org_id, Membership.user_id == current_user.id
+        )
+    )
+    if already is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="You are already a member of this organization",
+        )
+
+    membership = Membership(org_id=invite.org_id, user_id=current_user.id, role=invite.role)
+    db.add(membership)
+    invite.accepted_at = now
+    invite.accepted_by_user_id = current_user.id
+    db.flush()
+
+    record_event(
+        db,
+        org_id=invite.org_id,
+        actor_type="user",
+        actor_user_id=current_user.id,
         action="membership.added",
         target_type="membership",
         target_id=str(membership.id),
-        metadata={"user_id": str(target_user.id), "role": payload.role},
+        metadata={
+            "user_id": str(current_user.id),
+            "role": membership.role,
+            "via": "invite",
+            "invite_id": invite.id,
+        },
     )
-
     db.commit()
-    db.refresh(membership)
 
-    logger.info("Added user %s to org %d with role %s", target_user.id, org_id, payload.role)
-    return OrgMemberRead(
-        user_id=membership.user_id,
-        email=target_user.email,
-        role=membership.role,
-        created_at=membership.created_at,
+    org = db.get(Organization, invite.org_id)
+    logger.info("User %s joined org %d via invite %d", current_user.id, org.id, invite.id)
+    return OrgWithRoleRead(
+        id=org.id, name=org.name, role=membership.role, created_at=org.created_at
     )
 
 

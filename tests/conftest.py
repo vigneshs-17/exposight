@@ -37,6 +37,16 @@ def mock_sleep():
         yield mocked
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Give every test fresh in-memory rate-limit counters (they are process-global)."""
+    from asm.ratelimit import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
 def validate_test_database_url(test_db_url: str) -> None:
     """Ensure TEST_DATABASE_URL strictly points to a database name ending with '_test'."""
     parsed = urlsplit(test_db_url)

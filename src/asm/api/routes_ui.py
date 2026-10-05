@@ -131,6 +131,27 @@ def get_landing_page(
     )
 
 
+TERMS_LAST_UPDATED = "2026-10-05"
+
+
+@ui_router.get(
+    "/terms",
+    response_class=HTMLResponse,
+    summary="Terms and acceptable-use policy",
+)
+def get_terms_page(
+    response: Response,
+    auth_settings: Annotated[AuthSettings, Depends(get_current_auth_settings)],
+) -> str:
+    """Serve the public terms and acceptable-use page with strict CSP."""
+    apply_security_headers(response, auth_settings, is_fragment=False)
+    template = templates_env.get_template("terms.html")
+    return template.render(
+        last_updated=TERMS_LAST_UPDATED,
+        txt_label="_asm-verify.<your-domain>",
+    )
+
+
 @ui_router.get(
     "/app",
     response_class=HTMLResponse,

@@ -257,14 +257,38 @@ class OrgMemberRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class OrgMemberAdd(BaseModel):
-    """Request payload for adding a member to an organization."""
+class OrgInviteCreate(BaseModel):
+    """Request payload for inviting someone to an organization by email."""
 
-    email: EmailStr = Field(..., description="Email of the existing user to add")
+    email: EmailStr = Field(..., description="Email address the invite is issued to")
     role: Literal["owner", "admin", "viewer"] = Field(
         default="viewer",
-        description="Role to assign to the new member",
+        description="Role granted when the invite is accepted",
     )
+
+
+class OrgInviteRead(BaseModel):
+    """A pending invite (the token is never returned after creation)."""
+
+    id: int
+    email: str
+    role: str
+    created_at: datetime
+    expires_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrgInviteCreated(OrgInviteRead):
+    """Response to invite creation: includes the one-time token, shown only once."""
+
+    token: str = Field(..., description="One-time invite token; share it with the invitee")
+
+
+class OrgInviteAccept(BaseModel):
+    """Request payload for accepting an invite."""
+
+    token: str = Field(..., min_length=20, max_length=128)
 
 
 class OrgMemberUpdate(BaseModel):

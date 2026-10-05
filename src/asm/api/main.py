@@ -1,6 +1,7 @@
 """Main FastAPI application entrypoint for Exposight."""
 
 import logging
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,9 +11,11 @@ from fastapi.staticfiles import StaticFiles
 
 from asm.api.deps import get_current_auth_settings
 from asm.api.routes import public_router, router
+from asm.api.routes_orgs import invites_router
 from asm.api.routes_orgs import router as orgs_router
 from asm.api.routes_ui import build_csp_header, ui_router
 from asm.config import enforce_production_config, is_production
+from asm.ratelimit import UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP, limiter
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,32 @@ app = FastAPI(
 )
 
 
+# Paths never rate limited: static assets (many per page) and the container healthcheck.
+RATE_LIMIT_EXEMPT_PREFIXES = ("/static/", "/health")
+
+
+@app.middleware("http")
+async def unauthenticated_rate_limit_middleware(request: Request, call_next):
+    """Limit requests without an Authorization header per client IP.
+
+    Requests that carry a token are limited in get_current_user instead (per
+    user, or per IP when the token is rejected).
+    """
+    path = request.url.path
+    if "authorization" not in request.headers and not path.startswith(
+        RATE_LIMIT_EXEMPT_PREFIXES
+    ):
+        ip = request.client.host if request.client else "unknown"
+        retry_after = limiter.hit(f"ip:{ip}", UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP)
+        if retry_after is not None:
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Too many requests"},
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def add_security_headers_middleware(request: Request, call_next):
     """Enforce strict CSP on HTML pages and nosniff/no-store on every other response."""
@@ -87,6 +116,7 @@ app.include_router(ui_router)
 app.include_router(public_router)
 app.include_router(router)
 app.include_router(orgs_router)
+app.include_router(invites_router)
 
 
 @app.exception_handler(Exception)

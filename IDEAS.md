@@ -9,3 +9,7 @@ Ideas outside the roadmap go here and are not built.
 - Three.js hero
 - Absolute canonical URL + og:image after deploy
 - Reduced-motion CSS currently flattens the static 3D tilt — revisit
+- Email invite links through the alert outbox instead of returning the token to the inviter
+- Members and invites UI in the dashboard (API only today)
+- Shared rate-limit store (only if the api ever runs more than one process)
+- Make users.email unique, or drop it in favour of the JWT claim (needs a data check first)

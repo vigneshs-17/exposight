@@ -29,6 +29,16 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
     "membership.added": {
         "user_id": ((str, uuid.UUID), False),
         "role": ((str,), False),
+        "via": ((str,), False),
+        "invite_id": ((int,), False),
+    },
+    # Invitee email addresses are deliberately not recorded (no PII in the audit log).
+    "invite.created": {
+        "role": ((str,), False),
+        "expires_at": ((str,), False),
+    },
+    "invite.revoked": {
+        "role": ((str,), False),
     },
     "membership.role_changed": {
         "user_id": ((str, uuid.UUID), False),
@@ -197,6 +207,11 @@ def record_event(
     elif action == "org.created":
         if target_type != "org":
             raise ValueError(f"Action '{action}' requires target_type='org', got '{target_type}'")
+    elif action.startswith("invite."):
+        if target_type != "invite":
+            raise ValueError(
+                f"Action '{action}' requires target_type='invite', got '{target_type}'"
+            )
     elif action.startswith("membership."):
         if target_type != "membership":
             raise ValueError(

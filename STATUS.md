@@ -19,8 +19,11 @@
 - v3.5 Landing Page: GET / public page, GSAP 3.15.0 vendored (Standard no-charge license, not MIT), CSS 3D, reduced-motion + no-JS safe, strict CSP unchanged. Tests: 443 passed (non-browser), 15 browser passed.
 
 ## In Progress
-- v3.6b security hardening, checkpoint A-1 done (not yet committed): production startup guard (`ENVIRONMENT=production`), API docs off in production, nosniff/no-store on JSON API, https-only Supabase origin in CSP; no token-header echo in `WWW-Authenticate`, JWKS stale-key serving, failure backoff and `PyJWKSetError` -> 503; SMTP credentials refused without TLS, `SMTP_SSL` option; alert-recipient changes in audit metadata (counts only), duplicate-domain race -> 409, `move-domain` resets verification/alerts/schedule and refuses during active scans. Tests: 523 passed (non-browser), 15 browser passed.
-- Checkpoint A-2 next: least-privilege Postgres role, org invites, rate limits/quotas, Terms page.
+- v3.6b security hardening. Checkpoint A-1 committed (`afc9b70`). Checkpoint A-2 done, not yet committed: least-privilege Postgres roles (owner runs migrations, app role owns nothing and cannot alter `audit_events` or disable its trigger; migration 0010); single-use email-bound org invites replace adding members by email (`POST /orgs/{id}/members` -> 410; migration 0011); in-memory rate limits (60/min per user, 20/min per IP unauthenticated, 429 + Retry-After) and database quotas (10 domains/org, 5 owned orgs/user, 3 manual scans/domain/hour, 20 alert emails/domain/day); public `/terms` acceptable-use page linked from the landing footer. Tests: 579 passed (non-browser), 16 browser passed.
+- Next: Phase B (correctness bugs, v3.6c). Pending items, in order:
+  1. Account suspension mechanism (block API + cancel schedules, admin CLI, audit event, tests). Not implemented: no way to suspend an account exists today.
+  2. Data retention/purge job + account data deletion endpoint. Not implemented: data is kept until deleted; deletion is manual.
+  3. The Phase B correctness bugs from the audit list.
 
 ## Next
 - v3.6: deploy (scope to be planned).
@@ -35,4 +38,6 @@
 ## Known Limitations
 - DNS lookup during manual check runs while holding the domain database row lock (bounded about 5s).
 - Integration test suite requires PostgreSQL (SQLite is unsupported for DB tests).
-- The table owner can disable the audit_events append-only trigger; no retention/purge; denied requests not logged.
+- Only the table owner role (`exposight_owner`) can disable the audit_events append-only trigger; the app role cannot. No retention/purge; denied requests not logged.
+- Rate limits are in-memory and single-process (`--workers 1`); counters reset on api restart.
+- Invite tokens are returned to the inviter to share; Exposight does not email them.

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terms &amp; Acceptable Use — Exposight</title>
+  <meta name="description" content="Exposight terms of use and acceptable-use policy: only scan what you own or are authorised to test.">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/landing.css">
+</head>
+<body class="landing-body">
+  <header class="landing-header">
+    <div class="landing-header-inner">
+      <a href="/" class="brand-title">
+        <span class="brand-badge">EXP</span>
+        <span>Exposight</span>
+      </a>
+      <nav class="landing-nav" aria-label="Main navigation">
+        <a href="/" class="landing-nav-link">Home</a>
+        <a href="/app" class="btn btn-secondary btn-sm landing-signin-btn">Sign in</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="landing-main">
+    <section class="landing-section">
+      <article class="landing-container terms-content" aria-labelledby="terms-title">
+        <h1 id="terms-title" class="section-title">Terms &amp; Acceptable Use</h1>
+        <p class="terms-updated">Last updated: {{ last_updated }}</p>
+
+        <h2>1. Only scan what you own or are authorised to test</h2>
+        <p>Exposight actively probes hosts and ports. You may add and scan a domain only if you own it or have written permission from its owner to test it. Before any active scan, a domain must be verified. Normally you prove control by publishing a DNS TXT record at <code>{{ txt_label }}</code>. The operator of this service can also verify a domain manually for a limited period (1 to 90 days); that override expires on its own.</p>
+        <p>Exposight re-checks the DNS record about once a day. If the record is missing, it checks again about an hour later. A domain stops being verified, and its scans stop, after two definite misses in a row, so about a day after the record is removed. A failed or inconclusive DNS lookup does not count as a miss.</p>
+
+        <h2>2. Prohibited use</h2>
+        <ul>
+          <li>Scanning, probing or monitoring systems you are not authorised to test.</li>
+          <li>Using Exposight to attack, disrupt or overload any system, or to evade rate limits, bot protection or a web application firewall.</li>
+          <li>Sharing invite tokens or accounts with people who are not allowed to see your organisation's data.</li>
+          <li>Trying to access another organisation's data, or to bypass the limits and quotas of the service.</li>
+        </ul>
+        <p>If a domain is reported for misuse, the operator can revoke its verification, which blocks further scans of that domain.</p>
+
+        <h2>3. What Exposight stores</h2>
+        <ul>
+          <li>Your account: the user ID and email address from the sign-in provider, when you were first seen and when you were last seen.</li>
+          <li>Organisations, memberships and roles.</li>
+          <li>Invites: the invited email address, the role, a hash of the invite token (never the token itself), who sent it, and when it was created, accepted or revoked.</li>
+          <li>Domains: the name, verification state and token, scan schedule and alert settings, including the alert recipient email addresses you configure.</li>
+          <li>Scan results: discovered subdomains, hosts, open ports, TLS and HTTP header findings, risk scores and detected changes.</li>
+          <li>Alert notifications: recipient, subject, body, delivery status, number of attempts and the last delivery error.</li>
+          <li>An append-only audit log of security-relevant actions (who did what, to which object, and when). Audit log entries do not contain email addresses.</li>
+        </ul>
+        <p>Server logs (container output) record requests, including client IP addresses and paths. When an alert email cannot be delivered, the worker log records the recipient address. Rate-limit counters are kept only in memory and are not stored.</p>
+
+        <h2>4. Data retention</h2>
+        <p>Data is kept until it is deleted. There is no automatic purge yet, and there is no self-service way to delete your data: deletion is done manually by the operator on request.</p>
+
+        <h2>5. Limits</h2>
+        <p>Requests are rate limited. When a request rate limit is reached, the service answers <code>429 Too many requests</code> with a <code>Retry-After</code> header. Domains per organisation, organisations per user and manual scans per domain per hour also have limits; reaching one of these returns an error that names the limit. Alert emails are limited per domain per day: emails over that limit are delayed until the limit allows them, not dropped and not reported as an error.</p>
+
+        <h2>6. No warranty</h2>
+        <p>Exposight is an independent portfolio project provided “as is”, without any warranty. Scan results can be incomplete or wrong; they do not replace a professional security assessment.</p>
+
+        <h2>7. Contact</h2>
+        <p>Report security vulnerabilities privately through <a href="https://github.com/vigneshs-17/exposight/security/advisories/new" class="footer-link" rel="noopener noreferrer">GitHub private vulnerability reporting</a>, never in a public issue (see <code>SECURITY.md</code> in the repository). For questions and data deletion requests, open an issue at <a href="https://github.com/vigneshs-17/exposight/issues" class="footer-link" rel="noopener noreferrer">github.com/vigneshs-17/exposight/issues</a>; do not include personal data in a public issue.</p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="landing-footer">
+    <div class="landing-container footer-container">
+      <p class="footer-copy">Exposight — External Attack Surface Management</p>
+      <div class="footer-links">
+        <a href="/" class="footer-link">Home</a>
+        <a href="/app" class="footer-link">Dashboard</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
