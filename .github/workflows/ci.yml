@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege for GITHUB_TOKEN: jobs only need to read the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint & Test (Python ${{ matrix.python-version }})
@@ -64,6 +68,7 @@ jobs:
   docker-arm64:
     name: Docker ARM64 Build (QEMU)
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
       - name: Check out repository

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,8 @@ def send_smtp_email(
 
     with smtplib.SMTP(host=host, port=port, timeout=timeout) as server:
         if use_starttls:
-            server.starttls()
+            # Verify the server certificate and hostname; smtplib's default context does not.
+            server.starttls(context=ssl.create_default_context())
         if username and password:
             server.login(username, password)
         server.send_message(msg)

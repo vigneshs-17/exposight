@@ -39,7 +39,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "asm-saas/0.1 (student project)"
+USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/exposight)"
 CONNECT_TIMEOUT = 5.0
 TOTAL_URL_TIMEOUT = 10.0
 MAX_REDIRECT_HOPS = 5

@@ -38,8 +38,8 @@ services:
       context: .
       dockerfile: Dockerfile
     entrypoint: ["uvicorn"]
-    # Single worker (--workers 1) because phase v3.6b implements in-memory IP rate limiting
-    # across requests. Multiple worker processes would partition in-memory buckets.
+    # Single worker (--workers 1): in-memory rate limiting is PLANNED for v3.6b (not implemented yet).
+    # Multiple worker processes would each keep their own in-memory counters.
     # --proxy-headers and --forwarded-allow-ips restrict trusted upstream proxy headers strictly
     # to the fixed app-tier subnet (10.89.0.0/24), preventing client IP header spoofing.
     command:

@@ -113,7 +113,7 @@ def validate_domain(raw_input: str) -> str:
     try:
         ipaddress.ip_address(domain)
         raise DomainValidationError(
-            f"'{domain}' is an IP address. ASM SaaS requires a domain name (e.g., example.com)."
+            f"'{domain}' is an IP address. Exposight requires a domain name (e.g., example.com)."
         )
     except ValueError:
         # Not an IP address, which is what we want

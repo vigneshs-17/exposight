@@ -422,7 +422,9 @@ def queue_scan(
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
     db: DbSession,
     response: Response,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    idempotency_key: Annotated[
+        str | None, Header(alias="Idempotency-Key", max_length=128)
+    ] = None,
 ) -> Any:
     """Queue a scan run for a verified domain with atomic idempotency and concurrency guards."""
     domain = get_domain_for_org(db, org_id, domain_id)
@@ -507,8 +509,8 @@ def list_domain_scans(
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("viewer"))],
     db: DbSession,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    limit: int = 20,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Sequence[ScanRun]:
     """Retrieve historical scan runs for a domain with optional status filtering and pagination."""
     domain = get_domain_for_org(db, org_id, domain_id)
@@ -534,8 +536,8 @@ def list_org_scans(
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("viewer"))],
     db: DbSession,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    limit: int = 20,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Sequence[ScanRun]:
     """Retrieve all historical scan runs across all domains in this organization."""
     query = (

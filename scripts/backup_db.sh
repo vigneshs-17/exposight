@@ -41,6 +41,6 @@ echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Backup completed successfully ($(du -h 
 
 # Retain last 7 days of backups (delete backups older than 7 days)
 echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Pruning backups older than 7 days..."
-find "${BACKUP_DIR}" -name "exposight_db_*.sql.gz" -type f -mtime +7 -delete
+find "${BACKUP_DIR}" -name "exposight_db_*.sql.gz" -type f -mtime +6 -delete
 
 echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Backup rotation finished."

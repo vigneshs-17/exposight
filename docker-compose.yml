@@ -63,6 +63,8 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
+      CERTSPOTTER_API_KEY: ${CERTSPOTTER_API_KEY:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

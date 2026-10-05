@@ -11,7 +11,7 @@ All third-party images and services used in production are pinned to specific im
 ### Reverse Proxy & Ingress
 - **Image**: `caddy:2.11.4-alpine` (latest Caddy release v2.11.4 at time of pinning; tag rebuilt by Docker Hub, so the tag is pinned, not the digest)
 - **Supported Architectures**: `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v6`, `linux/ppc64le`, `linux/s390x`
-- **Role**: Termination of TLS on ports 80/443, automatic Let's Encrypt / ZeroSSL HTTPS certificate provisioning via ACME, and reverse proxy to `api:8000`. Caddy is configured strictly to forward traffic without overriding or injecting application CSP/HSTS security headers.
+- **Role**: Termination of TLS on ports 80/443, automatic Let's Encrypt / ZeroSSL HTTPS certificate provisioning via ACME, and reverse proxy to `api:8000`. Caddy adds only `Strict-Transport-Security` (the app does not set HSTS); it never overrides the application's CSP or other security headers.
 
 ### Database
 - **Image**: `postgres:18.6-alpine`
@@ -151,7 +151,7 @@ command:
   - "--proxy-headers"
   - "--forwarded-allow-ips=10.89.0.0/24"
 ```
-*Rationale*: Phase v3.6b implements in-memory per-IP rate limiting buckets. Running multiple worker processes without an external Redis instance would shard in-memory counters across processes, allowing clients to bypass rate quotas.
+*Rationale*: in-memory rate limiting is **planned for v3.6b and not implemented yet**. Running multiple worker processes without an external Redis instance would shard in-memory counters across processes, allowing clients to bypass rate quotas.
 
 Additionally, `--proxy-headers` and `--forwarded-allow-ips=10.89.0.0/24` ensure that Uvicorn trusts `X-Forwarded-For` and `X-Forwarded-Proto` only when delivered from Caddy running on the fixed `10.89.0.0/24` Docker network subnet, preventing spoofed IP injection by direct clients.
 
@@ -183,8 +183,9 @@ Always deploy tagged Git releases in production:
    git checkout v3.6.0
    docker compose -f compose.prod.yml up -d --build
    ```
-3. **Rolling back** (to the previous release tag):
+3. **Rolling back** (to the previous release tag). If the newer release added a migration, downgrade it **first, while the newer code is still checked out** (the older tree does not contain the newer migration file):
    ```bash
+   docker compose -f compose.prod.yml run --rm migrate downgrade <previous-revision>
    git checkout <previous-tag>
    docker compose -f compose.prod.yml up -d --build
    ```

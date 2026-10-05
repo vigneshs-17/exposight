@@ -1,3 +1,6 @@
 {$DOMAIN} {
+	# HSTS: the app does not set it, and it only makes sense on the HTTPS edge.
+	# No includeSubDomains/preload until every subdomain is confirmed HTTPS-only.
+	header Strict-Transport-Security "max-age=31536000"
 	reverse_proxy api:8000
 }

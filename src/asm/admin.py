@@ -233,7 +233,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build administrative CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="asm-admin",
-        description="ASM SaaS Administrative Operations",
+        description="Exposight Administrative Operations",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
