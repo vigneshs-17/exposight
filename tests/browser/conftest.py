@@ -166,7 +166,12 @@ def make_page(
     headed = os.getenv("BROWSER_HEADED", "0") == "1"
 
     @contextmanager
-    def _factory(**context_kwargs: Any) -> Generator[Page, None, None]:
+    def _factory(
+        allowed_error_statuses: tuple[int, ...] = (), **context_kwargs: Any
+    ) -> Generator[Page, None, None]:
+        """allowed_error_statuses: extra HTTP statuses a test expects the browser to log
+        (e.g. 403 for a suspended account). Empty by default, so every other test keeps
+        the strict console guard."""
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not headed)
             context: BrowserContext = browser.new_context(**context_kwargs)
@@ -208,6 +213,11 @@ def make_page(
                         or "Response Status Error Code 422" in text
                     ):
                         return
+                    if any(
+                        f"status of {code}" in text or f"Response Status Error Code {code}" in text
+                        for code in allowed_error_statuses
+                    ):
+                        return
                     console_errors.append(text)
 
             def _on_page_error(exc):
@@ -236,6 +246,10 @@ def make_page(
 
                 # 1. Supabase auth mock
                 if url.startswith("https://auth.test-asm.local/"):
+                    if "/auth/v1/logout" in url:
+                        # Sign-out: Supabase answers 204 No Content.
+                        route.fulfill(status=204, body="")
+                        return
                     if "token?grant_type=password" in url:
                         try:
                             post_data = req.post_data_json or {}

@@ -269,6 +269,20 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Mandatory justification for revoking domain verification",
     )
+    for name, help_text in (
+        ("suspend-user", "Suspend an account (403 on every request; may stop org schedules)"),
+        ("unsuspend-user", "Lift a suspension (schedules stay off until an owner re-enables)"),
+    ):
+        admin_account = admin_subparsers.add_parser(name, help=help_text)
+        admin_account.add_argument(
+            "--user-id", type=str, required=True, help="User ID (UUID) of the account"
+        )
+        admin_account.add_argument(
+            "--reason",
+            type=str,
+            required=True,
+            help="Operator-only justification (never shown to users or tenants)",
+        )
 
     return parser
 
@@ -850,9 +864,17 @@ def main(argv: list[str] | None = None) -> int:
             output_dir_arg=args.output_dir,
         )
     if args.command == "admin":
-        from asm.admin import move_domain, revoke_verification, verify_domain
+        from asm.admin import (
+            move_domain,
+            revoke_verification,
+            suspend_user,
+            unsuspend_user,
+            verify_domain,
+        )
         from asm.db.session import get_session_factory
+        from asm.logredact import install_log_redaction
 
+        install_log_redaction()
         factory = get_session_factory()
         with factory() as session:
             if args.admin_command == "move-domain":
@@ -866,6 +888,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.admin_command == "revoke-verification":
                 return revoke_verification(session, args.domain_id, args.reason)
+            elif args.admin_command == "suspend-user":
+                return suspend_user(session, args.user_id, args.reason)
+            elif args.admin_command == "unsuspend-user":
+                return unsuspend_user(session, args.user_id, args.reason)
 
     return 0
 

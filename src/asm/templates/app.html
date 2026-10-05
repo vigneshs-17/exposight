@@ -38,6 +38,14 @@
     </form>
   </section>
 
+  <!-- Shown when the API answers 403 "Account suspended". No reason is ever shown. -->
+  <section id="suspended-panel" class="surface-panel hidden" role="alert" aria-labelledby="suspended-title">
+    <div class="surface-panel-header">
+      <h1 id="suspended-title" class="panel-title">Account suspended</h1>
+      <p class="panel-subtitle">This account has been suspended by the operator of this service, so it cannot use the dashboard or the API. If you think this is a mistake, contact the operator through the repository's GitHub issues.</p>
+    </div>
+  </section>
+
   <!-- Dynamic Content Target Area (Populated by HTMX fragments) -->
   <section id="main-content-area"></section>
 </main>

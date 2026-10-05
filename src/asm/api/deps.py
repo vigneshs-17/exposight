@@ -1,5 +1,6 @@
 """FastAPI authentication and authorization dependencies."""
 
+import logging
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -27,6 +28,8 @@ from asm.ratelimit import (
 )
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+logger = logging.getLogger(__name__)
 
 ROLE_RANKS: dict[str, int] = {
     "viewer": 1,
@@ -176,7 +179,28 @@ def _authenticate(
     return user
 
 
-CurrentUser = Annotated[User, Depends(get_current_user)]
+SUSPENDED_DETAIL = "Account suspended"
+
+
+def get_active_user(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: DbSession,
+) -> User:
+    """Refuse suspended accounts with 403 "Account suspended".
+
+    Kept separate from get_current_user so it also runs when tests replace
+    authentication. suspended_at is read with a fresh SELECT on every request (never
+    from a cached user object), so a suspension takes effect on the very next request.
+    The operator's reason is never included in the response.
+    """
+    suspended_at = db.scalar(select(User.suspended_at).where(User.id == current_user.id))
+    if suspended_at is not None:
+        logger.warning("Refused request from suspended user %s", current_user.id)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=SUSPENDED_DETAIL)
+    return current_user
+
+
+CurrentUser = Annotated[User, Depends(get_active_user)]
 
 
 def require_org_role(minimum_role: str):

@@ -308,6 +308,21 @@ docker compose -f compose.prod.yml up -d --build
 docker compose -f compose.prod.yml ps
 ```
 
+### Suspending an account (operator)
+
+Run inside the api container (the user ID is the UUID shown in the audit log and the database):
+
+```bash
+docker compose -f compose.prod.yml exec api asm admin suspend-user --user-id <uuid> --reason "<why, for operators only>"
+docker compose -f compose.prod.yml exec api asm admin unsuspend-user --user-id <uuid> --reason "<why>"
+```
+
+- The next request from that user gets `403 {"detail": "Account suspended"}`: every signed-in API call and dashboard fragment. Public pages (`/`, `/app`, `/terms`, `/health`) still load; the dashboard then shows an "Account suspended" notice.
+- In every organization where **all** owners are now suspended, all domain scan schedules are turned off and queued scans are cancelled (`failed`, "Cancelled: every owner of this organization is suspended"). Scans already running finish. Organizations that still have an active owner are not changed.
+- Each organization the user belongs to gets an `account.suspended` audit event (operator actor) with the number of schedules and queued scans cancelled.
+- The `--reason` is stored on the user row and written to the operator's log line only. It is never returned by the API, shown in the dashboard or written to the tenant-visible audit log.
+- **Unsuspending restores access but does not turn schedules back on** and does not re-queue cancelled scans. Tell the organization owners to re-enable their schedules (domain settings, Schedule) after an unsuspension.
+
 ### Logs
 ```bash
 docker compose -f compose.prod.yml logs -f --tail=100 api

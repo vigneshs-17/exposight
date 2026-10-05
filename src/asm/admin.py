@@ -5,14 +5,15 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from asm.audit import record_event
-from asm.db.models import Domain, Organization, ScanRun
+from asm.db.models import Domain, Membership, Organization, ScanRun, ScanStage, User
 from asm.db.session import get_session_factory
 from asm.logredact import install_log_redaction
 from asm.verification import generate_verification_token, queue_domain_alert
@@ -272,6 +273,192 @@ def revoke_verification(
     return 0
 
 
+def _parse_user_id(raw: str) -> uuid.UUID | None:
+    """Parse a user UUID argument; print an error and return None if invalid."""
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, AttributeError):
+        sys.stderr.write(f"Error: '{raw}' is not a valid user ID (UUID).\n")
+        return None
+
+
+def suspend_user(session: Session, user_id: str, reason: str) -> int:
+    """Suspend an account (operator only).
+
+    Effects, in one transaction:
+    - users.suspended_at / suspended_reason are set; the next API or dashboard
+      request from this user gets 403 "Account suspended".
+    - In every organization where ALL owners are now suspended (D4), scan schedules
+      are turned off and queued scans are cancelled. Organizations with another
+      active owner keep running. Running scans finish normally.
+    - One account.suspended audit event per organization the user belongs to (D5),
+      with counts only. The reason is operator-only: it is stored on the user row and
+      written to the operator log, never to the tenant-visible audit log.
+    """
+    cleaned_reason = reason.strip() if reason else ""
+    if not cleaned_reason:
+        sys.stderr.write("Error: --reason is required and cannot be empty.\n")
+        return 1
+    parsed_id = _parse_user_id(user_id)
+    if parsed_id is None:
+        return 1
+
+    user = session.scalar(select(User).where(User.id == parsed_id).with_for_update())
+    if user is None:
+        sys.stderr.write(f"Error: User {parsed_id} does not exist.\n")
+        return 1
+    if user.suspended_at is not None:
+        sys.stderr.write(f"Error: User {parsed_id} is already suspended.\n")
+        return 1
+
+    user.suspended_at = datetime.now(UTC)
+    user.suspended_reason = cleaned_reason
+    session.flush()
+
+    org_ids = session.scalars(
+        select(Membership.org_id).where(Membership.user_id == parsed_id).order_by(Membership.org_id)
+    ).all()
+    total_schedules = total_scans = 0
+    for org_id in org_ids:
+        schedules = queued = 0
+        if _all_owners_suspended(session, org_id):
+            schedules, queued = _stop_org_scanning(session, org_id)
+        total_schedules += schedules
+        total_scans += queued
+        record_event(
+            session,
+            org_id=org_id,
+            actor_type="operator",
+            action="account.suspended",
+            target_type="user",
+            target_id=str(parsed_id),
+            metadata={
+                "user_id": str(parsed_id),
+                "schedules_cancelled": schedules,
+                "queued_scans_cancelled": queued,
+            },
+        )
+
+    session.commit()
+    logger.warning(
+        "Operator suspended user_id=%s orgs=%d schedules_cancelled=%d "
+        "queued_scans_cancelled=%d reason=%r",
+        parsed_id,
+        len(org_ids),
+        total_schedules,
+        total_scans,
+        cleaned_reason,
+    )
+    print(
+        f"Suspended user {parsed_id}: {len(org_ids)} organization(s); "
+        f"{total_schedules} schedule(s) turned off and {total_scans} queued scan(s) cancelled "
+        "in organizations with no active owner left."
+    )
+    return 0
+
+
+def unsuspend_user(session: Session, user_id: str, reason: str) -> int:
+    """Lift a suspension. API access returns on the next request.
+
+    Schedules that were turned off by the suspension stay off: an owner must re-enable
+    them. Cancelled scans are not re-queued.
+    """
+    cleaned_reason = reason.strip() if reason else ""
+    if not cleaned_reason:
+        sys.stderr.write("Error: --reason is required and cannot be empty.\n")
+        return 1
+    parsed_id = _parse_user_id(user_id)
+    if parsed_id is None:
+        return 1
+
+    user = session.scalar(select(User).where(User.id == parsed_id).with_for_update())
+    if user is None:
+        sys.stderr.write(f"Error: User {parsed_id} does not exist.\n")
+        return 1
+    if user.suspended_at is None:
+        sys.stderr.write(f"Error: User {parsed_id} is not suspended.\n")
+        return 1
+
+    user.suspended_at = None
+    user.suspended_reason = None
+    org_ids = session.scalars(
+        select(Membership.org_id).where(Membership.user_id == parsed_id).order_by(Membership.org_id)
+    ).all()
+    for org_id in org_ids:
+        record_event(
+            session,
+            org_id=org_id,
+            actor_type="operator",
+            action="account.unsuspended",
+            target_type="user",
+            target_id=str(parsed_id),
+            metadata={"user_id": str(parsed_id)},
+        )
+    session.commit()
+    logger.warning(
+        "Operator unsuspended user_id=%s orgs=%d reason=%r", parsed_id, len(org_ids), cleaned_reason
+    )
+    print(
+        f"Unsuspended user {parsed_id}. Scan schedules turned off by the suspension stay off; "
+        "an organization owner must re-enable them."
+    )
+    return 0
+
+
+def _all_owners_suspended(session: Session, org_id: int) -> bool:
+    """Return True if the organization has no owner left who is not suspended."""
+    active_owners = session.scalar(
+        select(func.count(Membership.id))
+        .join(User, User.id == Membership.user_id)
+        .where(
+            Membership.org_id == org_id,
+            Membership.role == "owner",
+            User.suspended_at.is_(None),
+        )
+    )
+    return (active_owners or 0) == 0
+
+
+def _stop_org_scanning(session: Session, org_id: int) -> tuple[int, int]:
+    """Turn off every domain schedule and cancel queued scans in one organization.
+
+    Returns (schedules_turned_off, queued_scans_cancelled). Running scans are left to
+    finish (the worker holds their lease).
+    """
+    schedules = session.execute(
+        update(Domain)
+        .where(Domain.org_id == org_id, Domain.scan_interval_hours.is_not(None))
+        .values(scan_interval_hours=None, next_scan_at=None)
+    ).rowcount
+    queued_ids = session.scalars(
+        select(ScanRun.id)
+        .join(Domain, Domain.id == ScanRun.domain_id)
+        .where(Domain.org_id == org_id, ScanRun.status == "queued")
+        .with_for_update(of=ScanRun)
+    ).all()
+    if queued_ids:
+        session.execute(
+            update(ScanRun)
+            .where(ScanRun.id.in_(queued_ids))
+            .values(
+                status="failed",
+                finished_at=func.now(),
+                error="Cancelled: every owner of this organization is suspended",
+            )
+        )
+        session.execute(
+            update(ScanStage)
+            .where(ScanStage.scan_run_id.in_(queued_ids), ScanStage.status == "pending")
+            .values(
+                status="skipped",
+                finished_at=func.now(),
+                duration_ms=0,
+                error="Skipped: scan cancelled",
+            )
+        )
+    return schedules or 0, len(queued_ids)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build administrative CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -340,6 +527,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mandatory justification for revoking domain verification",
     )
 
+    # Subcommands: suspend-user / unsuspend-user
+    for name, help_text in (
+        ("suspend-user", "Suspend an account (403 on every request; may stop org schedules)"),
+        ("unsuspend-user", "Lift a suspension (schedules stay off until an owner re-enables)"),
+    ):
+        sub_parser = subparsers.add_parser(name, help=help_text)
+        sub_parser.add_argument(
+            "--user-id", type=str, required=True, help="User ID (UUID) of the account"
+        )
+        sub_parser.add_argument(
+            "--reason",
+            type=str,
+            required=True,
+            help="Operator-only justification (never shown to users or tenants)",
+        )
+
     return parser
 
 
@@ -361,6 +564,10 @@ def main(argv: Sequence[str] | None = None, session: Session | None = None) -> i
             )
         elif args.command == "revoke-verification":
             return revoke_verification(sess, args.domain_id, args.reason)
+        elif args.command == "suspend-user":
+            return suspend_user(sess, args.user_id, args.reason)
+        elif args.command == "unsuspend-user":
+            return unsuspend_user(sess, args.user_id, args.reason)
         return 0
 
     if session is not None:

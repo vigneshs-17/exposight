@@ -770,3 +770,41 @@ def test_browser_terms_page_linked_from_landing_footer(
     expect(page.locator("#terms-title")).to_have_text("Terms & Acceptable Use")
     expect(page.locator("main")).to_contain_text("Only scan what you own")
     assert page.url.endswith("/terms")
+
+
+def test_browser_suspended_account_sees_notice_without_reason(
+    make_page,
+    live_server: str,
+    browser_session_factory: sessionmaker[Session],
+) -> None:
+    """v3.6c B-4: a suspended account sees "Account suspended" and nothing of the reason."""
+    from datetime import UTC, datetime
+
+    reason = "Internal note OPS-9001: scanned third parties"
+    with browser_session_factory() as session:
+        user = User(
+            id=UUID("00000000-0000-0000-0000-000000000001"),
+            email="owner@example.com",
+            suspended_at=datetime.now(UTC),
+            suspended_reason=reason,
+        )
+        org = Organization(name="Acme Corp")
+        session.add_all([user, org])
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=user.id, role="owner"))
+        session.commit()
+
+    with make_page(allowed_error_statuses=(403,)) as page:
+        sign_in(page, "owner@example.com", live_server)
+
+        panel = page.locator("#suspended-panel")
+        expect(panel).to_be_visible()
+        expect(page.locator("#suspended-title")).to_have_text("Account suspended")
+        expect(page.locator("#main-content-area")).to_be_empty()
+        expect(page.locator("#signout-button")).to_be_visible()
+        assert "OPS-9001" not in page.content()
+
+        # Sign-out hides the notice again.
+        page.locator("#signout-button").click()
+        expect(page.locator("#auth-section")).to_be_visible()
+        expect(panel).to_be_hidden()

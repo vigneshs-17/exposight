@@ -377,6 +377,25 @@
 - **Evidence:** fake-clock tests: reverting gives `assert (5.0 + 10.0) <= (10.0 + 1e-09)` and `Expected 'connect_and_inspect_cert_socket' to not have been called. Called 1 times.`
 - **Test scaffolding note:** `httpx.MockTransport` responses built with `content=` are already read, and the code streams them, so the first test run failed with "content has already been streamed"; the tests use `httpx.ByteStream`.
 
+### Entry BI: v3.6c B-4 — Account Suspension
+- **What happened:** There was no way to stop an abusive account; /terms already had to avoid claiming one.
+- **Fix:**
+  - Migration `0013` adds `users.suspended_at` and `users.suspended_reason`; downgrading refuses while any account is suspended (it would silently unsuspend everyone).
+  - `get_active_user` (new dependency, used by `CurrentUser` and the domain router) runs a fresh `SELECT suspended_at` on every request and answers `403 {"detail": "Account suspended"}`. It is separate from `get_current_user` so it also runs when tests replace authentication. The reason is never part of any response.
+  - `asm admin suspend-user` / `unsuspend-user` (both entry points: `asm admin` and the `asm.admin` module) require a reason, lock the user row, and in every organization where all owners are now suspended turn off schedules and cancel queued scans (D4). One audit event per organization with counts only (D5); the reason goes to the operator log line only, because tenants can read their audit log.
+  - Unsuspending restores access only; schedules stay off (documented in README, DEPLOY.md and /terms).
+  - The dashboard recognises the exact 403 body and shows an "Account suspended" panel instead of a generic error; sign-out still works.
+- **Found on the way:** the `asm admin` entry point in `cli.py` never installed the B-1 log redaction (only `asm.admin.main` did); it now does.
+- **Evidence:** `tests/test_suspension_db.py` (11 tests, real auth path with only the JWT signature stubbed): 200 -> suspend in another session -> 403 on the next call to `/orgs`, a domain route and a `/ui` fragment -> unsuspend -> 200; D4 with a sole-owner and a shared-owner org; reason absent from the audit API and audit UI; CLI validation. Browser test: a suspended user sees the panel, the page contains no part of the reason, sign-out hides it.
+
+### Entry BJ: v3.6c B-4 — Browser Test Infrastructure Gaps
+- **What happened:** The first browser run failed for two reasons unrelated to the feature. Chrome logs every 403 as a console error, which the strict teardown guard rejects. Clicking sign-out called Supabase `/auth/v1/logout`, which the auth mock had never needed and answered with 500 ("unexpected auth call").
+- **Fix:** `make_page(allowed_error_statuses=(403,))` lets one test opt in to an expected status; the default stays empty, so no other test's guard was loosened. The auth mock now answers `logout` with 204.
+
+### Entry BK: v3.6c B-4 — A Revert Proof Passed Because the Test Missed a Sentence
+- **What happened:** Removing the opening sentence of the /terms suspension paragraph left the terms test passing: it checked the rest of the paragraph but not that sentence.
+- **Fix:** the test asserts "The operator can also suspend an account."; re-run, the proof fails on that assertion.
+
 ---
 
 ## Architectural Decisions
@@ -496,6 +515,7 @@
 - v3.6c B-1: default suite 586 -> 601 passed (+15); browser 16 passed; 9 revert proofs failed on assertions and restored byte-identical.
 - v3.6c B-2: default suite 601 -> 618 passed (+17); browser 16 passed; 9 revert proofs failed on assertions (2 after test corrections) and restored byte-identical.
 - v3.6c B-3: default suite 618 -> 635 passed (+17); browser 16 passed; 8 revert proofs failed on assertions and restored byte-identical; 3 compatibility guards (no revert proof possible).
+- v3.6c B-4: default suite 635 -> 647 passed (+12); browser 16 -> 17 passed; 8 revert proofs (1 browser) failed on assertions, 1 after a test correction; all restored byte-identical.
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.

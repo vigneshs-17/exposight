@@ -434,6 +434,11 @@ class User(Base):
         default=utc_now,
         nullable=False,
     )
+    # Set by the operator (asm-admin suspend-user). A suspended user gets 403 on every
+    # API and dashboard request. The reason is an operator-only note: it is never
+    # returned by the API, shown in the dashboard or written to the audit log.
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspended_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     memberships: Mapped[list["Membership"]] = relationship(

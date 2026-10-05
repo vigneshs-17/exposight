@@ -40,6 +40,16 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
     "invite.revoked": {
         "role": ((str,), False),
     },
+    # Operator suspensions. The operator's reason is never stored here: tenants can
+    # read their organization's audit log.
+    "account.suspended": {
+        "user_id": ((str, uuid.UUID), False),
+        "schedules_cancelled": ((int,), False),
+        "queued_scans_cancelled": ((int,), False),
+    },
+    "account.unsuspended": {
+        "user_id": ((str, uuid.UUID), False),
+    },
     "membership.role_changed": {
         "user_id": ((str, uuid.UUID), False),
         "old_role": ((str,), False),
@@ -207,6 +217,11 @@ def record_event(
     elif action == "org.created":
         if target_type != "org":
             raise ValueError(f"Action '{action}' requires target_type='org', got '{target_type}'")
+    elif action.startswith("account."):
+        if target_type != "user":
+            raise ValueError(
+                f"Action '{action}' requires target_type='user', got '{target_type}'"
+            )
     elif action.startswith("invite."):
         if target_type != "invite":
             raise ValueError(

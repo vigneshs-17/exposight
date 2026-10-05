@@ -186,3 +186,24 @@ def test_audit_and_invite_downgrades_refused_unless_explicitly_allowed(scratch_d
     assert "the audit log" in refused_0009.stderr
     allowed = _alembic(scratch_db_url, "downgrade", "0008_domain_verification", allow=True)
     assert allowed.returncode == 0, allowed.stderr
+
+
+def test_suspension_downgrade_refused_while_accounts_are_suspended(scratch_db_url):
+    """B-4: downgrading 0013 would silently unsuspend everyone."""
+    assert _alembic(scratch_db_url, "upgrade", "head").returncode == 0
+    engine = sa.create_engine(scratch_db_url)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO users (id, email, created_at, last_seen_at, suspended_at, "
+                "suspended_reason) VALUES (gen_random_uuid(), 'x@example.com', now(), now(), "
+                "now(), 'r')"
+            )
+        )
+    engine.dispose()
+
+    refused = _alembic(scratch_db_url, "downgrade", "0012_scan_runs_domain_index")
+    assert refused.returncode != 0
+    assert "account suspensions" in refused.stderr
+    allowed = _alembic(scratch_db_url, "downgrade", "0012_scan_runs_domain_index", allow=True)
+    assert allowed.returncode == 0, allowed.stderr

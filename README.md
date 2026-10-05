@@ -929,6 +929,13 @@ Hosts: 4 total (0 Critical, 2 High, 2 Medium, 0 Low, 0 Info)
      ```
      - `--domain-id DOMAIN_ID`: Target domain ID (required).
      - `--reason REASON`: Non-empty operator justification for revocation (required).
+   - Operators can suspend and unsuspend accounts (v3.6c):
+     ```bash
+     asm admin suspend-user --user-id <uuid> --reason "Scanned third-party targets"
+     asm admin unsuspend-user --user-id <uuid> --reason "Appeal accepted"
+     ```
+     - A suspended account gets `403 Account suspended` on its next request; the reason is never shown to users or tenants.
+     - Schedules and queued scans stop only in organizations where every owner is suspended. Unsuspending does not turn schedules back on; owners must re-enable them. See `docs/DEPLOY.md`.
 
 ### API Endpoints
 

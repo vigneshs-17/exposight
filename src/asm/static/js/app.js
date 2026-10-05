@@ -62,9 +62,38 @@
     }
   });
 
-  // Handle HTMX response errors (e.g. 401 token expiration)
+  // True if a response body is the API's 403 "Account suspended" answer.
+  function isSuspendedBody(status, bodyText) {
+    if (status !== 403 || !bodyText) return false;
+    try {
+      const parsed = JSON.parse(bodyText);
+      return parsed && parsed.detail === 'Account suspended';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Replace the dashboard with the suspension notice (sign-out stays available).
+  function showSuspended() {
+    const panel = document.getElementById('suspended-panel');
+    const contentArea = document.getElementById('main-content-area');
+    const orgSelector = document.getElementById('org-switcher-select');
+    if (contentArea) {
+      while (contentArea.firstChild) {
+        contentArea.removeChild(contentArea.firstChild);
+      }
+    }
+    if (orgSelector) orgSelector.classList.add('hidden');
+    if (panel) panel.classList.remove('hidden');
+  }
+
+  // Handle HTMX response errors (e.g. 401 token expiration, 403 suspension)
   document.body.addEventListener('htmx:responseError', async function (evt) {
     const xhr = evt.detail.xhr;
+    if (xhr && isSuspendedBody(xhr.status, xhr.responseText)) {
+      showSuspended();
+      return;
+    }
     if (xhr && xhr.status === 401 && !isRefreshing && supabaseClient) {
       isRefreshing = true;
       try {
@@ -130,6 +159,9 @@
 
     if (authContainer) authContainer.classList.remove('hidden');
     if (appShell) appShell.classList.add('hidden');
+    const suspendedPanel = document.getElementById('suspended-panel');
+    if (suspendedPanel) suspendedPanel.classList.add('hidden');
+    if (orgSelector) orgSelector.classList.remove('hidden');
     if (contentArea) {
       while (contentArea.firstChild) {
         contentArea.removeChild(contentArea.firstChild);
@@ -147,7 +179,9 @@
     if (!currentAccessToken) return;
     try {
       const resp = await authenticatedFetch('/orgs');
-      if (resp.status === 401) return;
+      // 401: signed out. 403 on /orgs only means a suspended account; the notice is
+      // already shown by authenticatedFetch, so no generic error is added.
+      if (resp.status === 401 || resp.status === 403) return;
       if (!resp.ok) {
         throw new Error('Failed to fetch organizations');
       }
@@ -264,6 +298,12 @@
         isAuthenticated = false;
         await supabaseClient.auth.signOut();
         onUserSignedOut();
+      }
+    }
+    if (resp.status === 403) {
+      const bodyText = await resp.clone().text();
+      if (isSuspendedBody(resp.status, bodyText)) {
+        showSuspended();
       }
     }
     return resp;

@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from asm.api.deps import (
     DbSession,
-    get_current_user,
+    get_active_user,
     get_domain_for_org,
     get_scan_for_org,
     require_org_role,
@@ -60,7 +60,7 @@ from asm.verification import (
 logger = logging.getLogger(__name__)
 
 public_router = APIRouter()
-router = APIRouter(prefix="/orgs/{org_id}", dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/orgs/{org_id}", dependencies=[Depends(get_active_user)])
 
 
 @public_router.get(

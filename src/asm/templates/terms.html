@@ -40,10 +40,11 @@
           <li>Trying to access another organisation's data, or to bypass the limits and quotas of the service.</li>
         </ul>
         <p>If a domain is reported for misuse, the operator can revoke its verification, which blocks further scans of that domain.</p>
+        <p>The operator can also suspend an account. A suspended account cannot use the dashboard or the API; every signed-in request is refused with "Account suspended". In each organisation where every owner is suspended, scan schedules are turned off and scans that are still queued are cancelled; scans already running finish. Lifting the suspension restores access, but schedules stay off until an owner turns them on again. The operator's reason for a suspension is not shown to the account or to its organisations.</p>
 
         <h2>3. What Exposight stores</h2>
         <ul>
-          <li>Your account: the user ID and email address from the sign-in provider, when you were first seen and when you were last seen.</li>
+          <li>Your account: the user ID and email address from the sign-in provider, when you were first seen and when you were last seen, and, if the account is suspended, when and why (the reason is visible only to the operator).</li>
           <li>Organisations, memberships and roles.</li>
           <li>Invites: the invited email address, the role, a hash of the invite token (never the token itself), who sent it, and when it was created, accepted or revoked.</li>
           <li>Domains: the name, verification state and token, scan schedule and alert settings, including the alert recipient email addresses you configure.</li>

@@ -51,10 +51,17 @@ def test_terms_states_operator_override_and_lapse_timing():
     assert "Scanning stops when the record is removed" not in html
 
 
-def test_terms_makes_no_suspension_claim():
-    html = _get("/terms").text.lower()
-    assert "suspend" not in html
+def test_terms_describes_suspension_as_implemented():
+    """v3.6c B-4: suspension now exists; the page must describe exactly what it does."""
+    html = _get("/terms").text
     assert "revoke its verification, which blocks further scans" in html
+    assert "The operator can also suspend an account." in html
+    assert 'every signed-in request is refused with "Account suspended"' in html
+    assert "where every owner is suspended, scan schedules are turned off" in html
+    assert "schedules stay off until an owner turns them on again" in html
+    assert "reason for a suspension is not shown to the account" in html
+    assert "if the account is suspended, when and why" in html
+    assert "may be suspended" not in html  # no vague, unimplemented threat
 
 
 def test_terms_lists_everything_stored():
