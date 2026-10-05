@@ -18,6 +18,7 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Testing and linting caches
 .pytest_cache/
