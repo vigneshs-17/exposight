@@ -19,11 +19,13 @@
 - v3.5 Landing Page: GET / public page, GSAP 3.15.0 vendored (Standard no-charge license, not MIT), CSS 3D, reduced-motion + no-JS safe, strict CSP unchanged. Tests: 443 passed (non-browser), 15 browser passed.
 
 ## In Progress
-- v3.6b security hardening. Checkpoint A-1 committed (`afc9b70`). Checkpoint A-2 done, not yet committed: least-privilege Postgres roles (owner runs migrations, app role owns nothing and cannot alter `audit_events` or disable its trigger; migration 0010); single-use email-bound org invites replace adding members by email (`POST /orgs/{id}/members` -> 410; migration 0011); in-memory rate limits (60/min per user, 20/min per IP unauthenticated, 429 + Retry-After) and database quotas (10 domains/org, 5 owned orgs/user, 3 manual scans/domain/hour, 20 alert emails/domain/day); public `/terms` acceptable-use page linked from the landing footer. Tests: 579 passed (non-browser), 16 browser passed.
-- Next: Phase B (correctness bugs, v3.6c). Pending items, in order:
-  1. Account suspension mechanism (block API + cancel schedules, admin CLI, audit event, tests). Not implemented: no way to suspend an account exists today.
-  2. Data retention/purge job + account data deletion endpoint. Not implemented: data is kept until deleted; deletion is manual.
-  3. The Phase B correctness bugs from the audit list.
+- v3.6b security hardening done: A-1 (`afc9b70`) and A-2 (`3c43fca`) committed.
+- v3.6c Phase B, checkpoint B-1 done, not yet committed: log redaction of emails, secret URL parameters and JWTs in api/worker/admin logs (uvicorn access log included); worker delivery-failure logs no longer name the recipient; a security-gate failure mid-scan no longer overwrites stages that already succeeded; index `scan_runs (domain_id, id DESC)` (migration 0012); downgrades of 0007/0008 refuse to lose data unless `ALLOW_DATA_LOSS_DOWNGRADE=1`; alert subject `[Exposight]` and remaining user-visible "ASM" text. Tests: 601 passed (non-browser), 16 browser passed.
+- Phase B remaining, in order:
+  - B-2: scanner fixes (TLS 1.0/1.1 detection with the same SSRF checks, certificate details for untrusted certs via `cryptography`, port-scan DNS off the event loop, probe deadline covering connect/headers).
+  - B-3: change detection and scoring (`HTTPS_LOST` only after a real HTTPS loss, `SECURITY_HEADER_WEAKENED`, diff only hosts inspected in both scans, `domain_findings` for `LARGE_ATTACK_SURFACE`).
+  - B-4: account suspension mechanism (block API + UI, cancel schedules in orgs where every owner is suspended, admin CLI suspend/unsuspend, per-org audit events, tests). Not implemented yet: no way to suspend an account exists today.
+  - B-5: account and org deletion endpoints + retention/purge job (off by default, dry run first). Not implemented yet: data is kept until deleted; deletion is manual.
 
 ## Next
 - v3.6: deploy (scope to be planned).

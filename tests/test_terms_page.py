@@ -65,7 +65,8 @@ def test_terms_lists_everything_stored():
         "when you were last seen",
         "Alert notifications: recipient, subject, body, delivery status",
         "the last delivery error",
-        "the worker log records the recipient address",
+        "mask email addresses, tokens and other secrets in their logs",
+        "database server's own error log can still contain values",
     ):
         assert fragment in html, fragment
 

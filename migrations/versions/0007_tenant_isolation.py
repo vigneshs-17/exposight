@@ -11,6 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from asm.db.migration_guards import refuse_lossy_downgrade
+
 # revision identifiers, used by Alembic.
 revision: str = "0007_tenant_isolation"
 down_revision: str | None = "0006_users_organizations_roles"
@@ -69,6 +71,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Dropping domains.org_id loses which organization owns each domain.
+    refuse_lossy_downgrade(
+        op.get_bind(),
+        "SELECT count(*) FROM domains",
+        "the organization that owns each domain (domains.org_id)",
+    )
+
     # 1. Drop per-org unique constraint and re-create global unique index
     op.drop_index("ix_domains_name", table_name="domains")
     op.drop_constraint("uq_domains_org_id_name", "domains", type_="unique")

@@ -5,6 +5,7 @@ import sys
 
 from asm.config import enforce_production_config
 from asm.db.session import get_engine
+from asm.logredact import install_log_redaction
 from asm.worker.worker import ASMWorker
 
 logging.basicConfig(
@@ -15,6 +16,7 @@ logging.basicConfig(
 
 
 def main() -> int:
+    install_log_redaction()
     enforce_production_config(check_auth=False)
     worker = ASMWorker(engine=get_engine())
     try:

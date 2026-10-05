@@ -1,4 +1,4 @@
-/* ASM SaaS Dashboard - Client Application Logic
+/* Exposight Dashboard - Client Application Logic
    Uses Supabase JS (UMD) and HTMX.
    Strict Security Constraints:
    - Zero DOM property mutations with raw untrusted data (textContent only)

@@ -164,7 +164,7 @@ def test_outbox_written_atomically_in_fenced_transaction(
         assert alerts2[0].recipient == "ops@alert-atomic.com"
         assert alerts2[0].status == "pending"
         assert alerts2[0].attempts == 0
-        assert "[ASM] CRITICAL:" in alerts2[0].subject
+        assert "[Exposight] CRITICAL:" in alerts2[0].subject
         assert alerts2[1].recipient == "sec@alert-atomic.com"
         assert alerts2[1].status == "pending"
 
@@ -398,7 +398,7 @@ def test_worker_delivery_success_and_retry_backoff(
             domain_id=domain_id,
             scan_run_id=run_id,
             recipient="user@delivery-test.com",
-            subject="[ASM] HIGH: alert",
+            subject="[Exposight] HIGH: alert",
             body="Alert details",
             status="pending",
             next_attempt_at=datetime.now(UTC) - timedelta(minutes=1),

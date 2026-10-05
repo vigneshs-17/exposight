@@ -15,7 +15,11 @@ from asm.api.routes_orgs import invites_router
 from asm.api.routes_orgs import router as orgs_router
 from asm.api.routes_ui import build_csp_header, ui_router
 from asm.config import enforce_production_config, is_production
+from asm.logredact import install_log_redaction
 from asm.ratelimit import UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP, limiter
+
+# Mask emails and secrets in every log line, uvicorn's access log included.
+install_log_redaction()
 
 logger = logging.getLogger(__name__)
 

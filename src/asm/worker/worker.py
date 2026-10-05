@@ -853,13 +853,15 @@ class ASMWorker:
                 scan_run_id,
                 exc,
             )
-            for st in ("discover", "probe", "portscan", "inspect", "score"):
-                try:
-                    self._mark_stage_skipped(
-                        scan_run_id, claim_token, st, "Skipped: authorization revoked"
-                    )
-                except Exception:
-                    pass
+            # Only stages that never finished are skipped; succeeded/failed stages
+            # keep their real status and results.
+            try:
+                self._skip_unfinished_stages(
+                    scan_run_id, claim_token, "Skipped: authorization revoked"
+                )
+            except LostLeaseError:
+                logger.warning("Lost lease while failing scan_run_id=%d", scan_run_id)
+                return
             self._mark_run_final(scan_run_id, claim_token, "failed", str(exc))
 
         except LostLeaseError as exc:
@@ -1039,6 +1041,33 @@ class ASMWorker:
             )
             if res.rowcount == 0:
                 raise LostLeaseError(f"Failed to mark stage {stage} skipped: 0 rows affected")
+            session.commit()
+
+    def _skip_unfinished_stages(
+        self, scan_run_id: int, claim_token: uuid.UUID, reason: str
+    ) -> None:
+        """Mark every stage that is still 'pending' or 'running' as 'skipped'.
+
+        Stages that already succeeded or failed are left untouched, so their
+        status and stored results stay truthful.
+        """
+        sanitized_reason = sanitize_error_text(reason)
+        with self.session_factory() as session:
+            self._verify_fence(session, scan_run_id, claim_token)
+            session.execute(
+                text(
+                    """
+                    UPDATE scan_stages
+                    SET status = 'skipped',
+                        started_at = coalesce(started_at, now()),
+                        finished_at = now(),
+                        duration_ms = 0,
+                        error = :reason
+                    WHERE scan_run_id = :id AND status IN ('pending', 'running')
+                    """
+                ),
+                {"id": scan_run_id, "reason": sanitized_reason},
+            )
             session.commit()
 
     def _perform_change_detection(
@@ -1525,9 +1554,8 @@ class ASMWorker:
                 except Exception as exc:
                     delivery_error = sanitize_error_text(str(exc))
                     logger.warning(
-                        "Alert delivery failed id=%d recipient=%s attempt=%d/%d: %s",
+                        "Alert delivery failed id=%d attempt=%d/%d: %s",
                         row["id"],
-                        row["recipient"],
                         row["attempts"] + 1,
                         row["max_attempts"],
                         delivery_error,

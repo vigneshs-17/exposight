@@ -191,6 +191,8 @@ class ScanRun(Base):
             "created_at",
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
+        # Scan lists filter by domain and sort newest first.
+        Index("ix_scan_runs_domain_id_id_desc", "domain_id", text("id DESC")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

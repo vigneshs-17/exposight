@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from asm.audit import record_event
 from asm.db.models import Domain, Organization, ScanRun
 from asm.db.session import get_session_factory
+from asm.logredact import install_log_redaction
 from asm.verification import generate_verification_token, queue_domain_alert
 
 logger = logging.getLogger(__name__)
@@ -344,6 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None, session: Session | None = None) -> int:
     """Main admin CLI entrypoint."""
+    install_log_redaction()
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 

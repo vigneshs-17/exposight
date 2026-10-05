@@ -66,7 +66,7 @@ def build_alert_digest(
         )
 
     # Subject header: CR and LF strictly stripped
-    raw_subject = f"[ASM] {highest_sev}: {count} new {exposure_word} on {clean_domain}"
+    raw_subject = f"[Exposight] {highest_sev}: {count} new {exposure_word} on {clean_domain}"
     subject = sanitize_header_field(raw_subject, max_len=255)
 
     # Compute summary counts by tier

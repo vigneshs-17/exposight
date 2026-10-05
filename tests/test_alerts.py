@@ -86,7 +86,9 @@ def test_build_alert_digest_formatting_and_ordering():
     # Subject checks: no CR/LF, highest severity is CRITICAL, count is 3
     assert "\r" not in subject
     assert "\n" not in subject
-    expected_subject_part = "[ASM] CRITICAL: 3 new exposures on example.comBcc: evil@attacker.com"
+    expected_subject_part = (
+        "[Exposight] CRITICAL: 3 new exposures on example.comBcc: evil@attacker.com"
+    )
     assert expected_subject_part in subject
 
     # Body checks: plain text, summaries included, ordered CRITICAL -> HIGH -> LOW

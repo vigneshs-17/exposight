@@ -12,6 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
+from asm.db.migration_guards import refuse_lossy_downgrade
+
 # revision identifiers, used by Alembic.
 revision: str = "0008_domain_verification"
 down_revision: str | None = "0007_tenant_isolation"
@@ -151,6 +153,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Only a verified/unverified flag survives; tokens, methods, expiry and reasons are lost.
+    refuse_lossy_downgrade(
+        op.get_bind(),
+        "SELECT count(*) FROM domains",
+        "domain verification state (tokens, method, expiry, reasons, miss counts)",
+    )
+
     # 1. Re-add legacy columns
     op.add_column(
         "domains",

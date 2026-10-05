@@ -51,7 +51,7 @@
           <li>Alert notifications: recipient, subject, body, delivery status, number of attempts and the last delivery error.</li>
           <li>An append-only audit log of security-relevant actions (who did what, to which object, and when). Audit log entries do not contain email addresses.</li>
         </ul>
-        <p>Server logs (container output) record requests, including client IP addresses and paths. When an alert email cannot be delivered, the worker log records the recipient address. Rate-limit counters are kept only in memory and are not stored.</p>
+        <p>Server logs (container output) record requests, including client IP addresses and paths. The API, worker and admin tool mask email addresses, tokens and other secrets in their logs before writing them. The database server's own error log can still contain values from a failed database statement. Rate-limit counters are kept only in memory and are not stored.</p>
 
         <h2>4. Data retention</h2>
         <p>Data is kept until it is deleted. There is no automatic purge yet, and there is no self-service way to delete your data: deletion is done manually by the operator on request.</p>

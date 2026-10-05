@@ -136,6 +136,14 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
 
 ---
 
+### Log redaction
+
+The api, worker and admin CLI install a log filter (`src/asm/logredact.py`) that masks email addresses (`[email]`), secret-looking URL parameters such as `token=`, `code=` and `access_token=` (`[redacted]`), and JWT-shaped strings (`[jwt]`) in every log line, uvicorn's access log included. Delivery-failure log lines name the notification id, never the recipient. When debugging alert delivery, look up the recipient by notification id in the database instead of in the logs. PostgreSQL's own error log is not filtered: an error such as a unique-constraint violation can print the offending value. Caddy writes no access log (the `Caddyfile` has no `log` directive).
+
+### Database downgrades
+
+Downgrading migrations `0008` or `0007` permanently loses domain verification state or domain ownership. Those downgrades refuse to run when any domain exists unless `ALLOW_DATA_LOSS_DOWNGRADE=1` is set. Take a backup first (`scripts/backup_db.sh`).
+
 ### Least-privilege database roles
 
 Three PostgreSQL roles are used. None of the application processes runs as the superuser.

@@ -308,6 +308,29 @@
 - **Fix:** Re-ran the proof with `routes_orgs.py`, `schemas.py` and `main.py` reverted together; the test then failed on behaviour (`assert 404 == 201`).
 - **How to prevent it:** A revert proof counts only if the failure message shows the guarded behaviour, not a collection or import error.
 
+### Entry AV: v3.6c B-1 — Email Addresses in Worker Logs, and No Log Hygiene Anywhere
+- **What happened:** The worker logged `Alert delivery failed id=%d recipient=%s ...` plus the raw SMTP error, which often quotes the address again. Nothing filtered emails, tokens or JWTs from any log.
+- **R1 check (secrets in URLs):** No route reads a secret from the URL. Invite tokens travel in the POST body (`GET /invites/accept` is 405; a query token is ignored, 422). The dashboard's Supabase client uses `detectSessionInUrl: false`, and session tokens arrive in the URL fragment, which browsers never send. So no secret currently reaches the access log; the filter is defence in depth.
+- **Fix:** `src/asm/logredact.py` wraps the logging record factory once per process (api import, worker entry, admin CLI). It masks emails, secret-looking query parameters and JWT-shaped strings in the message, in each argument (keeping tuple positions, which uvicorn's `AccessFormatter` needs) and in tracebacks. The worker message now names only the notification id.
+- **Scope, stated honestly:** PostgreSQL's own error log is not filtered and Caddy writes no access log. DEPLOY.md and /terms say exactly that.
+- **Evidence:** `tests/test_logredact.py` (11 tests), including a real in-process uvicorn request whose access-log line is checked for an invite token, a PKCE code, an email and a JWT.
+
+### Entry AW: v3.6c B-1 — Losing Verification Mid-Scan Erased Finished Stages
+- **What happened:** The per-stage verification gate raised `SecurityGateError` outside the inner try. The outer handler then marked all five stages `skipped` with no status filter, so a `discover` stage that had succeeded (and still had stored results) was shown as skipped.
+- **Fix:** New `_skip_unfinished_stages` updates only `pending`/`running` stages; a lost lease there is logged and the run abandoned (as before).
+- **Evidence:** `test_gate_failure_mid_scan_keeps_succeeded_stage` (the runner revokes verification during discover). Reverted: `assert 'skipped' == 'succeeded'`.
+
+### Entry AX: v3.6c B-1 — Silent Data Loss on Downgrade; Missing Scan-List Index
+- **What happened:** Downgrading 0008 dropped verification tokens, method, expiry and reasons; downgrading 0007 dropped `domains.org_id` (who owns each domain). Neither warned. Scan lists sorted by `id DESC` within a domain with only a single-column index.
+- **Fix:** `asm.db.migration_guards.refuse_lossy_downgrade` is called at the top of both downgrades; they refuse when any domain exists unless `ALLOW_DATA_LOSS_DOWNGRADE=1`. Revision IDs and upgrade paths are unchanged. Migration `0012` adds `ix_scan_runs_domain_id_id_desc`.
+- **Not guarded (noted, not changed):** downgrades of 0009 (drops `audit_events`) and 0011 (drops pending invites) also lose data; they were outside the approved scope.
+- **Evidence:** tests run the real Alembic chain on a scratch database: refused without the flag, allowed with it, an empty database downgrades to base without the flag, and the index exists after upgrade. The local test database predates the index (`create_all` does not add indexes to existing tables), so the index is checked on the scratch database.
+
+### Entry AY: v3.6c B-1 — Old Brand in User-Visible Text
+- **What happened:** Alert emails were titled `[ASM] ...`; the verification panel said "so ASM can verify"; the served `app.js` header comment said "ASM SaaS".
+- **Fix:** `[Exposight]`, "so Exposight can verify", and the comment updated. Three test expectations of `[ASM]` were updated to `[Exposight]` (approved behaviour change, D10).
+- **Evidence:** `tests/test_brand_text.py` scans every served template, script and stylesheet (vendored libraries excluded).
+
 ---
 
 ## Architectural Decisions
@@ -423,6 +446,8 @@
 - v3.5: browser tests 10 -> 15 passed; default suite 441 -> 443 passed.
 - v3.6b A-1: default suite 463 -> 523 passed (+60); browser 15 passed; 9 revert proofs failed as expected and restored byte-identical.
 - v3.6b A-2: default suite 523 -> 579 passed (+56); browser 15 -> 16 passed; 16 revert proofs plus 1 corrected behavioural re-proof failed as expected and restored byte-identical.
+- v3.6b A-2 terms correction: 579 -> 586 passed (+7).
+- v3.6c B-1: default suite 586 -> 601 passed (+15); browser 16 passed; 9 revert proofs failed on assertions and restored byte-identical.
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.
