@@ -228,8 +228,46 @@
 /* Pipeline Stages Grid */
 .stages-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 1.25rem;
+}
+
+/* 2-column range: last card spans the full row so it is not an orphan */
+.stages-grid .stage-step-card:nth-child(5) {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 768px) {
+  .stages-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+
+  .stages-grid .stage-step-card:nth-child(1),
+  .stages-grid .stage-step-card:nth-child(2),
+  .stages-grid .stage-step-card:nth-child(3) {
+    grid-column: span 2;
+  }
+
+  .stages-grid .stage-step-card:nth-child(4),
+  .stages-grid .stage-step-card:nth-child(5) {
+    grid-column: span 3;
+  }
+}
+
+@media (min-width: 1100px) {
+  .stages-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .stages-grid .stage-step-card:nth-child(n) {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 520px) {
+  .stages-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .stage-step-card {
