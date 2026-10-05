@@ -77,7 +77,7 @@ def test_landing_page_content_invariants():
 
             # Links /app and GitHub
             assert 'href="/app"' in html
-            assert "https://github.com/vigneshs-17/asm-saas" in html
+            assert "https://github.com/vigneshs-17/exposight" in html
 
             # Mandatory copy checks
             assert (

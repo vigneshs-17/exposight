@@ -1,4 +1,4 @@
-![CI](https://github.com/vigneshs-17/asm-saas/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/vigneshs-17/exposight/actions/workflows/ci.yml/badge.svg)
 
 # Exposight - Attack Surface Management CLI
 

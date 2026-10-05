@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 CRTSH_BASE_URL = "https://crt.sh"
 CERTSPOTTER_BASE_URL = "https://api.certspotter.com/v1/issuances"
-USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/asm-saas)"
+USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/exposight)"
 REQUEST_TIMEOUT = 30.0
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = [1, 2]  # Wait 1s after attempt 1, 2s after attempt 2

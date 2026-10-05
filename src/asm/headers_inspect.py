@@ -45,7 +45,7 @@ TIMEOUT_CONFIG = httpx.Timeout(10.0, connect=5.0)
 TOTAL_DEADLINE_SECONDS = 15.0
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 65536
-USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/asm-saas)"
+USER_AGENT = "Exposight/0.1 (+https://github.com/vigneshs-17/exposight)"
 HSTS_MIN_RECOMMENDED_MAX_AGE = 15552000  # 180 days in seconds
 
 
