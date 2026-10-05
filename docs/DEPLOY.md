@@ -124,9 +124,9 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
      ```
    - Update `POSTGRES_PASSWORD` and `DATABASE_URL` with this password.
    - Set `DOMAIN=exposight.dev`.
-   - Set `ENVIRONMENT=production`.
+   - Set `ENVIRONMENT=production`. In this mode the api and worker **refuse to start** if `DATABASE_URL` points to a `_test` database or localhost, or still contains a placeholder, and the api also refuses a non-https or placeholder `SUPABASE_URL` and an empty or placeholder `SUPABASE_PUBLISHABLE_KEY`. Error messages name the setting, never its value. `/docs`, `/redoc` and `/openapi.json` are disabled. An unknown `ENVIRONMENT` value (for example `prod`) also stops startup.
    - Populate `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
-   - Configure SMTP if outgoing email notification digests are desired (leave `SMTP_HOST` empty to disable email).
+   - Configure SMTP if outgoing email notification digests are desired (leave `SMTP_HOST` empty to disable email). Use `SMTP_STARTTLS=true` (port 587) **or** `SMTP_SSL=true` (implicit TLS, port 465), never both. Both verify the server certificate. If `SMTP_USERNAME`/`SMTP_PASSWORD` are set and neither TLS mode is enabled, the worker refuses to send and records a delivery error instead of sending credentials in clear text.
 
 4. **Supabase Auth URLs (production project):** in the Supabase dashboard → Authentication → URL Configuration, set:
    - Site URL: `https://exposight.dev`

@@ -240,6 +240,37 @@
   - Verified with a mutation check: mutating CTA trigger start to `"top -500%"` failed `test_browser_landing_all_sections_reveal_on_scroll` with `TimeoutError: Page.wait_for_function: Timeout 5000ms exceeded`; restoring `landing.js` returned the suite to passing.
 - **How to prevent it:** Quote implementation sources directly for marketing copy; run all browser variations through the central fixture factory with active teardown guards; verify new scroll tests with deliberate mutation checks.
 
+### Entry AK: v3.6b A-1 — Production Mode Was a Comment, Not a Guard
+- **What happened:** `.env.production.example` set `ENVIRONMENT=production`, but no code read it. A production container could start against a `_test` or localhost database, or with placeholder Supabase values. `/docs`, `/redoc` and `/openapi.json` were public in every environment. JSON API responses had no `X-Content-Type-Options` or `Cache-Control`. `build_csp_header` copied a malformed `SUPABASE_URL` into `connect-src` unchanged.
+- **Root cause:** Production safety was documented as "planned for v3.6b" and the security-header middleware only matched HTML paths (`/`, `/app`, `/ui`, `/static`).
+- **Fix:** `asm.config.get_environment()` (unknown values fail), `find_production_config_problems()` and `enforce_production_config()`, called from the API lifespan and the worker entry point. Messages name the setting, never the value. FastAPI docs URLs are `None` in production. The middleware adds `nosniff` and `no-store` to every non-HTML response. `supabase_csp_origin()` accepts only `https://` plus a plain hostname and optional port; anything else leaves `connect-src 'self'`.
+- **How to prevent it:** A setting in an example env file must have a test proving the code reads it. 34 tests in `tests/test_production_mode.py`.
+
+### Entry AL: v3.6b A-1 — Auth Echoed Token Header Values and Failed Hard on JWKS Outages
+- **What happened:** `verify_access_token` built error text from the unverified token header (`Unsupported signing algorithm: {alg}`, `Unknown key ID '{kid}'`). `get_current_user` copied that text into `detail` and inside the quoted `error_description` of `WWW-Authenticate`, so an attacker chose part of a response header. In `JWKSManager`, an expired cache plus a failed fetch returned 503 although valid keys were cached; with no cached keys, every request re-fetched (the throttle needed `self._keys`); a malformed JWKS document raised an uncaught `PyJWKSetError` (500).
+- **Root cause:** One exception string served both logs and clients; JWKS failure handling covered only the network error path.
+- **Fix:** `InvalidTokenError.public_message` holds a fixed client-safe string; header values go to logs via `%r` only. `JWKSManager` serves the cached key during an outage, backs off after failures (doubling from `min_refresh_interval`, cap 300 s, applied with or without cached keys), resets on success, and maps parse errors to `JWKSUnavailableError` (503).
+- **How to prevent it:** Never interpolate untrusted input into a response header; keep log text and client text as separate fields.
+
+### Entry AM: v3.6b A-1 — SMTP Credentials Could Be Sent in Clear Text
+- **What happened:** `send_smtp_email` called `server.login()` whenever a username and password were set, even with `use_starttls=False`. The worker default for `SMTP_STARTTLS` is `false`. There was no implicit-TLS (port 465) option.
+- **Root cause:** TLS and authentication were independent switches.
+- **Fix:** Credentials without STARTTLS or SMTPS raise `SMTPConfigError` before any connection; enabling both modes is also an error. New `SMTP_SSL` setting uses `smtplib.SMTP_SSL` with `ssl.create_default_context()`. Wired into both compose files and both env examples.
+- **How to prevent it:** Make the unsafe combination impossible in code, not only in the example config. 8 tests in `tests/test_smtp_delivery.py`.
+
+### Entry AN: v3.6b A-1 — Audit Gaps, Duplicate-Domain 500, and `move-domain` Carrying Old Trust
+- **What happened:** `domain.alerts_changed` metadata did not show recipient changes, so an admin could redirect alert emails without a trace. Two concurrent `POST /domains` for the same name could both pass the existence check; the loser hit `uq_domains_org_id_name` and returned 500. `admin move-domain` kept the source org's verification, alert recipients and schedule, and ran even while a scan was queued or running.
+- **Root cause:** Audit metadata described only flags; the domain create relied on a check-then-insert; the move copied the row instead of treating it as a new owner.
+- **Fix:** Metadata adds `old_recipient_count`, `new_recipient_count`, `recipients_changed` (case- and order-insensitive; no addresses). `create_domain` maps the unique-constraint `IntegrityError` to 409 (other integrity errors still raise). `move_domain` locks the domain row, refuses while a `queued`/`running` scan exists, resets verification to `pending` with a new token, clears operator override fields, disables alerts, empties recipients, turns the schedule off, and records `verification_reset`/`alerts_reset`/`schedule_reset` in both `domain.moved` events.
+- **Test change:** `test_api_domain_alerts_changed_audit_event` asserts the exact metadata dict; its expected dict gained the three new keys (stricter, not weakened).
+- **How to prevent it:** Every audit action that changes who receives data must record that it changed. 8 tests in `tests/test_domain_hardening_db.py`.
+
+### Entry AO: v3.6b A-1 — Revert Proof Hung on the Worker Startup Test
+- **What happened:** During the revert proof, disabling the production guard made `test_worker_startup_refuses_test_database_in_production` start the real worker loop, so the run hung instead of failing. The pytest process was stopped manually; the proof script restored `config.py` byte-identical.
+- **Root cause:** The test relied on the guard to stop `main()` before the infinite worker loop.
+- **Fix:** The test replaces `ASMWorker` with a function that raises, so a missing guard fails in 0.23 s with `AssertionError: worker started: production guard did not run first`.
+- **How to prevent it:** A test for a guard in front of a long-running loop must stub the loop.
+
 ---
 
 ## Architectural Decisions
@@ -353,6 +384,7 @@
 - v3.4c: tests passed 430 -> 441 (owner-verified).
 - v3.4d: browser tests 10 passed; default suite 441 passed (owner-verified).
 - v3.5: browser tests 10 -> 15 passed; default suite 441 -> 443 passed.
+- v3.6b A-1: default suite 463 -> 523 passed (+60); browser 15 passed; 9 revert proofs failed as expected and restored byte-identical.
 - v3.3 audit logging added 15 tracked actions, migration 0009, and append-only trigger protection.
 - v3.4a added dashboard shell, Supabase auth, domains list, and DNS TXT verification.
 - v3.4b added scans list, scan detail with 5 stages, Fix first prioritization, and attack surface changes.

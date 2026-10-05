@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -53,17 +54,38 @@ ui_router = APIRouter(tags=["Dashboard UI"])
 
 # The scans list shows only the most recent runs; there is no pagination yet.
 SCANS_LIST_LIMIT = 20
+# Hostname labels only: letters, digits, dots and hyphens (no spaces, quotes or ;).
+SAFE_HOSTNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
+
+
+def supabase_csp_origin(supabase_url: str) -> str | None:
+    """Return "https://host[:port]" for SUPABASE_URL, or None if it is not a safe origin.
+
+    The value is placed inside the CSP header, so only an https scheme and a
+    plain hostname are accepted. Anything else (other schemes, credentials,
+    spaces or ';' that could inject extra CSP directives) is dropped.
+    """
+    if not supabase_url or not supabase_url.strip():
+        return None
+    try:
+        parsed = urlparse(supabase_url.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname or ""
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return None
+    if not SAFE_HOSTNAME_RE.fullmatch(host):
+        return None
+    return f"https://{host}:{port}" if port else f"https://{host}"
 
 
 def build_csp_header(supabase_url: str) -> str:
     """Build Content-Security-Policy header scoped to application and Supabase origin."""
     connect_src = "'self'"
-    if supabase_url and supabase_url.strip():
-        parsed = urlparse(supabase_url.strip())
-        if parsed.scheme and parsed.netloc:
-            connect_src = f"'self' {parsed.scheme}://{parsed.netloc}"
-        else:
-            connect_src = f"'self' {supabase_url.strip()}"
+    origin = supabase_csp_origin(supabase_url)
+    if origin:
+        connect_src = f"'self' {origin}"
 
     return (
         f"default-src 'self'; "

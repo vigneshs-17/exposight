@@ -116,10 +116,11 @@ def get_current_user(
             headers={"WWW-Authenticate": auth_header},
         ) from None
     except InvalidTokenError as exc:
-        auth_header = f'Bearer error="invalid_token", error_description="{exc}"'
+        # public_message is a fixed string; never echo token header values (alg, kid).
+        auth_header = f'Bearer error="invalid_token", error_description="{exc.public_message}"'
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
+            detail=exc.public_message,
             headers={"WWW-Authenticate": auth_header},
         ) from None
     except AuthMisconfiguredError:

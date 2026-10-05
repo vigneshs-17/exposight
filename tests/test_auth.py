@@ -11,7 +11,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from asm.auth.config import AuthSettings
-from asm.auth.jwks import JWKSManager
+from asm.auth.jwks import JWKSManager, JWKSUnavailableError
 from asm.auth.token import (
     AuthServiceUnavailableError,
     ExpiredTokenError,
@@ -352,3 +352,112 @@ def test_verify_access_token_unconfigured(ec_key_pair, mock_jwks_manager):
         verify_access_token(token, unconfigured_settings, mock_jwks_manager)
     assert "not configured" in str(exc_info.value).lower()
 
+
+
+def _jwks_manager_with(mock_client, auth_settings, cache_ttl: float = 3600.0) -> JWKSManager:
+    return JWKSManager(
+        jwks_url=auth_settings.jwks_url,
+        fetch_timeout=5.0,
+        min_refresh_interval=10.0,
+        cache_ttl=cache_ttl,
+        http_client=mock_client,
+    )
+
+
+def _ok_response(jwks: dict) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = jwks
+    return resp
+
+
+def _error_response() -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = 503
+    return resp
+
+
+def test_invalid_token_public_message_hides_header_values(ec_key_pair, auth_settings):
+    """The client-facing message is fixed; the raw kid stays in str(exc) for logs only."""
+    ec_priv, _, ec_jwk = ec_key_pair
+    mock_client = MagicMock()
+    mock_client.get.return_value = _ok_response({"keys": [ec_jwk]})
+    manager = _jwks_manager_with(mock_client, auth_settings)
+
+    token = create_token(ec_priv, headers={"kid": 'x"; injected'})
+    with pytest.raises(InvalidTokenError) as excinfo:
+        verify_access_token(token, auth_settings, manager)
+    assert excinfo.value.public_message == "Unknown key ID"
+
+
+def test_jwks_serves_stale_key_when_refresh_fails(ec_key_pair, auth_settings, monkeypatch):
+    """Expired cache + JWKS outage: the previously fetched key keeps working."""
+    _, _, ec_jwk = ec_key_pair
+    mock_client = MagicMock()
+    mock_client.get.return_value = _ok_response({"keys": [ec_jwk]})
+    manager = _jwks_manager_with(mock_client, auth_settings, cache_ttl=60.0)
+    clock = [1000.0]
+    monkeypatch.setattr("asm.auth.jwks.time.monotonic", lambda: clock[0])
+
+    assert manager.get_signing_key("test-ec-kid") is not None
+    clock[0] += 120.0  # cache expired
+    mock_client.get.return_value = _error_response()
+
+    assert manager.get_signing_key("test-ec-kid") is not None
+    assert mock_client.get.call_count == 2
+
+
+def test_jwks_failure_backs_off_without_cached_keys(auth_settings, monkeypatch):
+    """With no cached keys, repeated requests during an outage do not refetch every time."""
+    mock_client = MagicMock()
+    mock_client.get.return_value = _error_response()
+    manager = _jwks_manager_with(mock_client, auth_settings)
+    clock = [1000.0]
+    monkeypatch.setattr("asm.auth.jwks.time.monotonic", lambda: clock[0])
+
+    for _ in range(5):
+        with pytest.raises(JWKSUnavailableError):
+            manager.get_signing_key("any-kid")
+    assert mock_client.get.call_count == 1
+
+    clock[0] += 11.0  # first backoff (min_refresh_interval=10s) has passed
+    with pytest.raises(JWKSUnavailableError):
+        manager.get_signing_key("any-kid")
+    assert mock_client.get.call_count == 2
+
+    clock[0] += 11.0  # second backoff doubled to 20s: still waiting
+    with pytest.raises(JWKSUnavailableError):
+        manager.get_signing_key("any-kid")
+    assert mock_client.get.call_count == 2
+
+
+def test_jwks_backoff_resets_after_success(ec_key_pair, auth_settings, monkeypatch):
+    _, _, ec_jwk = ec_key_pair
+    mock_client = MagicMock()
+    mock_client.get.return_value = _error_response()
+    manager = _jwks_manager_with(mock_client, auth_settings)
+    clock = [1000.0]
+    monkeypatch.setattr("asm.auth.jwks.time.monotonic", lambda: clock[0])
+
+    with pytest.raises(JWKSUnavailableError):
+        manager.get_signing_key("test-ec-kid")
+    clock[0] += 11.0
+    mock_client.get.return_value = _ok_response({"keys": [ec_jwk]})
+    assert manager.get_signing_key("test-ec-kid") is not None
+    assert manager._retry_after == 0.0
+
+
+@pytest.mark.parametrize(
+    "bad_document",
+    [{"keys": []}, {"keys": [{"kty": "nonsense"}]}, {"nokeys": True}, ["not", "a", "dict"]],
+)
+def test_unparseable_jwks_document_is_service_unavailable(auth_settings, ec_key_pair, bad_document):
+    """A broken JWKS body (PyJWKSetError) maps to 503, never an unhandled 500."""
+    ec_priv, _, _ = ec_key_pair
+    mock_client = MagicMock()
+    mock_client.get.return_value = _ok_response(bad_document)
+    manager = _jwks_manager_with(mock_client, auth_settings)
+
+    token = create_token(ec_priv)
+    with pytest.raises(AuthServiceUnavailableError):
+        verify_access_token(token, auth_settings, manager)

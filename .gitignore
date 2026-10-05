@@ -37,3 +37,7 @@ Thumbs.db
 
 .agents/skills/
 skills-lock.json
+
+# Local tooling
+.claude/settings.local.json
+.serena/

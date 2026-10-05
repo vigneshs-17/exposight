@@ -92,6 +92,7 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_SSL: ${SMTP_SSL:-false}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
       # Discovery (crt.sh with Cert Spotter fallback) runs in the worker
       CERTSPOTTER_API_KEY: ${CERTSPOTTER_API_KEY:-}

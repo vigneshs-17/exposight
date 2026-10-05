@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from asm.audit import record_event
-from asm.db.models import Domain, Organization
+from asm.db.models import Domain, Organization, ScanRun
 from asm.db.session import get_session_factory
-from asm.verification import queue_domain_alert
+from asm.verification import generate_verification_token, queue_domain_alert
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,10 @@ def move_domain(
        Moving between ordinary customer orgs via this command is strictly forbidden (exit 1).
     2. The target organization must exist (exit 1).
     3. The target organization cannot already contain a domain with the same name (exit 1).
+    4. The domain cannot have a queued or running scan (exit 1).
+    5. Ownership proof, alert recipients and schedule belong to the old org, so the
+       move resets them: verification back to pending with a new token, alerts
+       disabled with no recipients, schedule off. The new org must re-verify.
     """
     domain = session.get(Domain, domain_id)
     if not domain:
@@ -64,8 +68,38 @@ def move_domain(
         )
         return 1
 
+    # Lock the domain row so the worker cannot start a scan between check and move.
+    session.execute(select(Domain.id).where(Domain.id == domain_id).with_for_update())
+    active_scan_id = session.scalar(
+        select(ScanRun.id).where(
+            ScanRun.domain_id == domain_id,
+            ScanRun.status.in_(("queued", "running")),
+        )
+    )
+    if active_scan_id:
+        sys.stderr.write(
+            f"Error: Domain {domain_id} ('{domain.name}') has an active scan "
+            f"(scan_run_id={active_scan_id}). Wait for it to finish, then retry.\n"
+        )
+        return 1
+
     old_org_id = domain.org_id
     domain.org_id = target_org_id
+
+    # Reset state that the previous org established or configured.
+    domain.verification_status = "pending"
+    domain.verification_method = "dns_txt"
+    domain.verification_token = generate_verification_token()
+    domain.verified_at = None
+    domain.verification_reason = None
+    domain.verification_expires_at = None
+    domain.next_reverification_at = None
+    domain.consecutive_misses = 0
+    domain.alerts_enabled = False
+    domain.alert_emails = []
+    domain.scan_interval_hours = None
+    domain.next_scan_at = None
+    reset_flags = {"verification_reset": True, "alerts_reset": True, "schedule_reset": True}
 
     # Record dual events in the same transaction
     record_event(
@@ -75,7 +109,11 @@ def move_domain(
         action="domain.moved",
         target_type="domain",
         target_id=str(domain_id),
-        metadata={"to_org_id": target_org_id, "reason": f"Moved to org {target_org_id}"},
+        metadata={
+            "to_org_id": target_org_id,
+            "reason": f"Moved to org {target_org_id}",
+            **reset_flags,
+        },
     )
     record_event(
         session,
@@ -84,7 +122,11 @@ def move_domain(
         action="domain.moved",
         target_type="domain",
         target_id=str(domain_id),
-        metadata={"from_org_id": old_org_id, "reason": f"Moved from org {old_org_id}"},
+        metadata={
+            "from_org_id": old_org_id,
+            "reason": f"Moved from org {old_org_id}",
+            **reset_flags,
+        },
     )
 
     session.commit()

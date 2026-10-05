@@ -232,3 +232,35 @@ def test_unconfigured_auth_fails_closed(api_ec_key_pair, db_session: Session, ca
     finally:
         app.dependency_overrides.clear()
 
+
+
+def _unsigned_token_with_header(header: dict) -> str:
+    """Build a JWT-shaped string with an arbitrary (attacker-chosen) header."""
+    import base64
+    import json
+
+    def b64(data: dict) -> str:
+        raw = json.dumps(data).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{b64(header)}.{b64({'sub': 'x'})}.c2ln"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"alg": 'none", error="evil_alg', "kid": "api-ec-kid"},
+        {"alg": "ES256", "kid": 'evil_kid", realm="injected'},
+    ],
+)
+def test_www_authenticate_never_echoes_token_header_values(auth_api_client, header):
+    """alg and kid come from the attacker; they must not appear in the 401 response."""
+    client, _ = auth_api_client
+    token = _unsigned_token_with_header(header)
+    resp = client.get("/orgs", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
+    www_auth = resp.headers["WWW-Authenticate"]
+    assert "evil" not in www_auth
+    assert "injected" not in www_auth
+    assert "evil" not in resp.text
+    assert www_auth.count('"') == 4  # error="..." and error_description="..." only

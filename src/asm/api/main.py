@@ -12,6 +12,7 @@ from asm.api.deps import get_current_auth_settings
 from asm.api.routes import public_router, router
 from asm.api.routes_orgs import router as orgs_router
 from asm.api.routes_ui import build_csp_header, ui_router
+from asm.config import enforce_production_config, is_production
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: validate auth configuration at startup."""
+    enforce_production_config(check_auth=True)
     settings = get_current_auth_settings()
     if settings.supabase_publishable_key.startswith("sb_secret_"):
         raise RuntimeError(
@@ -36,17 +38,25 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def docs_urls(production: bool) -> dict[str, str | None]:
+    """Return FastAPI docs settings; production hides /docs, /redoc and /openapi.json."""
+    if production:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 app = FastAPI(
     title="Exposight API",
     description="Attack Surface Management REST API - Reconnaissance & Surface Monitoring",
     version="0.2.0",
     lifespan=lifespan,
+    **docs_urls(is_production()),
 )
 
 
 @app.middleware("http")
 async def add_security_headers_middleware(request: Request, call_next):
-    """Enforce strict CSP and security headers on /app, /ui/*, and /static/* responses."""
+    """Enforce strict CSP on HTML pages and nosniff/no-store on every other response."""
     response = await call_next(request)
     path = request.url.path
     if (
@@ -64,6 +74,10 @@ async def add_security_headers_middleware(request: Request, call_next):
             response.headers["Referrer-Policy"] = "no-referrer"
         if path.startswith("/ui"):
             response.headers["Cache-Control"] = "no-store"
+    else:
+        # JSON API, /health and docs: never MIME-sniffed, never cached (tenant data).
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Cache-Control", "no-store")
     return response
 
 

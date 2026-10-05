@@ -7,8 +7,12 @@ from typing import Any
 
 import httpx
 from jwt import PyJWK, PyJWKSet
+from jwt.exceptions import PyJWKError, PyJWKSetError
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for the wait between JWKS fetch attempts after repeated failures.
+MAX_FAILURE_BACKOFF_SECONDS = 300.0
 
 
 class JWKSUnavailableError(Exception):
@@ -37,6 +41,10 @@ class JWKSManager:
         self._keys: dict[str, PyJWK] = {}
         self._last_fetch_time: float = 0.0
         self._lock = threading.Lock()
+        # After a failed fetch, no new fetch is attempted before _retry_after
+        # (monotonic time). The wait doubles on each failure up to the maximum.
+        self._failure_backoff: float = 0.0
+        self._retry_after: float = 0.0
 
     def _fetch_jwks(self) -> dict[str, Any]:
         """Perform an HTTP GET request to the JWKS URL with strict 5s timeout."""
@@ -64,8 +72,16 @@ class JWKSManager:
             raise JWKSUnavailableError(f"Unexpected error fetching JWKS: {exc}") from exc
 
     def _load_keys_from_jwks(self, jwks_data: dict[str, Any]) -> None:
-        """Parse JWKS dictionary and populate internal key cache."""
-        jwk_set = PyJWKSet.from_dict(jwks_data)
+        """Parse JWKS dictionary and populate internal key cache.
+
+        Raises JWKSUnavailableError if the document holds no usable keys, so a
+        broken JWKS response is handled like an outage (503), never a 500.
+        """
+        try:
+            jwk_set = PyJWKSet.from_dict(jwks_data)
+        except (PyJWKSetError, PyJWKError, TypeError, AttributeError, ValueError) as exc:
+            logger.error("JWKS document could not be parsed: %s", exc)
+            raise JWKSUnavailableError("JWKS document has no usable keys") from exc
         new_keys: dict[str, PyJWK] = {}
         for key in jwk_set.keys:
             if key.key_id:
@@ -99,9 +115,40 @@ class JWKSManager:
                 )
                 return None
 
-            # 3. Perform fetch
-            jwks_data = self._fetch_jwks()
-            self._load_keys_from_jwks(jwks_data)
+            # 3. A recent fetch failed: back off instead of hitting the endpoint again
+            if now < self._retry_after:
+                return self._stale_key_or_raise(kid, "JWKS endpoint failed recently; backing off")
 
+            # 4. Perform fetch
+            try:
+                jwks_data = self._fetch_jwks()
+                self._load_keys_from_jwks(jwks_data)
+            except JWKSUnavailableError as exc:
+                self._record_failure(now)
+                return self._stale_key_or_raise(kid, str(exc))
+
+            self._failure_backoff = 0.0
+            self._retry_after = 0.0
             # Return key if found after refresh
             return self._keys.get(kid)
+
+    def _record_failure(self, now: float) -> None:
+        """Schedule the next fetch attempt with exponential backoff."""
+        self._failure_backoff = min(
+            max(self._failure_backoff * 2, self.min_refresh_interval, 1.0),
+            MAX_FAILURE_BACKOFF_SECONDS,
+        )
+        self._retry_after = now + self._failure_backoff
+        logger.warning("JWKS fetch failed; next attempt in %.0fs", self._failure_backoff)
+
+    def _stale_key_or_raise(self, kid: str, reason: str) -> PyJWK:
+        """Serve a previously fetched key while JWKS is unavailable, else raise.
+
+        Keys are only ever replaced by a successful fetch, so a cached key was
+        valid when last seen; serving it keeps sign-in working during an outage.
+        """
+        key = self._keys.get(kid)
+        if key is not None:
+            logger.warning("Serving cached JWKS key while the endpoint is unavailable")
+            return key
+        raise JWKSUnavailableError(reason)

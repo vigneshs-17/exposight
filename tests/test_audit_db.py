@@ -626,6 +626,9 @@ def test_api_domain_alerts_changed_audit_event(
         "new_enabled": True,
         "old_min_severity": "MEDIUM",
         "new_min_severity": "HIGH",
+        "old_recipient_count": 0,
+        "new_recipient_count": 1,
+        "recipients_changed": True,
     }
 
 

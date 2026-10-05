@@ -19,7 +19,8 @@
 - v3.5 Landing Page: GET / public page, GSAP 3.15.0 vendored (Standard no-charge license, not MIT), CSS 3D, reduced-motion + no-JS safe, strict CSP unchanged. Tests: 443 passed (non-browser), 15 browser passed.
 
 ## In Progress
-- None.
+- v3.6b security hardening, checkpoint A-1 done (not yet committed): production startup guard (`ENVIRONMENT=production`), API docs off in production, nosniff/no-store on JSON API, https-only Supabase origin in CSP; no token-header echo in `WWW-Authenticate`, JWKS stale-key serving, failure backoff and `PyJWKSetError` -> 503; SMTP credentials refused without TLS, `SMTP_SSL` option; alert-recipient changes in audit metadata (counts only), duplicate-domain race -> 409, `move-domain` resets verification/alerts/schedule and refuses during active scans. Tests: 523 passed (non-browser), 15 browser passed.
+- Checkpoint A-2 next: least-privilege Postgres role, org invites, rate limits/quotas, Terms page.
 
 ## Next
 - v3.6: deploy (scope to be planned).

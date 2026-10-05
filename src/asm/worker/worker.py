@@ -120,6 +120,7 @@ class ASMWorker:
         smtp_password: str | None = None,
         smtp_starttls: bool | None = None,
         smtp_timeout: float | None = None,
+        smtp_ssl: bool | None = None,
     ) -> None:
         if engine is None:
             from asm.db.session import get_engine
@@ -168,6 +169,11 @@ class ASMWorker:
             smtp_timeout
             if smtp_timeout is not None
             else float(os.getenv("SMTP_TIMEOUT", "10.0"))
+        )
+        self.smtp_ssl = (
+            smtp_ssl
+            if smtp_ssl is not None
+            else (os.getenv("SMTP_SSL", "false").lower() in ("true", "1", "yes"))
         )
 
     def install_signal_handlers(self) -> None:
@@ -1468,6 +1474,7 @@ class ASMWorker:
                         password=self.smtp_password,
                         use_starttls=self.smtp_starttls,
                         timeout=self.smtp_timeout,
+                        use_ssl=self.smtp_ssl,
                     )
                 except Exception as exc:
                     delivery_error = sanitize_error_text(str(exc))

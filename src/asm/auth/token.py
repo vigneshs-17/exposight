@@ -36,9 +36,16 @@ class MissingTokenError(AuthError):
 
 
 class InvalidTokenError(AuthError):
-    """Raised when token signature, claims, or format are invalid."""
+    """Raised when token signature, claims, or format are invalid.
 
-    pass
+    str(exc) may contain values copied from the attacker-controlled token
+    header and is for logs only. public_message is a fixed string that is safe
+    to return to clients (response body and WWW-Authenticate header).
+    """
+
+    def __init__(self, message: str, public_message: str | None = None) -> None:
+        super().__init__(message)
+        self.public_message = public_message or message
 
 
 class ExpiredTokenError(AuthError):
@@ -104,8 +111,11 @@ def verify_access_token(
 
     alg = unverified_header.get("alg")
     if alg not in ALLOWED_ALGORITHMS:
-        logger.warning("Rejected token with disallowed signing algorithm: %s", alg)
-        raise InvalidTokenError(f"Unsupported signing algorithm: {alg}")
+        logger.warning("Rejected token with disallowed signing algorithm: %r", alg)
+        raise InvalidTokenError(
+            f"Unsupported signing algorithm: {alg}",
+            public_message="Unsupported signing algorithm",
+        )
 
     kid = unverified_header.get("kid")
     if not kid:
@@ -118,8 +128,8 @@ def verify_access_token(
         raise AuthServiceUnavailableError(str(exc)) from exc
 
     if not signing_key:
-        logger.warning("Unable to resolve signing key for kid '%s'", kid)
-        raise InvalidTokenError(f"Unknown key ID '{kid}'")
+        logger.warning("Unable to resolve signing key for kid %r", kid)
+        raise InvalidTokenError(f"Unknown key ID '{kid}'", public_message="Unknown key ID")
 
     try:
         payload = jwt.decode(

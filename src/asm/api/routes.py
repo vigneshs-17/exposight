@@ -31,7 +31,7 @@ from asm.api.schemas import (
     ScanRunDetail,
     ScanRunRead,
 )
-from asm.audit import build_audit_query, record_event
+from asm.audit import build_audit_query, recipients_changed, record_event
 from asm.db.models import (
     AlertNotification,
     Domain,
@@ -130,7 +130,18 @@ def create_domain(
         verification_method="dns_txt",
     )
     db.add(domain)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as err:
+        # Two concurrent requests can both pass the existence check above; the
+        # unique constraint decides, and the loser gets 409 instead of a 500.
+        db.rollback()
+        if "uq_domains_org_id_name" not in str(err.orig):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Domain '{normalized}' already exists.",
+        ) from None
 
     _, caller_membership = auth_context
     record_event(
@@ -765,9 +776,11 @@ def update_domain_alerts(
 
     old_enabled = domain.alerts_enabled
     old_severity = domain.alert_min_severity
+    old_emails = list(domain.alert_emails or [])
+    new_emails = [str(email) for email in payload.alert_emails]
 
     domain.alerts_enabled = payload.alerts_enabled
-    domain.alert_emails = [str(email) for email in payload.alert_emails]
+    domain.alert_emails = new_emails
     domain.alert_min_severity = payload.alert_min_severity
 
     _, caller_membership = auth_context
@@ -784,6 +797,10 @@ def update_domain_alerts(
             "new_enabled": payload.alerts_enabled,
             "old_min_severity": old_severity,
             "new_min_severity": payload.alert_min_severity,
+            # Counts and a changed flag only: recipient addresses never enter the audit log.
+            "old_recipient_count": len(old_emails),
+            "new_recipient_count": len(new_emails),
+            "recipients_changed": recipients_changed(old_emails, new_emails),
         },
     )
 

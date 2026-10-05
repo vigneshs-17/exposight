@@ -51,6 +51,9 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
         "new_enabled": ((bool,), False),
         "old_min_severity": ((str, type(None)), False),
         "new_min_severity": ((str, type(None)), False),
+        "old_recipient_count": ((int,), False),
+        "new_recipient_count": ((int,), False),
+        "recipients_changed": ((bool,), False),
     },
     "verification.checked": {
         "outcome": ((str,), False),
@@ -76,6 +79,9 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
         "reason": ((str,), True),
         "to_org_id": ((int, str), False),
         "from_org_id": ((int, str), False),
+        "verification_reset": ((bool,), False),
+        "alerts_reset": ((bool,), False),
+        "schedule_reset": ((bool,), False),
     },
     "scan.queued": {
         "scan_run_id": ((int,), False),
@@ -84,6 +90,14 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
 }
 
 AUDIT_ACTIONS = set(ACTION_METADATA_SPECS.keys())
+
+
+def recipients_changed(old_emails: list[str], new_emails: list[str]) -> bool:
+    """Return True if the set of alert recipients changed (case-insensitive, order ignored).
+
+    Used so the audit log records THAT recipients changed without storing addresses.
+    """
+    return {e.strip().lower() for e in old_emails} != {e.strip().lower() for e in new_emails}
 
 
 def redact_sensitive_text(val: str) -> str:

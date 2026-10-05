@@ -3,6 +3,7 @@
 import logging
 import sys
 
+from asm.config import enforce_production_config
 from asm.db.session import get_engine
 from asm.worker.worker import ASMWorker
 
@@ -14,6 +15,7 @@ logging.basicConfig(
 
 
 def main() -> int:
+    enforce_production_config(check_auth=False)
     worker = ASMWorker(engine=get_engine())
     try:
         worker.run()
