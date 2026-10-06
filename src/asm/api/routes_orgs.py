@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
 from asm.api.deps import CurrentUser, DbSession, require_org_role
 from asm.api.schemas import (
@@ -23,7 +23,7 @@ from asm.api.schemas import (
     OrgWithRoleRead,
 )
 from asm.audit import record_event
-from asm.db.models import Membership, Organization, OrgInvite, User
+from asm.db.models import Domain, Membership, Organization, OrgInvite, ScanRun, User
 from asm.ratelimit import MAX_OWNED_ORGS_PER_USER, quota_exceeded
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,99 @@ def list_my_organizations(
         )
         for row in results
     ]
+
+
+TOMBSTONE_KIND = "deleted"
+
+
+@router.delete(
+    "/{org_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an organization and all of its domains and scan data",
+    responses={
+        204: {"description": "Organization deleted"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Only owners can delete an organization"},
+        404: {"description": "Organization not found (or non-member)"},
+        409: {"description": "A scan in this organization is running"},
+    },
+)
+def delete_organization(
+    org_id: int,
+    auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("owner"))],
+    db: DbSession,
+) -> Response:
+    """Delete the org's domains (cascading to scans, changes and alert notifications),
+    memberships and invites.
+
+    The organization row itself stays as a tombstone named deleted-org-<id>: audit
+    events reference it (ON DELETE RESTRICT) and the audit log is append-only. With
+    no memberships left, nobody can reach it again.
+
+    Refused with 409 while a scan is running (as asm admin move-domain). Queued scans
+    and schedules are cancelled in the same transaction as the delete.
+    """
+    _, caller_membership = auth_context
+    org = db.scalar(select(Organization).where(Organization.id == org_id).with_for_update())
+
+    # Lock the org's active scans: the worker claims with SKIP LOCKED, so a queued scan
+    # cannot start running between this check and the delete.
+    active = db.execute(
+        select(ScanRun.id, ScanRun.status)
+        .join(Domain, Domain.id == ScanRun.domain_id)
+        .where(Domain.org_id == org_id, ScanRun.status.in_(("queued", "running")))
+        .with_for_update(of=ScanRun)
+    ).all()
+    running_ids = sorted(row.id for row in active if row.status == "running")
+    if running_ids:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A scan is running in this organization (scan_run_id={running_ids[0]}). "
+            "Wait for it to finish, then retry.",
+        )
+    queued_ids = [row.id for row in active]
+    queued_cancelled = 0
+    if queued_ids:
+        queued_cancelled = db.execute(
+            update(ScanRun)
+            .where(ScanRun.id.in_(queued_ids))
+            .values(
+                status="failed", finished_at=func.now(), error="Cancelled: organization deleted"
+            )
+        ).rowcount
+    schedules_cancelled = db.execute(
+        update(Domain)
+        .where(Domain.org_id == org_id, Domain.scan_interval_hours.is_not(None))
+        .values(scan_interval_hours=None, next_scan_at=None)
+    ).rowcount
+
+    domains_deleted = db.execute(delete(Domain).where(Domain.org_id == org_id)).rowcount
+    invites_deleted = db.execute(delete(OrgInvite).where(OrgInvite.org_id == org_id)).rowcount
+    members_removed = db.execute(delete(Membership).where(Membership.org_id == org_id)).rowcount
+    org.name = f"deleted-org-{org_id}"
+    org.system_kind = TOMBSTONE_KIND
+
+    record_event(
+        db,
+        org_id=org_id,
+        actor_type="user",
+        actor_user_id=caller_membership.user_id,
+        action="org.deleted",
+        target_type="org",
+        target_id=str(org_id),
+        metadata={
+            "domains_deleted": domains_deleted,
+            "members_removed": members_removed,
+            "invites_deleted": invites_deleted,
+            "schedules_cancelled": schedules_cancelled,
+            "queued_scans_cancelled": queued_cancelled,
+        },
+    )
+    db.commit()
+    logger.info(
+        "User %s deleted org %d (%d domains)", caller_membership.user_id, org_id, domains_deleted
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(
@@ -588,4 +681,82 @@ def remove_organization_member(
     db.delete(target_member)
     db.commit()
     logger.info("Removed user %s from org %d", user_id, org_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+me_router = APIRouter(prefix="/me", tags=["Account"])
+
+
+@me_router.delete(
+    "",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete your own account",
+    responses={
+        204: {"description": "Account deleted"},
+        401: {"description": "Authentication required"},
+        403: {"description": "Account suspended"},
+        409: {"description": "You are the only owner of one or more organizations"},
+    },
+)
+def delete_my_account(current_user: CurrentUser, db: DbSession) -> Response:
+    """Delete the signed-in user's account, memberships and invites sent to their email.
+
+    Refused with 409 while the user is the only owner of any organization: they must
+    hand ownership to someone else or delete those organizations first (D6). Suspended
+    accounts get 403 from CurrentUser, so deleting cannot be used to shed a suspension.
+    The sign-in provider's identity is not deleted (Exposight holds no admin key for it):
+    signing in again creates a new, empty Exposight account.
+    """
+    user = db.scalar(select(User).where(User.id == current_user.id).with_for_update())
+    memberships = db.scalars(
+        select(Membership).where(Membership.user_id == user.id).order_by(Membership.org_id)
+    ).all()
+
+    owned_org_ids = [m.org_id for m in memberships if m.role == "owner"]
+    # Lock the owned orgs so a concurrent demotion of the other owner cannot slip past.
+    db.execute(
+        select(Organization.id).where(Organization.id.in_(owned_org_ids)).with_for_update()
+    )
+    sole_owner_orgs = db.execute(
+        select(Organization.id, Organization.name)
+        .where(Organization.id.in_(owned_org_ids))
+        .where(
+            ~select(Membership.id)
+            .where(
+                Membership.org_id == Organization.id,
+                Membership.role == "owner",
+                Membership.user_id != user.id,
+            )
+            .exists()
+        )
+        .order_by(Organization.id)
+    ).all()
+    if sole_owner_orgs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "You are the only owner of these organizations. Transfer "
+                "ownership or delete them first.",
+                "organizations": [{"id": o.id, "name": o.name} for o in sole_owner_orgs],
+            },
+        )
+
+    for m in memberships:
+        record_event(
+            db,
+            org_id=m.org_id,
+            actor_type="user",
+            actor_user_id=user.id,
+            action="account.deleted",
+            target_type="user",
+            target_id=str(user.id),
+            metadata={"user_id": str(user.id), "role": m.role},
+        )
+    email = (user.email or "").strip().lower()
+    if email:
+        db.execute(delete(OrgInvite).where(func.lower(OrgInvite.email) == email))
+    # Memberships go with the user row (ON DELETE CASCADE).
+    db.execute(delete(User).where(User.id == user.id))
+    db.commit()
+    logger.info("User %s deleted their account (%d memberships)", user.id, len(memberships))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

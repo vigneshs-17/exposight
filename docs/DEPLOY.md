@@ -323,6 +323,21 @@ docker compose -f compose.prod.yml exec api asm admin unsuspend-user --user-id <
 - The `--reason` is stored on the user row and written to the operator's log line only. It is never returned by the API, shown in the dashboard or written to the tenant-visible audit log.
 - **Unsuspending restores access but does not turn schedules back on** and does not re-queue cancelled scans. Tell the organization owners to re-enable their schedules (domain settings, Schedule) after an unsuspension.
 
+### Account and organization deletion
+- `DELETE /me` deletes the caller's Exposight account, its memberships and every invite addressed to its email. It answers `409` and names the organizations while the caller is the only owner of any of them. Suspended accounts get `403` and cannot delete themselves; their deletion requests come to the operator.
+- `DELETE /orgs/{id}` (owner only) deletes the organization's domains (cascading to scans, changes and alert notifications), memberships and invites. It answers `409` while any scan in the organization is running (as `move-domain`); queued scans and schedules are cancelled in the same transaction. The `organizations` row stays as a tombstone (`name = deleted-org-<id>`, `system_kind = deleted`) because `audit_events` references it and is append-only. A scan running at that moment loses its rows; the worker's next lease check (`_verify_fence`) fails and it abandons that scan (not covered by a test).
+- **The Supabase login account is not deleted** (D7): Exposight holds no `service_role` key. When a user asks for full deletion, delete their identity in the Supabase dashboard (Authentication, Users) after they have called `DELETE /me`; otherwise signing in again creates a new, empty Exposight user.
+- Kept after deletion: audit events (user ID only), alert recipient addresses other organizations typed in, and the notifications sent to them.
+
+### Retention purge (off by default)
+Periods (D8): finished scans 180 days, sent or failed alert notifications 90 days, invites 30 days after acceptance, revocation or expiry. Each domain's latest successful scan and any scan used as a change baseline are always kept. `audit_events` are never purged.
+
+1. Preview, delete nothing:
+   ```bash
+   docker compose -f compose.prod.yml exec api asm admin purge --dry-run
+   ```
+2. If the counts look right, either run it once (`asm admin purge --execute`) or set `RETENTION_PURGE_ENABLED=true` for the worker, which then purges at most once an hour.
+
 ### Logs
 ```bash
 docker compose -f compose.prod.yml logs -f --tail=100 api

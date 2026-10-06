@@ -105,6 +105,8 @@ services:
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
       # Discovery (crt.sh with Cert Spotter fallback) runs in the worker
       CERTSPOTTER_API_KEY: ${CERTSPOTTER_API_KEY:-}
+      # Retention purge (D9): off unless set to true after a dry run (docs/DEPLOY.md)
+      RETENTION_PURGE_ENABLED: ${RETENTION_PURGE_ENABLED:-false}
     depends_on:
       migrate:
         condition: service_completed_successfully

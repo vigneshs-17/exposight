@@ -24,8 +24,8 @@ def test_audit_module_docstring():
     assert "append-only against the application; the table owner can disable the trigger" in doc
 
 
-def test_19_audit_actions():
-    """Verify exact 19 audit actions (v3.6b added invite.*, v3.6c added account.*)."""
+def test_21_audit_actions():
+    """Exact 21 audit actions (v3.6b added invite.*, v3.6c account.* and org.deleted)."""
     expected_actions = {
         "org.created",
         "membership.added",
@@ -46,9 +46,11 @@ def test_19_audit_actions():
         "invite.revoked",
         "account.suspended",
         "account.unsuspended",
+        "account.deleted",
+        "org.deleted",
     }
     assert AUDIT_ACTIONS == expected_actions
-    assert len(AUDIT_ACTIONS) == 19
+    assert len(AUDIT_ACTIONS) == 21
 
 
 def test_redact_sensitive_text():

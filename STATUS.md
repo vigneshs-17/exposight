@@ -24,8 +24,24 @@
 - Phase B remaining, in order:
   - B-2 committed (`9953a22`): TLS 1.0/1.1 now detected (legacy passes, real handshake tests); untrusted certificates keep expiry, names, issuer and serial (DER parsed with `cryptography`, now a direct dependency); the TLS socket fallback resolves once, refuses any non-public address and connects only to the validated IP with SNI; port-scan DNS runs off the event loop; each probe request's timeouts fit the remaining deadline; 0009/0011 downgrades guarded. Tests: 618 passed (non-browser), 16 browser passed.
   - B-3 committed (`a3ec75a`): `HTTPS_LOST` only when the baseline reached HTTPS; weak HSTS is `SECURITY_HEADER_WEAKENED` (stored older changes keep `SECURITY_HEADER_REMOVED` and still display); missing->weak HSTS is `SECURITY_HEADER_ADDED`; TLS/header changes only for hosts inspected in both scans; `LARGE_ATTACK_SURFACE` in a new report-level `domain_findings` list (shown in the dashboard and counted); header inspection uses the same per-hop deadline budget as the prober and skips the certificate fallback once time is up. Tests: 635 passed (non-browser), 16 browser passed.
-  - B-4 done, not yet committed: `asm admin suspend-user` / `unsuspend-user`; a suspended account gets 403 "Account suspended" on its next request (fresh DB read per request, separate `get_active_user` dependency) and the dashboard shows a notice; the reason is operator-only; schedules and queued scans stop only in orgs where every owner is suspended (D4); one `account.suspended`/`account.unsuspended` audit event per org (D5); unsuspend does not restart schedules; migration 0013 (guarded downgrade); /terms updated. Tests: 647 passed (non-browser), 17 browser passed.
-  - B-5: account and org deletion endpoints + retention/purge job (off by default, dry run first). Not implemented yet: data is kept until deleted; deletion is manual.
+  - B-4 committed (`f97ed07`, CI fix `2a98897`): `asm admin suspend-user` / `unsuspend-user`; a suspended account gets 403 "Account suspended" on its next request (fresh DB read per request, separate `get_active_user` dependency) and the dashboard shows a notice; the reason is operator-only; schedules and queued scans stop only in orgs where every owner is suspended (D4); one `account.suspended`/`account.unsuspended` audit event per org (D5); unsuspend does not restart schedules; migration 0013 (guarded downgrade); /terms updated. Tests: 647 passed (non-browser), 17 browser passed.
+  - B-5 done, not yet committed: `DELETE /orgs/{id}` (owner) deletes domains (cascading to scans, changes, notifications), memberships and invites and keeps the org row as a `deleted-org-<id>` tombstone with its audit log (`org.deleted` event); 409 while a scan in the org is running, queued scans and schedules cancelled in the same transaction; `DELETE /me` deletes the account, its memberships and invites to its email, one `account.deleted` event per org, 409 naming the orgs while the user is a sole owner (D6), 403 when suspended (deletion requests then go to the operator); the Supabase identity is deleted by the operator on request (D7). Retention purge (D8: scans 180 d keeping each domain's latest successful scan and change baselines, sent/failed notifications 90 d, closed invites 30 d, audit never) in `asm.retention`; worker runs it hourly only with `RETENTION_PURGE_ENABLED=true` (default false, forwarded in compose.prod.yml); `asm admin purge --dry-run | --execute` (D9). /terms, README, DEPLOY.md updated. Tests: 666 passed (non-browser, with DB), 444 passed + 222 skipped without `TEST_DATABASE_URL`, 17 browser passed.
+
+## Plans & Decisions
+Plans are written here and approved before coding starts.
+
+### B-5 plan (approved 2026-10-05)
+- `DELETE /orgs/{id}` (owner only) turns the org into a tombstone: deletes its domains (cascading to scans, changes, alert notifications), memberships and invites; keeps the org row renamed `deleted-org-<id>` and its audit events (`audit_events.org_id` is `ON DELETE RESTRICT` and the log is append-only); records `org.deleted`. Refused with 409 while any scan in the org is running (same rule as `move-domain`); queued scans and schedules are cancelled in the same transaction as the delete (added 2026-10-06).
+- `DELETE /me` deletes the `users` row (memberships cascade) and invites addressed to the user's email; 409 while the user is the only owner of any org (D6). A suspended account cannot self-delete (403); its deletion requests go to the operator.
+- Kept for audit, documented: `audit_events` rows (user UUID only), alert recipient addresses other orgs entered and their notifications, the Supabase identity (D7).
+- Retention purge (D8): keeps each domain's latest successful scan and any scan still referenced as a change baseline; never touches `audit_events`; runs from the worker behind `RETENTION_PURGE_ENABLED`, plus `asm admin purge --dry-run` (D9).
+- /terms updated wherever B-4/B-5 make new things true, with tests.
+
+### Decisions D6-D9 (approved 2026-10-05)
+- **D6:** `DELETE /me` while the user is an org's only owner: refuse with 409 naming those orgs; the user transfers ownership or deletes them first. No automatic tombstoning.
+- **D7:** Exposight holds no Supabase `service_role` key, so `DELETE /me` cannot remove the Supabase login account. Documented in docs/DEPLOY.md and /terms; the operator deletes the Supabase identity on request.
+- **D8:** retention periods: scans 180 days; sent or failed alert notifications 90 days; accepted, revoked or expired invites 30 days; audit events never purged automatically. Keep the latest successful scan and any baseline scan.
+- **D9:** purge off by default (`RETENTION_PURGE_ENABLED=false`), admin dry run checked before enabling in production.
 
 ## Next
 - v3.6: deploy (scope to be planned).
@@ -40,6 +56,7 @@
 ## Known Limitations
 - DNS lookup during manual check runs while holding the domain database row lock (bounded about 5s).
 - Integration test suite requires PostgreSQL (SQLite is unsupported for DB tests).
-- Only the table owner role (`exposight_owner`) can disable the audit_events append-only trigger; the app role cannot. No retention/purge; denied requests not logged.
+- Only the table owner role (`exposight_owner`) can disable the audit_events append-only trigger; the app role cannot. Retention purge is off by default (D9); denied requests not logged.
 - Rate limits are in-memory and single-process (`--workers 1`); counters reset on api restart.
 - Invite tokens are returned to the inviter to share; Exposight does not email them.
+- Deletion is API-only (`DELETE /me`, `DELETE /orgs/{id}`); the dashboard has no delete buttons yet.

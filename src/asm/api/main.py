@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from asm.api.deps import get_current_auth_settings
 from asm.api.routes import public_router, router
-from asm.api.routes_orgs import invites_router
+from asm.api.routes_orgs import invites_router, me_router
 from asm.api.routes_orgs import router as orgs_router
 from asm.api.routes_ui import build_csp_header, ui_router
 from asm.config import enforce_production_config, is_production
@@ -121,6 +121,7 @@ app.include_router(public_router)
 app.include_router(router)
 app.include_router(orgs_router)
 app.include_router(invites_router)
+app.include_router(me_router)
 
 
 @app.exception_handler(Exception)

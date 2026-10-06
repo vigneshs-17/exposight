@@ -206,3 +206,12 @@ def test_compose_prod_least_privilege_database_roles():
         if line.startswith("MIGRATION_DATABASE_URL=")
     )
     assert migration_url.startswith("postgresql+psycopg://exposight_owner:")
+
+
+def test_retention_purge_is_off_by_default_in_production_config():
+    """v3.6c B-5 (D9): the worker gets the switch, and it defaults to off."""
+    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    worker_env = config["services"]["worker"]["environment"]
+    assert worker_env["RETENTION_PURGE_ENABLED"] == "${RETENTION_PURGE_ENABLED:-false}"
+    example = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
+    assert "RETENTION_PURGE_ENABLED=false" in example.splitlines()

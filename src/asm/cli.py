@@ -283,6 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
             required=True,
             help="Operator-only justification (never shown to users or tenants)",
         )
+    admin_purge = admin_subparsers.add_parser(
+        "purge", help="Delete data past its retention period (D8)"
+    )
+    purge_mode = admin_purge.add_mutually_exclusive_group(required=True)
+    purge_mode.add_argument("--dry-run", action="store_true", help="Only count, delete nothing")
+    purge_mode.add_argument("--execute", action="store_true", help="Delete now")
 
     return parser
 
@@ -866,6 +872,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "admin":
         from asm.admin import (
             move_domain,
+            purge,
             revoke_verification,
             suspend_user,
             unsuspend_user,
@@ -892,6 +899,8 @@ def main(argv: list[str] | None = None) -> int:
                 return suspend_user(session, args.user_id, args.reason)
             elif args.admin_command == "unsuspend-user":
                 return unsuspend_user(session, args.user_id, args.reason)
+            elif args.admin_command == "purge":
+                return purge(session, dry_run=args.dry_run)
 
     return 0
 

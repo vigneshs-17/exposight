@@ -16,6 +16,7 @@ from asm.audit import record_event
 from asm.db.models import Domain, Membership, Organization, ScanRun, ScanStage, User
 from asm.db.session import get_session_factory
 from asm.logredact import install_log_redaction
+from asm.retention import purge_expired
 from asm.verification import generate_verification_token, queue_domain_alert
 
 logger = logging.getLogger(__name__)
@@ -459,6 +460,24 @@ def _stop_org_scanning(session: Session, org_id: int) -> tuple[int, int]:
     return schedules or 0, len(queued_ids)
 
 
+def purge(session: Session, dry_run: bool) -> int:
+    """Run the retention purge once. With dry_run, only count what would be deleted."""
+    counts = purge_expired(session, dry_run=dry_run)
+    verb = "Would delete" if dry_run else "Deleted"
+    print(
+        f"{verb} {counts['scans']} scan(s), {counts['alert_notifications']} alert "
+        f"notification(s) and {counts['invites']} invite(s). Audit events are never purged."
+    )
+    return 0
+
+
+def add_purge_arguments(sub_parser: argparse.ArgumentParser) -> None:
+    """--dry-run or --execute, one of them required: deleting must be asked for explicitly."""
+    mode = sub_parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true", help="Only count what would be deleted")
+    mode.add_argument("--execute", action="store_true", help="Delete now")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build administrative CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -543,6 +562,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="Operator-only justification (never shown to users or tenants)",
         )
 
+    add_purge_arguments(
+        subparsers.add_parser("purge", help="Delete data past its retention period (D8)")
+    )
+
     return parser
 
 
@@ -568,6 +591,8 @@ def main(argv: Sequence[str] | None = None, session: Session | None = None) -> i
             return suspend_user(sess, args.user_id, args.reason)
         elif args.command == "unsuspend-user":
             return unsuspend_user(sess, args.user_id, args.reason)
+        elif args.command == "purge":
+            return purge(sess, dry_run=args.dry_run)
         return 0
 
     if session is not None:

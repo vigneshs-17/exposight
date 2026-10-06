@@ -25,6 +25,7 @@ from asm.audit import record_event
 from asm.db.models import Domain, ScanResult
 from asm.db.scans import enqueue_scan
 from asm.ratelimit import MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY
+from asm.retention import purge_enabled, purge_expired
 from asm.scan_common import sanitize_error_text
 from asm.verification import (
     apply_check_outcome,
@@ -41,6 +42,7 @@ from asm.worker.runner import DirectScannerRunner, IScannerRunner
 logger = logging.getLogger("asm.worker")
 
 ALL_STAGES = ("discover", "probe", "portscan", "inspect", "score")
+PURGE_EVERY_S = 3600.0
 
 
 class HeartbeatThread(threading.Thread):
@@ -138,6 +140,7 @@ class ASMWorker:
             f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         )
         self.shutdown_requested = threading.Event()
+        self._last_purge_mono: float | None = None
 
         # SMTP configuration for alert delivery
         if smtp_host is not None:
@@ -238,6 +241,12 @@ class ASMWorker:
                 "Unexpected error in worker deliver_pending_alerts; continuing to job claiming"
             )
 
+        # Step: Retention purge (off unless RETENTION_PURGE_ENABLED, at most hourly)
+        try:
+            self.purge_retention_if_due()
+        except Exception:
+            logger.exception("Unexpected error in worker purge_retention_if_due")
+
         if self.shutdown_requested.is_set():
             return False
 
@@ -257,6 +266,17 @@ class ASMWorker:
 
         self.execute_scan_run(scan_run_id, domain_id, claim_token, attempts, max_attempts)
         return True
+
+    def purge_retention_if_due(self) -> dict | None:
+        """Run the retention purge when enabled and an hour has passed since the last run."""
+        if not purge_enabled():
+            return None
+        now_mono = time.monotonic()
+        if self._last_purge_mono is not None and now_mono - self._last_purge_mono < PURGE_EVERY_S:
+            return None
+        self._last_purge_mono = now_mono
+        with self.session_factory() as session:
+            return purge_expired(session, dry_run=False)
 
     def expire_operator_overrides(self, batch_limit: int = 10) -> int:
         """Expire operator-verified domains that have passed verification_expires_at.

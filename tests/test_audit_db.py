@@ -455,6 +455,8 @@ def test_all_mutating_routes_map_to_audit_action():
     """Every mutating route in the application (excluding /health) maps to an audit action."""
     route_action_map = {
         ("POST", "/orgs"): "org.created",
+        ("DELETE", "/orgs/{org_id}"): "org.deleted",
+        ("DELETE", "/me"): "account.deleted",
         ("POST", "/orgs/{org_id}/invites"): "invite.created",
         ("DELETE", "/orgs/{org_id}/invites/{invite_id}"): "invite.revoked",
         ("POST", "/invites/accept"): "membership.added",
@@ -488,7 +490,7 @@ def test_all_mutating_routes_map_to_audit_action():
     found_mutating_routes -= gone_routes
 
     # All discovered routes must be in our map and map to a recognized audit action
-    assert len(found_mutating_routes) == 12
+    assert len(found_mutating_routes) == 14
     for method, path in found_mutating_routes:
         assert (method, path) in route_action_map, f"Unmapped mutating route: {method} {path}"
         action = route_action_map[(method, path)]

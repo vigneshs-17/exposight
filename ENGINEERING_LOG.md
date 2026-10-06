@@ -396,6 +396,23 @@
 - **What happened:** Removing the opening sentence of the /terms suspension paragraph left the terms test passing: it checked the rest of the paragraph but not that sentence.
 - **Fix:** the test asserts "The operator can also suspend an account."; re-run, the proof fails on that assertion.
 
+### Entry BL: v3.6c B-5 — Organization Deletion Had to Keep a Tombstone
+- **What happened:** There was no way to delete an organization. `audit_events.org_id` is `ON DELETE RESTRICT` and the table is append-only, so the org row can never be deleted while it has events (every org has `org.created`).
+- **Fix:** `DELETE /orgs/{id}` (owner) deletes domains (FK cascade to scans, stages, results, changes, notifications), invites and memberships, renames the org `deleted-org-<id>`, sets `system_kind = 'deleted'`, and records `org.deleted` with counts. With no memberships, every org route returns 404.
+- **Running scans:** the delete locks the org's queued and running scan rows (`FOR UPDATE`; the worker claims with `SKIP LOCKED`), answers 409 naming a running scan (same rule as `move-domain`), otherwise cancels queued scans and turns off schedules in the same transaction; `org.deleted` records both counts.
+- **Weak proof found:** removing the queued-scan cancellation first left the tests passing, because `queued_scans_cancelled` was `len(queued_ids)`, not the UPDATE's row count. It now uses the row count; re-run, the proof fails with `assert 0 == 1`.
+- **Evidence:** `tests/test_b5_deletion_retention_db.py`; reverting the domain delete gives `assert {5} == set()`, removing the rename `assert 'Default Test Org' == 'deleted-org-10'`, allowing admins `assert 204 == 403`.
+
+### Entry BM: v3.6c B-5 — Self-Service Account Deletion (D6, D7)
+- **Fix:** `DELETE /me` locks the user and their owned orgs, answers 409 with `{"organizations": [{id, name}]}` while the user is any org's only owner, else writes one `account.deleted` event per org, deletes invites addressed to the user's email, then the user row (memberships cascade; `invited_by_user_id` becomes NULL). It uses `CurrentUser`, so a suspended account gets 403: deleting cannot shed a suspension.
+- **Kept:** audit events (user ID only), alert recipient addresses other orgs entered and their notifications, and the Supabase identity (no `service_role` key by design; operator deletes it on request, documented in DEPLOY.md and /terms).
+- **Evidence:** reverting the 409 check gives `assert 204 == 409`; the suspension guard `assert 204 == 403`; the invite delete `assert {11, 12, 13} == {12, 13}`.
+
+### Entry BN: v3.6c B-5 — Retention Purge, Off by Default (D8, D9)
+- **Fix:** `asm.retention.purge_expired(session, dry_run=...)`: finished scans older than 180 days except each domain's latest succeeded scan and any scan referenced as `scan_changes.baseline_scan_run_id` (that FK is `ON DELETE CASCADE`, so deleting a baseline would delete a newer scan's changes); sent/failed notifications older than 90 days; invites 30 days after acceptance, revocation or expiry. Never `audit_events`. A baseline freed by purging its newer scan goes on the next run.
+- **Switches:** the worker purges at most hourly and only when `RETENTION_PURGE_ENABLED` is `true`/`1`/`yes` (compose default `false`); `asm admin purge` needs `--dry-run` or `--execute`, so a bare `purge` deletes nothing.
+- **Evidence:** dry run counts `{'scans': 3, 'alert_notifications': 2, 'invites': 2}` and deletes nothing; removing each exclusion changes the counts (`'scans': 4`). 19 revert proofs, all failing on their own assertion.
+
 ---
 
 ## Architectural Decisions

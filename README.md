@@ -936,6 +936,8 @@ Hosts: 4 total (0 Critical, 2 High, 2 Medium, 0 Low, 0 Info)
      ```
      - A suspended account gets `403 Account suspended` on its next request; the reason is never shown to users or tenants.
      - Schedules and queued scans stop only in organizations where every owner is suspended. Unsuspending does not turn schedules back on; owners must re-enable them. See `docs/DEPLOY.md`.
+   - Retention purge (v3.6c, off by default): `asm admin purge --dry-run` counts what would be deleted; `--execute` deletes. The worker purges hourly only with `RETENTION_PURGE_ENABLED=true`. See `docs/DEPLOY.md`.
+   - Self-service deletion: `DELETE /me` (409 while you are an org's only owner) and `DELETE /orgs/{org_id}` (owner; the org row stays as a `deleted-org-<id>` tombstone holding its audit log).
 
 ### API Endpoints
 

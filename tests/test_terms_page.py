@@ -83,7 +83,35 @@ def test_terms_describes_limits_and_retention_truthfully():
     assert "<code>429 Too many requests</code>" in html
     assert "emails over that limit are delayed" in html
     assert "returns an error that says which limit was reached" not in html
-    assert "Data is kept until it is deleted. There is no automatic purge yet" in html
+    assert "There is no automatic purge yet" not in html  # B-5 added one
+
+
+def test_terms_describes_deletion_and_retention_as_implemented():
+    """v3.6c B-5: each sentence matches routes_orgs.py and retention.py."""
+    from datetime import timedelta
+
+    from asm import retention
+
+    html = _get("/terms").text
+    for fragment in (
+        "You can delete your own account with the API (<code>DELETE /me</code>)",
+        "It is refused while you are the only owner of an organisation",
+        "A suspended account cannot delete itself: its deletion requests go to the operator",
+        "It is refused while one of its scans is running",
+        "Your sign-in provider account is not deleted with it",
+        "a new, empty Exposight account is created",
+        "An owner can delete an organisation with the API",
+        "The organisation's audit log is kept, under the name <code>deleted-org-&lt;id&gt;</code>",
+        "An automatic purge exists, but it is off unless the operator turns it on.",
+        "finished scans older than 180 days",
+        "sent or failed alert notifications older than 90 days",
+        "invites 30 days after they were accepted, revoked or expired",
+        "Audit log entries are never purged.",
+    ):
+        assert fragment in html, fragment
+    assert retention.SCAN_RETENTION == timedelta(days=180)
+    assert retention.NOTIFICATION_RETENTION == timedelta(days=90)
+    assert retention.INVITE_RETENTION == timedelta(days=30)
 
 
 def test_terms_routes_security_reports_privately():

@@ -26,6 +26,14 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
     "org.created": {
         "name": ((str,), True),
     },
+    # v3.6c B-5: the org row stays as a tombstone so its audit events survive.
+    "org.deleted": {
+        "domains_deleted": ((int,), False),
+        "members_removed": ((int,), False),
+        "invites_deleted": ((int,), False),
+        "schedules_cancelled": ((int,), False),
+        "queued_scans_cancelled": ((int,), False),
+    },
     "membership.added": {
         "user_id": ((str, uuid.UUID), False),
         "role": ((str,), False),
@@ -49,6 +57,11 @@ ACTION_METADATA_SPECS: dict[str, dict[str, tuple[tuple[type, ...], bool]]] = {
     },
     "account.unsuspended": {
         "user_id": ((str, uuid.UUID), False),
+    },
+    # Self-service account deletion (DELETE /me): one event per organization the user left.
+    "account.deleted": {
+        "user_id": ((str, uuid.UUID), False),
+        "role": ((str,), False),
     },
     "membership.role_changed": {
         "user_id": ((str, uuid.UUID), False),
@@ -214,7 +227,7 @@ def record_event(
             raise ValueError(
                 f"Action '{action}' requires target_type='domain', got '{target_type}'"
             )
-    elif action == "org.created":
+    elif action in ("org.created", "org.deleted"):
         if target_type != "org":
             raise ValueError(f"Action '{action}' requires target_type='org', got '{target_type}'")
     elif action.startswith("account."):
