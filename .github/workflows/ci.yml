@@ -196,3 +196,62 @@ jobs:
 
 
 
+
+  egress-firewall:
+    name: Worker Egress Firewall (compose.prod.yml)
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE: docker compose -p exposight-ci -f compose.prod.yml --env-file ci.env
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Write a throwaway production env file
+        run: |
+          p1=$(openssl rand -hex 16); p2=$(openssl rand -hex 16); p3=$(openssl rand -hex 16)
+          cat > ci.env <<ENV
+          ENVIRONMENT=production
+          DOMAIN=exposight.invalid
+          POSTGRES_USER=postgres
+          POSTGRES_PASSWORD=$p1
+          POSTGRES_DB=exposight
+          OWNER_DB_USER=exposight_owner
+          OWNER_DB_PASSWORD=$p2
+          MIGRATION_DATABASE_URL=postgresql+psycopg://exposight_owner:$p2@db:5432/exposight
+          APP_DB_USER=exposight_app
+          APP_DB_PASSWORD=$p3
+          DATABASE_URL=postgresql+psycopg://exposight_app:$p3@db:5432/exposight
+          SUPABASE_URL=https://egresscheck.supabase.co
+          SUPABASE_PUBLISHABLE_KEY=egress-check-publishable-key
+          SMTP_HOST=
+          ENV
+
+      - name: Start db, api, egress and worker (no Caddy)
+        run: |
+          $COMPOSE up -d --build db migrate api egress worker
+          sleep 5
+          $COMPOSE ps
+
+      - name: Egress check from inside the worker
+        run: |
+          $COMPOSE exec -T worker python - < scripts/egress_check.py
+
+      - name: Negative control - the same check without the firewall must fail
+        run: |
+          if docker run --rm -i --network exposight-ci_app-tier --entrypoint python \
+              exposight-ci-worker - < scripts/egress_check.py; then
+            echo "egress_check.py passed without the firewall: the check proves nothing"; exit 1
+          fi
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          $COMPOSE ps -a
+          $COMPOSE logs egress worker api migrate
+
+      - name: Tear down
+        if: always()
+        run: |
+          $COMPOSE down -v

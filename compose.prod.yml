@@ -22,6 +22,9 @@ services:
       - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       app-tier:
+        # Fixed address: the worker egress firewall allows Postgres to this IP only
+        # (must equal egress EGRESS_DB_IP; tests/test_deploy_config.py checks it).
+        ipv4_address: 10.89.0.10
     # Port 5432 is strictly internal to app-tier; no host port publishing.
 
   migrate:
@@ -85,6 +88,33 @@ services:
       app-tier:
     # Port 8000 is internal only; reverse-proxied exclusively by Caddy.
 
+  egress:
+    # Worker egress firewall (Phase D-2, docs/DEPLOY.md). Owns the network namespace
+    # the worker joins; applies deploy/egress/rules.sh, then idles. Only this container
+    # has NET_ADMIN. If the rules fail it exits and the worker never starts.
+    build:
+      context: ./deploy/egress
+    restart: unless-stopped
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN", "NET_RAW"]
+    environment:
+      EGRESS_DB_IP: 10.89.0.10
+    # Public resolvers (D14): Oracle's VCN resolver is 169.254.169.254, which the rules block.
+    dns:
+      - 1.1.1.1
+      - 9.9.9.9
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "test -f /run/egress-ready && iptables -C OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-admin-prohibited"
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      app-tier:
+    # Publishes no ports.
+
   worker:
     build:
       context: .
@@ -110,8 +140,13 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    networks:
-      app-tier:
+      egress:
+        condition: service_healthy
+        # A restarted egress container is a new network namespace: restart the worker too.
+        restart: true
+    # All worker traffic leaves through the egress container's firewalled namespace.
+    # No networks: here and no NET_ADMIN, so the worker cannot change the rules.
+    network_mode: "service:egress"
     # Worker is a background task processor; publishes no ports.
 
   caddy:
@@ -138,6 +173,9 @@ networks:
       driver: default
       config:
         - subnet: 10.89.0.0/24
+          # Dynamic addresses come from the upper half, so the db's static 10.89.0.10
+          # can never be handed to another container first.
+          ip_range: 10.89.0.128/25
 
 volumes:
   pgdata:

@@ -225,8 +225,42 @@ The startup sequence:
 1. `db` starts and reports healthy via `pg_isready`.
 2. `migrate` runs `alembic upgrade head` and exits 0 (`service_completed_successfully`).
 3. `api` starts and reports healthy via internal HTTP GET `/health`.
-4. `worker` starts processing queued scans.
-5. `caddy` starts once `api` is healthy, requests TLS certificate, and serves `https://exposight.dev`.
+4. `egress` applies the worker firewall rules and reports healthy (see below).
+5. `worker` starts inside the `egress` network namespace and processes queued scans.
+6. `caddy` starts once `api` is healthy, requests TLS certificate, and serves `https://exposight.dev`.
+
+### Worker egress firewall
+The worker connects to hosts named by users, so it gets a network-level barrier in addition to the scanner's own SSRF checks and DNS pinning (Phase D-1). The `egress` service (`deploy/egress/`, Alpine + iptables) owns a network namespace on `app-tier`, applies `deploy/egress/rules.sh` and then idles. The worker runs with `network_mode: "service:egress"`: it uses that namespace, has no network of its own and no `NET_ADMIN`, so it cannot change the rules.
+
+What the worker can reach:
+- Postgres on the db service's fixed address `10.89.0.10` port 5432 only (`db` has `ipv4_address: 10.89.0.10`; `egress` gets the same value as `EGRESS_DB_IP`; dynamic addresses come from `10.89.0.128/25`, so nothing else can take it). Change both together.
+- The public internet: scan targets, crt.sh, Cert Spotter, SMTP.
+- DNS through Docker's embedded resolver, which forwards to 1.1.1.1 and 9.9.9.9 (`dns:` on `egress`). Oracle's VCN resolver is 169.254.169.254, which is blocked, so do not remove these.
+
+What it cannot reach (rejected with "No route to host"): 0.0.0.0/8, 10.0.0.0/8 (including the api, Caddy and the host's VCN private IP), 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 (cloud metadata), 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4. All IPv6 except loopback is dropped; the scanner also skips IPv6-only hosts (`SKIPPED_IPV6_ONLY`) unless `SCAN_IPV6_ENABLED=true`, which this firewall would block anyway.
+
+Fail closed: if `rules.sh` fails, `egress` exits, its healthcheck never passes and the worker stays in `Created`. `docker compose restart egress` also restarts the worker (`depends_on: restart: true`), because a restarted `egress` is a new namespace. If Docker restarts `egress` on its own (crash), the worker is left without network; recover with:
+```bash
+docker compose -f compose.prod.yml up -d --force-recreate egress worker
+```
+
+Check it after every deploy (stdlib only, nothing is installed in the image):
+```bash
+docker compose -f compose.prod.yml exec -T worker python - < scripts/egress_check.py
+```
+Every line must read `OK` and the last line `egress check: PASSED`. A blocked target passes only as `BLOCKED` ("No route to host"); `REFUSED` (closed port) or `TIMEOUT` mean the firewall did not act. `db:5432` must be `CONNECTED`; `api:5432` must be `BLOCKED` (Postgres is allowed to the db IP only). If `SMTP_HOST` is set, the SMTP relay must be `CONNECTED`. CI runs the same check, plus a negative control that runs it without the firewall and requires it to fail.
+
+> **Oracle Cloud:** outbound port 25 is blocked by default; use `SMTP_PORT=587` (STARTTLS) or 465 (`SMTP_SSL=true`).
+
+**Verify on the VM (Phase H; not testable on a laptop):**
+1. From the host, `curl -s -H 'Authorization: Bearer Oracle' http://169.254.169.254/opc/v2/instance/` answers; from the worker the check shows `169.254.169.254:80 BLOCKED`.
+2. The host's VCN private IP (`hostname -I`) and its sshd are blocked from the worker: `docker compose -f compose.prod.yml exec -T worker python -c "import socket; socket.create_connection(('<VCN_PRIVATE_IP>', 22), 5)"` must fail with "No route to host".
+3. DNS works through 1.1.1.1 / 9.9.9.9 (the check's crt.sh and Cert Spotter lines connect), and a real alert email is delivered on 587.
+4. Whether the VCN has IPv6 (the worker drops it either way).
+5. The check still passes after `docker compose -f compose.prod.yml restart egress`, `sudo systemctl restart docker` and a reboot.
+6. The iptables backend in the Alpine image coexists with the host Docker's own rules (the check is the proof; rule listings may differ).
+7. Oracle's preinstalled host iptables rules do not block traffic between the bridge containers.
+8. Decide on host `DOCKER-USER`/`INPUT` rules as a second network layer (D13, revisited in Phase H).
 
 ### Tag Releases & Rollbacks
 Always deploy tagged Git releases in production:

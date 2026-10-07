@@ -76,6 +76,8 @@ A lightweight, modular, and defensible Attack Surface Management (ASM) reconnais
 
 `asm` operates as a staged pipeline (`discover` -> `probe` -> `portscan` -> `inspect` -> `score`), where each stage reads the previous stage's JSON report, and active stages require `--authorized`. The local CLI is the operator's own tool; the hosted service requires DNS verification.
 
+Active stages connect only to the IP address that passed the SSRF check, resolved once per host (DNS pinning). In production the worker also runs behind an egress firewall that blocks private, loopback, link-local (cloud metadata) and CGNAT ranges and all IPv6, allowing only Postgres and the public internet (`deploy/egress/`, docs/DEPLOY.md "Worker egress firewall").
+
 ---
 
 ## Installation & Setup

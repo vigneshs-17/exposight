@@ -215,3 +215,91 @@ def test_retention_purge_is_off_by_default_in_production_config():
     assert worker_env["RETENTION_PURGE_ENABLED"] == "${RETENTION_PURGE_ENABLED:-false}"
     example = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
     assert "RETENTION_PURGE_ENABLED=false" in example.splitlines()
+
+
+# --- v3.6c D-2: worker egress firewall ---------------------------------------------------
+
+
+def _prod_services() -> dict:
+    return yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))[
+        "services"
+    ]
+
+
+def test_worker_shares_the_egress_namespace_without_net_admin():
+    """The worker joins egress's network namespace and cannot change its rules."""
+    services = _prod_services()
+    worker, egress = services["worker"], services["egress"]
+    assert worker["network_mode"] == "service:egress"
+    assert "networks" not in worker
+    assert "cap_add" not in worker and "privileged" not in worker
+    assert worker["depends_on"]["egress"] == {"condition": "service_healthy", "restart": True}
+    assert "NET_ADMIN" in egress["cap_add"] and egress["cap_drop"] == ["ALL"]
+    assert "ports" not in egress
+    assert egress["dns"] == ["1.1.1.1", "9.9.9.9"]  # D14
+    for name, svc in services.items():
+        if name != "egress":
+            assert "NET_ADMIN" not in svc.get("cap_add", []), name
+
+
+def test_postgres_allow_rule_is_the_db_static_ip_only():
+    """Correction 2026-10-07: 5432 is allowed to the db's fixed IP, never a range."""
+    import ipaddress
+
+    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    db_ip = config["services"]["db"]["networks"]["app-tier"]["ipv4_address"]
+    assert config["services"]["egress"]["environment"]["EGRESS_DB_IP"] == db_ip
+    ipam = config["networks"]["app-tier"]["ipam"]["config"][0]
+    assert ipaddress.ip_address(db_ip) in ipaddress.ip_network(ipam["subnet"])
+    # Dynamic addresses come from ip_range, so nothing else can take the db's IP.
+    assert ipaddress.ip_address(db_ip) not in ipaddress.ip_network(ipam["ip_range"])
+
+    rules = (REPO_ROOT / "deploy/egress/rules.sh").read_text(encoding="utf-8")
+    accept_5432 = [line for line in rules.splitlines() if "5432" in line and "ACCEPT" in line]
+    assert accept_5432 == ['iptables -A OUTPUT -p tcp -d "$DB_IP" --dport 5432 -j ACCEPT']
+
+
+def test_egress_rules_block_internal_ranges_and_fail_closed():
+    rules = (REPO_ROOT / "deploy/egress/rules.sh").read_text(encoding="utf-8")
+    assert "set -eu" in rules.splitlines()
+    for net in (
+        "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+        "172.16.0.0/12", "192.168.0.0/16",
+    ):
+        assert net in rules, net
+    assert "ip6tables -P OUTPUT DROP" in rules  # D12
+    # The readiness marker is written only after every rule was applied.
+    assert rules.rindex("touch /run/egress-ready") > rules.rindex("ip6tables -P OUTPUT DROP")
+    health = " ".join(_prod_services()["egress"]["healthcheck"]["test"])
+    assert "/run/egress-ready" in health and "169.254.0.0/16" in health
+
+
+def _load_egress_check():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "egress_check", REPO_ROOT / "scripts/egress_check.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_egress_check_covers_the_required_targets():
+    expected = {(host, port): want for _, host, port, want in _load_egress_check().targets()}
+    assert expected[("db", 5432)] == "CONNECTED"
+    assert expected[("api", 8000)] == "BLOCKED"
+    assert expected[("api", 5432)] == "BLOCKED"  # another private IP on 5432
+    assert expected[("169.254.169.254", 80)] == "BLOCKED"
+
+
+def test_egress_check_does_not_count_a_closed_port_as_blocked():
+    """A refused connect also happens without any firewall, so it must not pass."""
+    import socket
+
+    check = _load_egress_check()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]  # bound, not listening: connects are refused
+        outcome, _ = check.probe("127.0.0.1", port)
+    assert outcome == "REFUSED"
