@@ -29,7 +29,8 @@
   - B-6 committed (`ba26c4f`): scans cancelled by suspension or org deletion are stored as `cancelled` with a neutral reason ("Scanning is paused for this organization." / "The organization was deleted."); the dashboard shows a grey "Cancelled" badge and a "Scan cancelled" note; retention treats `cancelled` as finished; migration 0014 rewrites the two old "Cancelled: ..." rows shapes and its downgrade restores them. Docker tag and remaining "ASM SaaS" text now Exposight (distribution name `asm-saas` kept). Our 7 uses of `HTTP_422_UNPROCESSABLE_ENTITY` replaced with `422`; pytest fails on any Starlette "'HTTP_...' is deprecated" warning; `alembic.ini` sets `path_separator = os`. `scripts/reset_test_db.py` rebuilds the local test DB with Alembic; the `db_engine` fixture no longer runs `create_all` and fails unless the DB is at Alembic head; the CI browser job runs `alembic upgrade head`. Tests: 673 passed (non-browser, with DB), 445 passed + 228 skipped without `TEST_DATABASE_URL`, 17 browser passed; same counts under Python 3.12.12.
 - v3.6c Phase D (plan in Plans & Decisions):
   - D-1 committed (`4346252`), reviewed and verified (2026-10-07): DNS pinning. Prober (both schemes, every redirect hop, unverified retry), header inspection (steps A and D), the TLS certificate fallback and all port connects use the IP that passed the SSRF check, resolved once per host per stage; hostname kept for `Host`, SNI and certificate verification (`scan_common.pin_host` / `pinned_request`, httpcore `sni_hostname`). First IPv4 else IPv6 (D11); IPv6 off unless `SCAN_IPV6_ENABLED=true` (D12), IPv6-only hosts reported as `SKIPPED_IPV6_ONLY`; `httpcore>=1.0,<2` (D16). Tests: 694 passed (non-browser, with DB), 466 passed + 228 skipped without `TEST_DATABASE_URL`, 17 browser passed; 12 revert proofs caught.
-  - D-2 done, not yet committed: worker egress firewall. `egress` service (`deploy/egress/`, Alpine 3.22.2 + iptables, only container with `NET_ADMIN`) owns the namespace; the worker uses `network_mode: "service:egress"`. Postgres allowed only to the db's static `10.89.0.10:5432`; private/loopback/link-local/CGNAT/reserved IPv4 rejected ("No route to host"); IPv6 dropped; DNS 1.1.1.1 / 9.9.9.9; `app-tier` `ip_range: 10.89.0.128/25`. `scripts/egress_check.py` passes locally; without the firewall it fails (`api:8000 CONNECTED`); a halfway-failing rules script leaves the worker in `Created`. CI job `egress-firewall` (D15, not yet run on GitHub). DEPLOY.md "Worker egress firewall" with the Phase H checklist. Tests: 705 passed (non-browser, with DB), 477 passed + 228 skipped without `TEST_DATABASE_URL`, 17 browser passed; 4 live and 10 static revert proofs caught.
+  - D-2 committed (`2c53a3e`): worker egress firewall. `egress` service (`deploy/egress/`, Alpine 3.22.2 + iptables, only container with `NET_ADMIN`) owns the namespace; the worker uses `network_mode: "service:egress"`. Postgres allowed only to the db's static `10.89.0.10:5432`; private/loopback/link-local/CGNAT/reserved IPv4 rejected ("No route to host"); IPv6 dropped; DNS 1.1.1.1 / 9.9.9.9; `app-tier` `ip_range: 10.89.0.128/25`. `scripts/egress_check.py` passes locally; without the firewall it fails (`api:8000 CONNECTED`); a halfway-failing rules script leaves the worker in `Created`. CI job `egress-firewall` (D15, not yet run on GitHub). DEPLOY.md "Worker egress firewall" with the Phase H checklist. Tests: 705 passed (non-browser, with DB), 477 passed + 228 skipped without `TEST_DATABASE_URL`, 17 browser passed; 4 live and 10 static revert proofs caught.
+- v3.6c Phase G (plan in Plans & Decisions), done, not yet committed: security gates in CI. New `security.yml` (push/PR/weekly): bandit on `src/` (0 findings; 9 accepted with `# nosec B###` and a reason: 2 B501, 2 B608, 5 B311; 3 B110 fixed with specific exceptions + debug logs), pip-audit `--strict` on the frozen installed set (0), gitleaks full history (8 false positives listed by fingerprint with reasons in `.gitleaksignore`; 0 after), trivy on the app and egress images (fixable HIGH/CRITICAL: 7 -> 0 via runtime `apt-get upgrade`, 21 -> 0 via `alpine:3.22.6`; `pip` removed from the runtime image). `db-test` runs the full non-browser suite with coverage `fail_under = 90`, `precision = 2` (measured 90.63% line+branch). Dependabot watches `/deploy/egress`. README badges, SECURITY.md policy. Tests: 706 passed (with DB, coverage gate), 478 passed + 228 skipped without `TEST_DATABASE_URL`, 17 browser passed; every gate shown failing on a deliberate change and passing after revert.
 
 ## Plans & Decisions
 Plans are written here and approved before coding starts.
@@ -119,6 +120,67 @@ Goal: close the DNS-rebinding / SSRF gap left by check-then-connect (`check_host
 - **D15:** add the CI job that builds the prod compose stack and runs `egress_check.py`.
 - **D16:** cap `httpcore<2` in pyproject.
 - **Correction (2026-10-07):** the Postgres allow rule is the db service's static IP on 5432 only; `egress_check.py` proves another private IP on 5432 is refused.
+
+### Phase G plan: security scanners in CI (approved 2026-10-07: D17-D26 all as recommended, first option each)
+Every tool was run locally once on HEAD `2c53a3e` before planning.
+
+**Measured findings**
+| Tool (version) | Scope | Findings | HIGH / CRITICAL |
+|---|---|---|---|
+| bandit 1.9.4 | `src/` (12,026 LOC) | 12: 2 HIGH, 2 MEDIUM, 8 LOW | 2 HIGH (B501) |
+| pip-audit 2.10.1 | project deps resolved fresh; installed dev venv (44 pkgs); installed runtime image (32 pkgs) | 0 / 0 / 0 | none |
+| gitleaks 8.30.1 | full history (`git` mode, 52 commits) | 8, all `generic-api-key` | all false positives (below) |
+| trivy 0.75.0 | app image built from HEAD (Debian 13.7) | 211 OS: 51 HIGH, 85 MEDIUM, 67 LOW, 2 UNKNOWN; plus 5 MEDIUM + 1 LOW in `pip` 25.0.1 | 0 CRITICAL; 51 HIGH, **7 with a fix** |
+| trivy 0.75.0 | egress image (`alpine:3.22.2`, from D-2) | 21 HIGH/CRITICAL with a fix | **2 CRITICAL + 19 HIGH, all fixable** (libcrypto3/libssl3 3.5.4-r0) |
+
+bandit, each finding and its planned handling (no global skips; every `# nosec` names its test ID and carries a reason on the same line):
+- B501 HIGH `prober.py:470`, `headers_inspect.py:321` (httpx `verify=False`): **justify.** Runs only after verification already failed, to report that a host serves an invalid certificate (`tls_valid=False`, `TLS_ERROR`). The request goes to the pinned, SSRF-checked IP, sends no credentials or cookies, and nothing from the response is trusted.
+- B608 MEDIUM (low confidence) `db/roles.py:59, 76` (f-string DDL): **justify.** Role names cannot be bind parameters in DDL; every builder calls `validate_role_name` (`^[a-z_][a-z0-9_]*$` fullmatch) first; input is operator env, not user input.
+- B311 LOW `verification.py:151, 166, 178`, `worker/worker.py:467, 1616` (`random` for jitter/backoff): **justify** (D21). Scheduling jitter, not a secret or token.
+- B110 LOW `portscan.py:303` (writer close), `tls_inspect.py:175, 187` (certificate date parsing): **fix** (D22): catch the specific exceptions and log at debug instead of passing silently.
+
+gitleaks, all 8 judged false positives (values inspected with masking):
+- 5 in `tests/test_dashboard_ui.py` (commits `682df8e`, `51d6fd7`): `SUPABASE_PUBLISHABLE_KEY` / `data-supabase-key` = `anon_key_test_12345`, a test fixture string.
+- 3 in `README.md` (commit `bf67c40`, lines 250/283/317): the documented example verification token `k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO` (visibly synthetic). Verification tokens are published in public DNS TXT records by design, so even a real one is not a secret.
+- Handling: `.gitleaksignore` listing the 8 exact fingerprints (commit:file:rule:line), each preceded by a `#` comment with its reason. No rule disabled, no path allowlisted: a new key in the same files is still caught.
+
+trivy, the 7 fixable HIGH in the app image: CVE-2026-75804 and CVE-2026-84782 (OpenSSL: `libssl3t64`, `openssl`, `openssl-provider-legacy` 3.5.7-1~deb13u2 -> u3) and CVE-2026-103111 (`libpcre2-8-0` 10.46-1~deb13u2 -> u3). A freshly pulled `python:3.12.14-slim-trixie` (created 2026-09-19, same digest) still has all 7. A scratch build adding `apt-get update && apt-get upgrade -y` to the runtime stage scanned clean (`--ignore-unfixed --severity HIGH,CRITICAL` exit 0) and still runs as `asm`. The other 44 HIGH have no fix (`affected` / `fix_deferred`: ncurses, systemd libs, util-linux, acl, perl-base); per the requested policy they do not fail CI and appear in the report. Egress image: `alpine:3.22.6` and `3.23.6` both scan clean; Dependabot's docker entry covers only `/`, which is why the D-2 pin went stale.
+
+**Coverage (measured with `--cov=asm --cov-branch`; identical on Python 3.12.12 and 3.14.7)**
+| Run | Tests | Lines | Line+branch (what `--cov-fail-under` checks) |
+|---|---|---|---|
+| no DB (CI `test` job today) | 475 passed, 228 skipped | 72.69% (3718/5115) | 70.30% |
+| `pytest -m db` (CI `db-test` job today) | 238 | 62.70% | 58.47% |
+| full non-browser suite with DB | 703 | 92.49% (4731/5115) | **90.48%** |
+- Lowest modules (full run): `db/migration_guards.py` 50.0% (8 stmts), `worker/__main__.py` 69.6%, `tls_inspect.py` 83.2%, `worker/worker.py` 84.8%, `config.py` 85.1%.
+- Plan: `db-test` runs the full non-browser suite (`pytest` with `TEST_DATABASE_URL`, a superset of `-m db`; nothing skipped or removed) with `--cov=asm --cov-branch --cov-fail-under=90` (floor of the measured 90.48%) and uploads the XML/HTML report as an artifact. Ratchet: raise the floor only by a deliberate change. The no-DB `test` job is unchanged.
+- Build correction (2026-10-07): coverage compares at `precision = 2`. With the default precision 0, 90.63% rounds to 91 and passed `fail_under = 91` (and 90 really meant >= 89.5); found by the revert proof. pip-audit runs on `pip freeze --exclude-editable` with `--no-deps --disable-pip`, because `--strict` refuses the skipped editable project install.
+
+**Planned CI** (D17: new `.github/workflows/security.yml`, on push/PR to main plus a weekly schedule; `ci.yml` keeps its jobs; the `egress-firewall` job is not touched)
+- `bandit`: `bandit -r src -c pyproject.toml --severity-level low --confidence-level low`; fails on any finding without a justified `nosec`. A test asserts every `# nosec` in `src/` names a `B###` ID and has a reason.
+- `pip-audit`: after `pip install -e ".[dev]"`, `pip-audit --strict --skip-editable` (installed runtime + dev set). Any finding fails; an unfixable one may only be ignored with `--ignore-vuln <ID>` plus a written reason.
+- `gitleaks`: `actions/checkout` with `fetch-depth: 0`, then pinned `ghcr.io/gitleaks/gitleaks:v8.30.1 git --redact --exit-code 1` (no third-party action, no licence key; D25).
+- `trivy`: build the app and egress images; scan each with pinned `aquasec/trivy:0.75.0 image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1`, DB from `ghcr.io/aquasecurity/trivy-db:2` with `mirror.gcr.io` fallback and `--timeout 15m` (the default download timed out locally); a second non-failing run prints the full table.
+- Coverage: `ci.yml` `db-test` as above (the only `ci.yml` change).
+- README: keep the existing CI badge with `?branch=main`; add a Security workflow badge. No coverage badge (needs an external service; D26).
+
+**Files to change**: `.github/workflows/security.yml` (new), `.github/workflows/ci.yml` (`db-test` step only), `.github/dependabot.yml` (docker entry for `/deploy/egress`), `pyproject.toml` (dev extras, `[tool.bandit]`, `[tool.coverage]`), `Dockerfile` (runtime `apt-get upgrade`, D18; optional `pip` removal, D23), `deploy/egress/Dockerfile` (alpine 3.22.6, D19), `.gitleaksignore` (new), `src/asm/prober.py`, `headers_inspect.py`, `db/roles.py`, `verification.py`, `worker/worker.py` (justified `nosec`), `portscan.py`, `tls_inspect.py` (B110 fixes), tests for `nosec` hygiene and B110 logging, README, docs/DEPLOY.md, SECURITY.md (scanner policy), STATUS, ENGINEERING_LOG.
+
+**Proofs planned**: each gate shown failing once on a deliberate local mutation and passing after revert: bandit (remove one `nosec`), pip-audit (requirements file pinning a version with a known CVE), gitleaks (scratch repo with a fake AWS-style key committed), trivy (`alpine:3.22.2` exits 1), coverage (`--cov-fail-under=91` fails at 90.48%). Then tests with and without DB, browser, ruff.
+
+**New dev dependencies (approval needed, D26)**: `bandit>=1.9.4,<2`, `pip-audit>=2.10.1,<3`, `pytest-cov>=7.1.0,<8` in `dev` extras. No runtime dependency. trivy and gitleaks run as pinned container images.
+
+**Decisions D17-D26 (approved 2026-10-07, first option each)**
+- **D17:** separate `security.yml` with weekly schedule (recommended), or jobs inside `ci.yml`.
+- **D18:** app image OS fixes: `apt-get upgrade -y` in the runtime stage (recommended; fixes all 7 now; image content then depends on build date), or `--only-upgrade` of the named packages, or wait for a base refresh (security job red until then).
+- **D19:** egress base `alpine:3.22.2` -> `alpine:3.22.6` (recommended, same minor) plus a Dependabot docker entry for `/deploy/egress`.
+- **D20:** trivy scans both images (recommended), or only the app image.
+- **D21:** B311 jitter: `# nosec B311` with reason (recommended), or switch to `secrets.SystemRandom()`.
+- **D22:** B110: narrow exceptions + debug log (recommended), or `nosec` with reason.
+- **D23:** remove `pip` from the runtime image after installing the wheel (clears 6 MEDIUM/LOW pip CVEs; nothing at runtime uses pip), or leave it.
+- **D24:** coverage floor 90% line+branch on the full DB suite in `db-test` (recommended), or 70% on the no-DB job.
+- **D25:** gitleaks via pinned container (recommended), or `gitleaks/gitleaks-action`.
+- **D26:** approve the three dev dependencies; no coverage badge (or name a service).
 
 ### Decisions D6-D9 (approved 2026-10-05)
 - **D6:** `DELETE /me` while the user is an org's only owner: refuse with 409 naming those orgs; the user transfers ownership or deletes them first. No automatic tombstoning.

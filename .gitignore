@@ -25,6 +25,7 @@ ENV/
 .ruff_cache/
 .coverage
 htmlcov/
+coverage.xml
 
 # Output directory for generated reports
 output/

@@ -130,12 +130,24 @@ jobs:
           alembic downgrade -1
           alembic upgrade head
 
-      - name: Run database integration tests
+      # Phase G (D24): the full non-browser suite (a superset of `-m db`) with coverage.
+      # fail_under = 90 in pyproject.toml, the floor of the measured 90.48% line+branch.
+      - name: Run full test suite with database and coverage gate
         env:
           DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/asm_test
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/asm_test
         run: |
-          pytest -m db
+          pytest --cov --cov-report=term --cov-report=xml --cov-report=html
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
 
   browser-test:
     name: Playwright Browser Tests

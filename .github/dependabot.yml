@@ -10,6 +10,13 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
 
+  # The egress firewall image (Phase D-2) has its own Dockerfile; without this entry its
+  # Alpine pin went stale (Phase G trivy finding).
+  - package-ecosystem: "docker"
+    directory: "/deploy/egress"
+    schedule:
+      interval: "weekly"
+
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:

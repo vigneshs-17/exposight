@@ -148,7 +148,7 @@ def apply_check_outcome(
         domain.verification_expires_at = None
         domain.verification_reason = None
         domain.consecutive_misses = 0
-        jitter_seconds = random.randint(-1800, 1800)
+        jitter_seconds = random.randint(-1800, 1800)  # jitter, not a secret  # nosec B311
         domain.next_reverification_at = now + timedelta(hours=24, seconds=jitter_seconds)
         if not was_verified_dns_txt:
             domain.verified_at = now
@@ -163,7 +163,7 @@ def apply_check_outcome(
                     domain.next_reverification_at = None
                     return True
                 else:
-                    jitter_fast = random.randint(0, 300)
+                    jitter_fast = random.randint(0, 300)  # jitter, not a secret  # nosec B311
                     domain.next_reverification_at = now + timedelta(hours=1, seconds=jitter_fast)
                     return False
             elif domain.verification_method == "operator":
@@ -175,7 +175,7 @@ def apply_check_outcome(
     elif outcome == VerificationOutcome.UNKNOWN:
         # UNKNOWN: never changes status or misses; if verified + dns_txt, reschedule fast retry
         if domain.verification_status == "verified" and domain.verification_method == "dns_txt":
-            jitter_unknown = random.randint(0, 300)
+            jitter_unknown = random.randint(0, 300)  # jitter, not a secret  # nosec B311
             domain.next_reverification_at = now + timedelta(hours=1, seconds=jitter_unknown)
         return False
 

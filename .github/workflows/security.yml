@@ -1,0 +1,121 @@
+name: Security
+
+# Phase G security gates (STATUS.md "Phase G plan", D17-D26). Runs on every push and pull
+# request to main, and weekly so newly published CVEs fail the build without a code change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.75.0
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1
+
+jobs:
+  bandit:
+    name: bandit (Python SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Every finding fails, at any severity or confidence. Accepted findings carry
+      # "# nosec B###" with a written reason (tests/test_security_tooling.py checks that).
+      - name: Run bandit on src/
+        run: |
+          bandit -r src -c pyproject.toml --severity-level low --confidence-level low
+
+  pip-audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Audits the installed runtime + dev dependency set (frozen, without the editable
+      # project itself, so --strict can fail on any package it cannot audit). Any known
+      # vulnerability fails; an unfixable one may only be ignored with --ignore-vuln <ID>
+      # and a written reason here.
+      - name: Run pip-audit
+        run: |
+          pip freeze --exclude-editable > audit-requirements.txt
+          pip-audit --strict --desc --no-deps --disable-pip -r audit-requirements.txt
+
+  gitleaks:
+    name: gitleaks (secrets, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository (full history)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Pinned container, no third-party action or licence key (D25). Known false positives
+      # are listed one fingerprint at a time, with reasons, in .gitleaksignore.
+      - name: Scan every commit
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+            "$GITLEAKS_IMAGE" git /repo --redact --exit-code 1 --verbose
+
+  trivy:
+    name: trivy (${{ matrix.image.name }} image)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: app
+            context: .
+          - name: egress
+            context: deploy/egress
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build image
+        run: |
+          docker build -t "exposight-${{ matrix.image.name }}:scan" "${{ matrix.image.context }}"
+
+      # The default trivy DB download timed out locally; use ghcr with the gcr mirror.
+      - name: Full vulnerability report (does not fail)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
+            "$TRIVY_IMAGE" image --scanners vuln --timeout 15m \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2 \
+            --format table "exposight-${{ matrix.image.name }}:scan"
+
+      # Gate: fail on HIGH/CRITICAL that have a fixed version available.
+      - name: Fail on fixable HIGH/CRITICAL
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
+            "$TRIVY_IMAGE" image --scanners vuln --skip-db-update \
+            --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
+            --format table "exposight-${{ matrix.image.name }}:scan"

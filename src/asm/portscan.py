@@ -300,8 +300,9 @@ async def scan_single_port(
                 try:
                     writer.close()
                     await writer.wait_closed()
-                except Exception:
-                    pass
+                except (OSError, RuntimeError) as exc:
+                    # The port result is already decided; a reset during close changes nothing.
+                    logger.debug("Error closing connection to %s:%d: %s", host, port, exc)
 
 
 async def scan_host_ports(

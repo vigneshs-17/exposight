@@ -1,0 +1,19 @@
+# gitleaks false positives (Phase G, reviewed 2026-10-07). One exact fingerprint per
+# finding (commit:file:rule:line); no rule is disabled and no path is allowlisted, so any
+# new secret in these files is still reported. Add an entry only with a written reason.
+
+# tests/test_dashboard_ui.py: SUPABASE_PUBLISHABLE_KEY / data-supabase-key set to the
+# fixture string "anon_key_test_12345" (a test value, never a real key; and a Supabase
+# publishable/anon key is public by design, it is served to every browser).
+682df8e94ece5e342a5b9ecc330cbc3f746d6817:tests/test_dashboard_ui.py:generic-api-key:27
+682df8e94ece5e342a5b9ecc330cbc3f746d6817:tests/test_dashboard_ui.py:generic-api-key:39
+682df8e94ece5e342a5b9ecc330cbc3f746d6817:tests/test_dashboard_ui.py:generic-api-key:63
+51d6fd7eb6f94536ddfc3b6b3c510f9b916a4e09:tests/test_dashboard_ui.py:generic-api-key:43
+51d6fd7eb6f94536ddfc3b6b3c510f9b916a4e09:tests/test_dashboard_ui.py:generic-api-key:69
+
+# README.md: the documented example domain-verification token
+# "k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO" (visibly synthetic). Verification tokens
+# are published in public DNS TXT records by design, so they are not secrets.
+bf67c406a6f5e4bb0a1fcdb146a24ccd150adc0f:README.md:generic-api-key:250
+bf67c406a6f5e4bb0a1fcdb146a24ccd150adc0f:README.md:generic-api-key:283
+bf67c406a6f5e4bb0a1fcdb146a24ccd150adc0f:README.md:generic-api-key:317

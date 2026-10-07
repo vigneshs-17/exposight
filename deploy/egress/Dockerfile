@@ -1,6 +1,6 @@
 # Worker egress firewall (Phase D-2). The worker joins this container's network
 # namespace (network_mode: "service:egress"); only this container holds NET_ADMIN.
-FROM alpine:3.22.2
+FROM alpine:3.22.6
 
 RUN apk add --no-cache iptables ip6tables
 

@@ -315,10 +315,13 @@ def inspect_single_host(
     if headers_info is None and last_verify_error is not None:
         try:
             unverified_timeout = hop_timeout(deadline, connect_cap=3.0)
+            # Bandit B501 accepted: verification already failed (last_verify_error is
+            # reported); this request only reads the headers of a host whose certificate
+            # is invalid. Pinned, SSRF-checked IP; no credentials; nothing is trusted.
             with httpx.Client(
                 timeout=unverified_timeout,
                 follow_redirects=False,
-                verify=False,
+                verify=False,  # reads headers behind an invalid cert only  # nosec B501
                 headers=REQUEST_HEADERS,
             ) as unverified_client:
                 wire_url, pin_headers, extensions = pinned_request(initial_url, ip)

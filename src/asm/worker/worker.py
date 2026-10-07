@@ -464,7 +464,7 @@ class ASMWorker:
                         raise
 
                 # 3. Always advance next_scan_at = now() + interval + random jitter
-                jitter_seconds = random.randint(0, 300)
+                jitter_seconds = random.randint(0, 300)  # jitter, not a secret  # nosec B311
                 interval_hours = domain.scan_interval_hours
                 advance_stmt = (
                     update(Domain)
@@ -1612,8 +1612,10 @@ class ASMWorker:
                             {"id": row["id"], "attempts": new_attempts, "err": delivery_error},
                         )
                     else:
-                        # Exponential backoff: 30s * 2^(attempts-1) + jitter (0-5s)
-                        backoff_seconds = int(30 * (2 ** (new_attempts - 1)) + random.uniform(0, 5))
+                        # Exponential backoff: 30s * 2^(attempts-1) + jitter (0-5s).
+                        # Bandit B311 accepted: retry jitter, not a secret or token.
+                        jitter = random.uniform(0, 5)  # retry jitter, not a secret  # nosec B311
+                        backoff_seconds = int(30 * (2 ** (new_attempts - 1)) + jitter)
                         session.execute(
                             text(
                                 """

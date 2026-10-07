@@ -341,6 +341,7 @@ git checkout <new-tag>
 docker compose -f compose.prod.yml up -d --build
 docker compose -f compose.prod.yml ps
 ```
+Deploy only a commit whose **Security** workflow is green (bandit, pip-audit, gitleaks, trivy; see SECURITY.md). The app image applies Debian security updates at build time (`apt-get upgrade` in the runtime stage) and contains no `pip`, so rebuilding picks up OS fixes published since the last build; check `docker compose -f compose.prod.yml exec -T worker python - < scripts/egress_check.py` after the rebuild.
 
 ### Suspending an account (operator)
 

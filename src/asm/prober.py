@@ -465,9 +465,12 @@ def probe_url(
                 target_url,
                 exc,
             )
-            # Create a separate client with verify=False solely for this retry attempt
+            # Create a separate client with verify=False solely for this retry attempt.
+            # Bandit B501 accepted: verification already failed and is reported as
+            # tls_valid=False; this request only shows whether a service answers. It goes
+            # to the pinned, SSRF-checked IP, sends no credentials, and nothing is trusted.
             retry_client = httpx.Client(
-                verify=False,
+                verify=False,  # reports an invalid certificate, trusts nothing  # nosec B501
                 timeout=httpx.Timeout(TOTAL_URL_TIMEOUT, connect=CONNECT_TIMEOUT),
                 headers=REQUEST_HEADERS,
             )

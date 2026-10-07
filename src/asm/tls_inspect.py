@@ -172,8 +172,9 @@ def parse_cert_dict(
             not_before_iso = nb_dt.isoformat()
             if now_utc < nb_dt:
                 not_yet_valid = True
-        except Exception:
-            pass
+        except (ValueError, TypeError, OverflowError, OSError) as exc:
+            # Malformed notBefore from an untrusted certificate: leave the field empty.
+            logger.debug("Unparseable certificate notBefore %r: %s", not_before_str, exc)
 
     if not_after_str:
         try:
@@ -184,8 +185,9 @@ def parse_cert_dict(
             days_until_expiry = round(diff_secs / 86400, 1)
             if now_utc > na_dt or diff_secs < 0:
                 expired = True
-        except Exception:
-            pass
+        except (ValueError, TypeError, OverflowError, OSError) as exc:
+            # Malformed notAfter from an untrusted certificate: leave expiry unknown.
+            logger.debug("Unparseable certificate notAfter %r: %s", not_after_str, exc)
 
     # 3. Serial number & flags
     serial_hex = cert_dict.get("serialNumber")
