@@ -26,6 +26,21 @@ from asm.prober import (
 from asm.scan_common import UNRESOLVED_REASON_PREFIX
 
 
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """Unit tests never use real DNS: a lookup without a test resolver answers a
+    fixed public address (93.184.216.34). Scanners pin and connect to that IP; the
+    MockTransport sees it in the URL and the hostname in the Host header."""
+    import asm.scan_common as scan_common
+
+    real = scan_common.resolve_host_ips
+
+    def fake(hostname, resolver=None):
+        return real(hostname, resolver=resolver) if resolver is not None else ["93.184.216.34"]
+
+    monkeypatch.setattr(scan_common, "resolve_host_ips", fake)
+
+
 def _resolver_returning(ip_by_host: dict[str, str]) -> MagicMock:
     """Fake dnspython resolver: answers A/AAAA from a dict, NXDOMAIN otherwise."""
 
@@ -393,8 +408,8 @@ class TestSSRFFailClosedAndRedirectGuard:
         requested_hosts: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            requested_hosts.append(request.url.host)
-            if request.url.host == "sso.example.com":
+            requested_hosts.append(request.headers["host"])
+            if request.headers["host"] == "sso.example.com":
                 return httpx.Response(302, headers={"Location": "https://meta.example.com/"})
             return httpx.Response(200, html="<title>metadata</title>")
 
@@ -414,13 +429,15 @@ class TestSSRFFailClosedAndRedirectGuard:
         requested_hosts: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            requested_hosts.append(request.url.host)
-            if request.url.host == "example.com":
+            requested_hosts.append(request.headers["host"])
+            if request.headers["host"] == "example.com":
                 return httpx.Response(301, headers={"Location": "https://www.example.com/"})
             return httpx.Response(200, html="<title>Home</title>")
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        resolver = _resolver_returning({"www.example.com": "93.184.216.34"})
+        resolver = _resolver_returning(
+            {"example.com": "93.184.216.34", "www.example.com": "93.184.216.34"}
+        )
         result = probe_url("https://example.com/", "example.com", client, resolver=resolver)
 
         assert requested_hosts == ["example.com", "www.example.com"]

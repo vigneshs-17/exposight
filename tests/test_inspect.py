@@ -23,6 +23,22 @@ from asm.tls_inspect import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """Unit tests never use real DNS: a lookup without a test resolver answers a
+    fixed public address (93.184.216.34). Scanners pin and connect to that IP; the
+    MockTransport sees it in the URL and the hostname in the Host header."""
+    import asm.scan_common as scan_common
+
+    real = scan_common.resolve_host_ips
+
+    def fake(hostname, resolver=None):
+        return real(hostname, resolver=resolver) if resolver is not None else ["93.184.216.34"]
+
+    monkeypatch.setattr(scan_common, "resolve_host_ips", fake)
+
+
+
 def _stream_cm(response: MagicMock) -> MagicMock:
     """Wrap a mock response so it can stand in for ``httpx.Client.stream(...)``."""
     cm = MagicMock()
@@ -460,7 +476,12 @@ class TestInspectStreamingAndSSRF:
 
         with (
             patch("httpx.Client.stream", return_value=_stream_cm(first)) as mock_stream,
-            patch("asm.scan_common.resolve_host_ips", return_value=["169.254.169.254"]),
+            patch(
+                "asm.scan_common.resolve_host_ips",
+                side_effect=lambda host, resolver=None: (
+                    ["169.254.169.254"] if host == "meta.example.com" else ["93.184.216.34"]
+                ),
+            ),
             patch("asm.headers_inspect.connect_and_inspect_cert_socket", return_value=None),
         ):
             res = inspect_single_host("sso.example.com", "example.com")

@@ -123,7 +123,7 @@ Allowing raw, unsanitized user input into security tools introduces critical rel
 - **What it is:** Active HTTP/HTTPS network prober with defensive controls.
 - **Key Functions & Safety Mechanisms:**
   - `is_safe_public_ip(ip_str: str) -> bool`: Unwraps IPv4-mapped IPv6 addresses (e.g. `::ffff:127.0.0.1` -> `127.0.0.1`), then asserts `ip.is_global and not ip.is_multicast`. This blocks private RFC 1918 networks, loopback (`127.0.0.1`, `::1`), link-local (`169.254.0.0/16`), CGNAT (`100.64.0.0/10`), `0.0.0.0`, and multicast ranges.
-  - `check_host_for_ssrf(hostname: str) -> tuple[bool, str | None]`: Resolves the host before any HTTP call. If any resolved IP is non-global/private, the host is skipped with `SKIPPED_PRIVATE_IP`. *(Documented: prevents internal network probing/SSRF; DNS rebinding protection will be added in v2).*
+  - `check_host_for_ssrf(hostname: str) -> tuple[bool, str | None]`: Resolves the host before any HTTP call. If any resolved IP is non-global/private, the host is skipped with `SKIPPED_PRIVATE_IP`. *(Prevents internal network probing/SSRF. Since Phase D-1 the scanners use `pin_host` instead, which keeps the validated IP and connects only to it; see Question 5.)*
   - `is_redirect_in_scope(target_url: str, base_domain: str) -> bool`: Enforces that redirects must use `http` (port 80) or `https` (port 443), must match the target root domain or a subdomain, and cannot point to raw IP addresses or non-default ports like 8080.
   - `extract_title(html_bytes: bytes, content_type: str | None) -> str | None`: Parses the `<title>` tag only when `Content-Type` is `text/html`. Uses charset from headers (fallback `utf-8`), replaces invalid bytes, collapses internal whitespace, and caps length at 200 characters.
   - `_stream_and_read_body(response, deadline) -> bytes`: Streams the response body and caps reading at 64 KB (`65,536 bytes`), raising `DeadlineExceeded` if the clock passes the 10.0s URL deadline.
@@ -204,7 +204,7 @@ Before sending any HTTP packets to a resolved host, `asm probe` resolves the hos
 **What is DNS Rebinding?**
 DNS Rebinding is an attack where an attacker controls an authoritative nameserver for a domain. When our tool resolves the domain during the pre-check, the nameserver returns a legitimate public IP address (passing the SSRF filter). However, when the HTTP client subsequently resolves the host to establish a socket connection milliseconds later, the nameserver returns an internal IP address (such as `127.0.0.1` or `169.254.169.254`).
 
-*Future Mitigation (v2):* Connecting directly to the pre-verified IP address via an explicit IP socket while passing the hostname in the `Host` header and TLS SNI extension completely prevents DNS rebinding.
+*Mitigation (Phase D-1, done):* every scanner connection goes to the IP that passed the check, with the hostname kept for the `Host` header, TLS SNI and certificate verification. `scan_common.pin_host` resolves a host once per stage, requires every address to be public, picks the first IPv4 (else IPv6, only when `SCAN_IPV6_ENABLED=true`) and stores it in a per-host `pins` dict; `pinned_request` builds an httpx request whose URL holds the IP, whose `Host` header holds the hostname, and whose `sni_hostname` extension makes httpcore send SNI and verify the certificate against the hostname. Redirect hops to a new host are pinned before they are followed; hops back to a pinned host reuse its IP. `Connection: close` stops a pooled connection opened with one host's SNI from being reused for another host on the same IP. The TLS certificate fallback and the port scan connect to the same pinned IP. A host with only IPv6 addresses while IPv6 scanning is off is reported as `SKIPPED_IPV6_ONLY`, not as down. The worker's egress firewall (Phase D-2) is the second, network-level layer.
 
 ---
 
@@ -219,6 +219,7 @@ DNS Rebinding is an attack where an attacker controls an authoritative nameserve
   - `load_and_validate_report(report_path)`: Opens JSON report, verifies `domain` and `results`, filters hosts with `status == "RESOLVED"`, and counts skipped unresolved hosts. Raises `ReportValidationError`.
   - `is_safe_public_ip(ip_str)`: Unwraps `ip.ipv4_mapped` and asserts `ip.is_global and not ip.is_multicast`.
   - `check_host_for_ssrf(hostname)`: Resolves host records and blocks private/loopback/CGNAT addresses.
+  - `resolve_public_ips`, `pick_ip`, `pin_host`, `pinned_request`, `skip_status_for` (Phase D-1): resolve once, choose one address, connect only to it, and map a refusal to `SKIPPED_UNRESOLVED`, `SKIPPED_PRIVATE_IP` or `SKIPPED_IPV6_ONLY`.
   - `validate_host_and_scope(hostname, base_domain)`: Ensures the hostname passes strict RFC 1035 syntax validation and belongs to the authorized domain scope.
 
 ### `src/asm/portscan.py`
@@ -2319,3 +2320,16 @@ The audit log is accessible via `GET /orgs/{org_id}/audit-events`:
 
 
 
+
+## D-1 review increment (2026-10-07)
+
+Existing DNS-pinning implementation was preserved. Six new cases in
+`tests/test_d1_dns_pinning.py` prove that both HTTP probing and header inspection
+stop before following an in-scope redirect to loopback, metadata, or a private IP.
+The inspection certificate fallback must still use the original validated IP.
+
+1. **Why is an in-scope redirect still unsafe?** DNS for that name can point to an internal address; scope and address checks answer different questions.
+2. **Why assert the requests that actually happened?** A warning alone does not prove the blocked destination was never contacted.
+3. **Why test three private destinations?** Loopback, cloud metadata, and private networks are distinct destinations that must all be refused.
+4. **Which IP should certificate fallback use after refusing a redirect?** The original host's pin, since its certificate is the evidence being inspected.
+5. **Does DNS pinning replace the worker firewall?** No. D-2 adds an independent network barrier against mistakes in application checks.

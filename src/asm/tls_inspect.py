@@ -19,7 +19,7 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 
 from asm.models import CertInfo
-from asm.scan_common import is_safe_public_ip, resolve_host_ips
+from asm.scan_common import pin_host
 
 logger = logging.getLogger(__name__)
 
@@ -295,17 +295,11 @@ def resolve_safe_ip(
 ) -> tuple[str | None, str | None]:
     """Resolve hostname with the same SSRF rules as the main inspection path.
 
-    Returns (ip, None) with the first resolved IP when EVERY resolved address is
-    public, otherwise (None, reason). The caller connects to that IP itself, so
+    Returns (ip, None) when EVERY resolved address is public (the IP chosen by
+    pick_ip), otherwise (None, reason). The caller connects to that IP itself, so
     the socket cannot be steered to a different address by a second lookup.
     """
-    ips = resolve_host_ips(hostname, resolver=resolver)
-    if not ips:
-        return None, f"'{hostname}' has no A/AAAA answer"
-    for ip in ips:
-        if not is_safe_public_ip(ip):
-            return None, f"'{hostname}' resolved to non-public/private IP: {ip}"
-    return ips[0], None
+    return pin_host(hostname, {}, resolver=resolver)
 
 
 def _legacy_context(verify: bool) -> ssl.SSLContext:
@@ -404,6 +398,7 @@ def connect_and_inspect_cert_socket(
     timeout: float = 5.0,
     now_utc: datetime.datetime | None = None,
     resolver: dns.resolver.Resolver | None = None,
+    ip: str | None = None,
 ) -> CertInfo | None:
     """Connect directly with ssl+socket to retrieve and evaluate a host's certificate.
 
@@ -422,10 +417,15 @@ def connect_and_inspect_cert_socket(
        connection is trusted. Details come from the DER bytes, because
        getpeercert() returns {} when verification is off.
 
+    ip: an address the caller already validated and pinned for hostname; when
+    given, no new lookup is made.
+
     Returns:
         Populated CertInfo, or None if the host is unsafe or unreachable.
     """
-    ip, unsafe_reason = resolve_safe_ip(hostname, resolver=resolver)
+    unsafe_reason = None
+    if ip is None:
+        ip, unsafe_reason = resolve_safe_ip(hostname, resolver=resolver)
     if ip is None:
         logger.info(
             "TLS socket inspection refused for %s (SSRF guard): %s", hostname, unsafe_reason

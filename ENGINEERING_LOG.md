@@ -426,6 +426,12 @@
 - **Left (library internals):** `fastapi.testclient` imports `starlette.testclient`, which warns that using `httpx` is deprecated.
 - **Evidence:** putting the old name back fails `test_create_domain_invalid_syntax_rejected` with `StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated`; with the local DB at 0013 the fixture fails with "Test database is at Alembic revision '0013_user_suspension', expected '0014_cancelled_scan_status'".
 
+### Entry BQ: v3.6c D-1 — Scanners Resolved Each Host Again After the SSRF Check (DNS Rebinding)
+- **What happened:** the prober, header inspection and port scan checked that a host resolved only to public IPs, then handed the hostname to httpx or `asyncio.open_connection`, which resolved it again. A nameserver answering a public IP to the check and `169.254.169.254` to the connect could steer a scan into the metadata endpoint. Same-host redirect hops were not checked at all, and the port scan made up to 16 fresh lookups per host. Only the B-2 TLS certificate fallback already connected to the validated IP.
+- **Fix:** `scan_common.pin_host` resolves a host once per stage, requires every address to be public, picks the first IPv4 (D11) and stores it in a per-host `pins` dict. `pinned_request` puts the IP in the request URL, the hostname in `Host`, and the hostname in httpcore's `sni_hostname` extension (SNI and certificate verification stay on the hostname); `Connection: close` prevents reusing a connection opened with another host's SNI on the same IP. Every prober request (both schemes, every redirect hop, the unverified retry), header inspection steps A and D, the certificate fallback (now given the IP, no second lookup) and all 16 port connects use the pinned IP. `is_redirect_target_safe` was removed; a hop's host is pinned before it is followed. IPv6 connections are off unless `SCAN_IPV6_ENABLED=true` (D12); an IPv6-only host is reported as `SKIPPED_IPV6_ONLY`, never as down. `httpcore>=1.0,<2` is now a direct dependency (D16).
+- **Existing tests:** unit tests in `test_prober.py`/`test_inspect.py` used to reach the MockTransport without any DNS check for the first URL; an autouse fixture now answers a fixed public IP when no test resolver is given, and host assertions read the `Host` header instead of the URL.
+- **Evidence:** `tests/test_d1_dns_pinning.py` (19 tests; a rebinding resolver answers public first and the metadata IP afterwards, plus a real local HTTPS server recording SNI and `Host`). 12 revert proofs, each failing on its own assertion, e.g. first request unpinned `assert ['app.example....example.com'] == ['93.184.216....3.184.216.34']`, cert fallback not given the IP `KeyError: 'ip'`, IPv6-only reported as private `assert 'SKIPPED_PRIVATE_IP' == 'SKIPPED_IPV6_ONLY'`; without `sni_hostname` the real TLS test fails with "certificate is not valid for '127.0.0.1'".
+
 ---
 
 ## Architectural Decisions
@@ -553,3 +559,9 @@
 - v3.4d added 10 Playwright browser tests, ephemeral live server fixture, synthetic auth mocks, and dedicated CI job.
 - v3.5 added static public landing page at `/`, vendored GSAP 3.15.0 with ScrollTrigger, CSS 3D chassis, and 5 landing browser tests.
 
+
+### D-1 review increment (2026-10-07)
+- Preserved the existing uncommitted DNS-pinning implementation and its tests.
+- Added six private-redirect refusal cases (prober and inspection, each covering loopback, metadata and private-network destinations). They assert actual wire destinations and keep the original certificate-fallback pin.
+- Baseline verification in this session: 692 passed with the dedicated test database; no-DB baseline 464 passed, 228 skipped; targeted final D-1 suite 25 passed; ruff clean. Final combined and browser results are recorded in STATUS.md after execution.
+- Historical D-1 counts above belong to the prior execution; this review does not claim those runs were reproduced.

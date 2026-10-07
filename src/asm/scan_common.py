@@ -5,13 +5,15 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import os
 import unicodedata
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import dns.resolver
 
+from asm.models import HostProbeStatus
 from asm.validators import DomainValidationError, validate_domain
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,10 @@ logger = logging.getLogger(__name__)
 # Reason prefix returned by check_host_for_ssrf when a host has no A/AAAA answer.
 # Callers use it to report SKIPPED_UNRESOLVED instead of SKIPPED_PRIVATE_IP.
 UNRESOLVED_REASON_PREFIX = "Host did not resolve"
+
+# Reason prefix for a host whose validated addresses are all IPv6 while IPv6 scanning
+# is off (D12). Callers report SKIPPED_IPV6_ONLY: the host is not down, we did not try.
+IPV6_ONLY_REASON_PREFIX = "IPv6-only host"
 
 # IPv6 ranges that embed an IPv4 address or are deprecated-internal.
 _NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
@@ -233,39 +239,120 @@ def resolve_host_ips(
     return resolved_ips
 
 
+def resolve_public_ips(
+    hostname: str,
+    resolver: dns.resolver.Resolver | None = None,
+) -> tuple[list[str] | None, str | None]:
+    """Resolve a host once and return its addresses only if EVERY one is public.
+
+    Fails CLOSED: a host with no A/AAAA answer (NXDOMAIN, timeout, SERVFAIL) is not
+    safe. Returns (ips, None) or (None, reason); an unresolved reason starts with
+    UNRESOLVED_REASON_PREFIX.
+    """
+    resolved_ips = resolve_host_ips(hostname, resolver=resolver)
+
+    if not resolved_ips:
+        return None, f"{UNRESOLVED_REASON_PREFIX}: '{hostname}' has no A/AAAA answer"
+
+    for ip in resolved_ips:
+        if not is_safe_public_ip(ip):
+            return None, f"Host '{hostname}' resolved to non-public/private IP: {ip}"
+
+    return resolved_ips, None
+
+
 def check_host_for_ssrf(
     hostname: str,
     resolver: dns.resolver.Resolver | None = None,
 ) -> tuple[bool, str | None]:
     """Resolve a host and check whether any resolved IP is internal/private.
 
-    Maintains backward compatibility with Step 2 prober logic.
-
-    Fails CLOSED: a host with no A/AAAA answer (NXDOMAIN, timeout, SERVFAIL) is NOT
-    considered safe, because the HTTP/TLS client would resolve it again through a
-    different resolver path and could land on an internal address.
-
-    Known limitation: this is a check-then-connect design, so a DNS-rebinding
-    attacker can still return a different IP at connect time. Pinning connections
-    to the validated IP is tracked separately.
-
-    Args:
-        hostname: Subdomain to resolve and inspect.
-        resolver: Optional Resolver instance for testing.
+    Boolean form of resolve_public_ips. Scanners connect through pin_host instead,
+    so the address that passed this check is the only one they ever contact.
 
     Returns:
-        (True, None) if safe, or (False, reason) if any resolved IP is non-public.
+        (True, None) if safe, or (False, reason) if unresolved or any IP is non-public.
     """
-    resolved_ips = resolve_host_ips(hostname, resolver=resolver)
+    ips, reason = resolve_public_ips(hostname, resolver=resolver)
+    return ips is not None, reason
 
-    if not resolved_ips:
-        return False, f"{UNRESOLVED_REASON_PREFIX}: '{hostname}' has no A/AAAA answer"
 
-    for ip in resolved_ips:
-        if not is_safe_public_ip(ip):
-            return False, f"Host '{hostname}' resolved to non-public/private IP: {ip}"
+def ipv6_scanning_enabled() -> bool:
+    """Return True only when SCAN_IPV6_ENABLED is explicitly turned on (D12: off)."""
+    return os.getenv("SCAN_IPV6_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 
-    return True, None
+
+def pick_ip(hostname: str, ips: list[str]) -> tuple[str | None, str | None]:
+    """Choose the address to connect to: the first IPv4, else the first IPv6 (D11).
+
+    With IPv6 scanning off, a host with only IPv6 addresses is not contacted and the
+    reason starts with IPV6_ONLY_REASON_PREFIX, so it is reported as skipped rather
+    than unreachable.
+    """
+    for ip in ips:
+        if ipaddress.ip_address(ip).version == 4:
+            return ip, None
+    if ips and ipv6_scanning_enabled():
+        return ips[0], None
+    return None, (
+        f"{IPV6_ONLY_REASON_PREFIX}: '{hostname}' has only IPv6 addresses "
+        f"and IPv6 scanning is off: {', '.join(ips)}"
+    )
+
+
+def pin_host(
+    hostname: str,
+    pins: dict[str, str],
+    resolver: dns.resolver.Resolver | None = None,
+) -> tuple[str | None, str | None]:
+    """Return the one IP this scan may use for hostname, resolving it at most once.
+
+    DNS-rebinding guard: the address that passed the public-IP check is stored in
+    pins and every later connection to this host (retries, redirect hops back to it)
+    uses it; the hostname is never handed to a library that would resolve it again.
+    """
+    host = hostname.lower().rstrip(".")
+    if host in pins:
+        return pins[host], None
+    ips, reason = resolve_public_ips(host, resolver=resolver)
+    if ips is None:
+        return None, reason
+    ip, reason = pick_ip(host, ips)
+    if ip is None:
+        return None, reason
+    pins[host] = ip
+    return ip, None
+
+
+def pinned_request(url: str, ip: str) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Build an httpx request that connects to ip while speaking to the URL's host.
+
+    Returns (wire_url, headers, extensions) for client.stream/request: the URL
+    carries the IP, the Host header carries the hostname (and a non-default port),
+    and for HTTPS httpcore's "sni_hostname" extension sets SNI and the name the
+    certificate is verified against. "Connection: close" stops httpcore from reusing
+    a connection opened with another host's SNI for a different host on the same IP.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").rstrip(".")
+    netloc = f"[{ip}]" if ":" in ip else ip
+    host_header = host
+    if parts.port is not None:
+        netloc += f":{parts.port}"
+        host_header += f":{parts.port}"
+    wire_url = urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, ""))
+    extensions: dict[str, Any] = {"sni_hostname": host} if parts.scheme == "https" else {}
+    return wire_url, {"Host": host_header, "Connection": "close"}, extensions
+
+
+def skip_status_for(reason: str | None) -> str:
+    """Map a pin_host/resolve_public_ips refusal reason to a HostProbeStatus value."""
+    text = reason or ""
+    if text.startswith(UNRESOLVED_REASON_PREFIX):
+        return HostProbeStatus.SKIPPED_UNRESOLVED.value
+    if text.startswith(IPV6_ONLY_REASON_PREFIX):
+        return HostProbeStatus.SKIPPED_IPV6_ONLY.value
+    return HostProbeStatus.SKIPPED_PRIVATE_IP.value
 
 
 def validate_host_and_scope(
@@ -291,33 +378,3 @@ def validate_host_and_scope(
         return None, f"Host '{hostname}' is out of scope for root domain '{base_domain}'"
 
     return validated_host, None
-
-
-def is_redirect_target_safe(
-    target_url: str,
-    original_host: str | None,
-    resolver: dns.resolver.Resolver | None = None,
-) -> tuple[bool, str | None]:
-    """SSRF check for a redirect hop before it is followed.
-
-    The original host was already checked before the first request. Any hop to a
-    *different* hostname is resolved and checked again, so an in-scope host that
-    points at a private/metadata address (e.g. 169.254.169.254) is never contacted.
-
-    Args:
-        target_url: Absolute URL of the redirect target.
-        original_host: Hostname that was validated before the first request.
-        resolver: Optional Resolver instance for testing.
-
-    Returns:
-        (True, None) if the hop may be followed, otherwise (False, reason).
-    """
-    try:
-        hop_host = (urlsplit(target_url).hostname or "").lower().rstrip(".")
-    except ValueError:
-        return False, "Redirect target URL could not be parsed"
-    if not hop_host:
-        return False, "Redirect target has no hostname"
-    if original_host and hop_host == original_host.lower().rstrip("."):
-        return True, None
-    return check_host_for_ssrf(hop_host, resolver=resolver)

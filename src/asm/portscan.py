@@ -15,8 +15,8 @@ from asm.models import (
     PortStatus,
 )
 from asm.scan_common import (
-    is_safe_public_ip,
-    resolve_host_ips,
+    pin_host,
+    skip_status_for,
     validate_host_and_scope,
 )
 
@@ -175,7 +175,7 @@ async def scan_single_port(
     - FILTERED: Connection timed out or packet dropped (likely firewall).
 
     Args:
-        host: Hostname or IP to scan.
+        host: Address to connect to: the IP pinned by scan_host_ports.
         port: Fixed TCP port number.
         port_semaphore: Concurrency limiter per host.
 
@@ -341,29 +341,21 @@ async def scan_host_ports(
         # 2. DNS Resolution & SSRF Guard
         # dnspython resolution is blocking; run it in a worker thread so one slow
         # lookup does not stall the event loop (and every other host's port scan).
-        resolved_ips = await asyncio.to_thread(
-            resolve_host_ips, validated_host, resolver=resolver
-        )
-        if not resolved_ips:
-            # Per requirement 4: If a host fails DNS at scan time, record as SKIPPED_UNRESOLVED
+        # The host is resolved once; every port connects to the pinned IP, so a
+        # DNS-rebinding answer cannot steer later connections elsewhere.
+        ip, reason = await asyncio.to_thread(pin_host, validated_host, {}, resolver)
+        if ip is None:
+            # Unresolved hosts are SKIPPED_UNRESOLVED and the scan continues (requirement 4)
             return HostPortScanResult(
                 subdomain=validated_host,
-                status=HostProbeStatus.SKIPPED_UNRESOLVED.value,
-                skip_reason=f"Host '{validated_host}' failed DNS resolution at scan time",
+                status=skip_status_for(reason),
+                skip_reason=reason,
             )
-
-        for ip in resolved_ips:
-            if not is_safe_public_ip(ip):
-                return HostPortScanResult(
-                    subdomain=validated_host,
-                    status=HostProbeStatus.SKIPPED_PRIVATE_IP.value,
-                    skip_reason=f"Host resolved to non-public/private IP: {ip}",
-                )
 
         # 3. Concurrently scan the fixed 16 ports with max 10 parallel ports per host
         port_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PORTS_PER_HOST)
         tasks = [
-            scan_single_port(validated_host, port, port_semaphore)
+            scan_single_port(ip, port, port_semaphore)
             for port in DEFAULT_PORTS
         ]
         port_results = await asyncio.gather(*tasks)

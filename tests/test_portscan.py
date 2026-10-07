@@ -274,7 +274,7 @@ class TestHostScanFlowAndSafety:
             )
 
             assert res.status == HostProbeStatus.SKIPPED_UNRESOLVED.value
-            assert "failed DNS resolution" in (res.skip_reason or "")
+            assert "did not resolve" in (res.skip_reason or "")
             assert res.open_ports == []
 
         asyncio.run(_test())

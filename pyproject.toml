@@ -13,6 +13,8 @@ authors = [
 ]
 dependencies = [
     "httpx>=0.27.0",
+    # DNS pinning relies on httpcore's "sni_hostname" request extension (D16).
+    "httpcore>=1.0,<2",
     "dnspython>=2.6.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",

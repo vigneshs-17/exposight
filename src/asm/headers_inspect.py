@@ -20,9 +20,9 @@ import httpx
 from asm.models import CertInfo, HeaderInfo, HostInspectResult, HostProbeStatus, InspectReport
 from asm.prober import DeadlineExceeded, hop_timeout
 from asm.scan_common import (
-    UNRESOLVED_REASON_PREFIX,
-    check_host_for_ssrf,
-    is_redirect_target_safe,
+    pin_host,
+    pinned_request,
+    skip_status_for,
     validate_host_and_scope,
 )
 from asm.tls_inspect import connect_and_inspect_cert_socket, parse_cert_dict
@@ -184,6 +184,8 @@ def inspect_single_host(
     base_domain: str,
     timeout_config: httpx.Timeout = TIMEOUT_CONFIG,
     total_deadline: float = TOTAL_DEADLINE_SECONDS,
+    pins: dict[str, str] | None = None,
+    resolver: Any = None,
 ) -> HostInspectResult:
     """Inspect TLS certificate and HTTP security headers for a single HTTPS host.
 
@@ -199,10 +201,20 @@ def inspect_single_host(
         base_domain: Authorized root domain for redirect scope checks.
         timeout_config: Client timeout configuration.
         total_deadline: Total wall-clock deadline in seconds.
+        pins: hostname -> validated IP (see pin_host). Every connection, including
+            the certificate fallback, goes to the pinned IP with SNI = hostname.
+        resolver: Optional DNS resolver used to pin hosts not yet in pins.
 
     Returns:
         HostInspectResult.
     """
+    pins = {} if pins is None else pins
+    ip, pin_reason = pin_host(hostname, pins, resolver=resolver)
+    if ip is None:
+        return HostInspectResult(
+            subdomain=hostname, status=skip_status_for(pin_reason), skip_reason=pin_reason
+        )
+
     start_time = time.perf_counter()
     deadline = start_time + total_deadline
     headers_info: HeaderInfo | None = None
@@ -230,7 +242,11 @@ def inspect_single_host(
                 # Connect + headers of every hop must fit in the time left (not the
                 # client's fixed per-operation timeouts); raises once time is up.
                 timeout = hop_timeout(deadline, connect_cap=timeout_config.connect or 5.0)
-                with client.stream("GET", current_url, timeout=timeout) as resp:
+                hop_ip = pins[(urlparse(current_url).hostname or "").rstrip(".")]
+                wire_url, pin_headers, extensions = pinned_request(current_url, hop_ip)
+                with client.stream(
+                    "GET", wire_url, headers=pin_headers, extensions=extensions, timeout=timeout
+                ) as resp:
                     _drain_capped(resp, start_time, total_deadline)
 
                     if redirect_hops == 0:
@@ -244,8 +260,11 @@ def inspect_single_host(
 
                 if next_url is None or not is_redirect_in_scope(next_url, base_domain):
                     break
-                hop_safe, hop_reason = is_redirect_target_safe(next_url, hostname)
-                if not hop_safe:
+                # Resolve and pin the hop's host once, before following it.
+                next_ip, hop_reason = pin_host(
+                    urlparse(next_url).hostname or "", pins, resolver=resolver
+                )
+                if next_ip is None:
                     logger.info(
                         "Redirect not followed for %s (SSRF guard): %s", hostname, hop_reason
                     )
@@ -289,6 +308,7 @@ def inspect_single_host(
             hostname=hostname,
             port=443,
             timeout=min(5.0, remaining_time),
+            ip=ip,
         )
 
     # Step D: If verified request failed due to TLS error, try unverified GET to still get headers
@@ -301,7 +321,10 @@ def inspect_single_host(
                 verify=False,
                 headers=REQUEST_HEADERS,
             ) as unverified_client:
-                with unverified_client.stream("GET", initial_url) as unverified_resp:
+                wire_url, pin_headers, extensions = pinned_request(initial_url, ip)
+                with unverified_client.stream(
+                    "GET", wire_url, headers=pin_headers, extensions=extensions
+                ) as unverified_resp:
                     _drain_capped(unverified_resp, start_time, total_deadline)
                     headers_info = extract_header_info(unverified_resp.headers)
         except Exception as unverified_hdr_err:
@@ -385,29 +408,24 @@ def run_inspection(
             )
             continue
 
-        # 2. SSRF check
-        is_safe, ssrf_reason = check_host_for_ssrf(validated_host)
-        if not is_safe:
-            unresolved = (ssrf_reason or "").startswith(UNRESOLVED_REASON_PREFIX)
-            if unresolved:
+        # 2. SSRF check: resolve once, require public IPs, pin the address used
+        pins: dict[str, str] = {}
+        ip, ssrf_reason = pin_host(validated_host, pins)
+        if ip is None:
+            skip_status = skip_status_for(ssrf_reason)
+            if skip_status == HostProbeStatus.SKIPPED_UNRESOLVED.value:
                 skipped_unresolved += 1
-            else:
+            elif skip_status == HostProbeStatus.SKIPPED_PRIVATE_IP.value:
                 skipped_private_ip += 1
             results.append(
                 HostInspectResult(
-                    subdomain=validated_host,
-                    status=(
-                        HostProbeStatus.SKIPPED_UNRESOLVED.value
-                        if unresolved
-                        else HostProbeStatus.SKIPPED_PRIVATE_IP.value
-                    ),
-                    skip_reason=ssrf_reason,
+                    subdomain=validated_host, status=skip_status, skip_reason=ssrf_reason
                 )
             )
             continue
 
         # 3. Perform inspection
-        res = inspect_single_host(validated_host, base_domain)
+        res = inspect_single_host(validated_host, base_domain, pins=pins)
         results.append(res)
         hosts_inspected += 1
 

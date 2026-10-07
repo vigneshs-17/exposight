@@ -23,10 +23,11 @@ from asm.models import (
     UrlProbeResult,
 )
 from asm.scan_common import (
-    UNRESOLVED_REASON_PREFIX,
     check_host_for_ssrf,
-    is_redirect_target_safe,
     is_safe_public_ip,
+    pin_host,
+    pinned_request,
+    skip_status_for,
     validate_host_and_scope,
 )
 
@@ -262,6 +263,7 @@ def _execute_single_url_probe(
     client: httpx.Client,
     deadline: float,
     resolver: dns.resolver.Resolver | None = None,
+    pins: dict[str, str] | None = None,
 ) -> UrlProbeResult:
     """Perform HTTP probe with manual redirect following and deadline enforcement.
 
@@ -273,21 +275,42 @@ def _execute_single_url_probe(
         base_domain: Root domain for scope checking.
         client: Pre-configured httpx.Client instance.
         deadline: Monotonic deadline timestamp.
+        pins: hostname -> validated IP for this host's probe (see pin_host). Every
+            request connects to the pinned IP; URLs, scope checks and results keep
+            the hostname.
 
     Returns:
         UrlProbeResult detailing outcome.
     """
+    pins = {} if pins is None else pins
     current_url = target_url
     redirect_chain: list[RedirectHop] = []
     follow_count = 0
-    original_host = urllib.parse.urlsplit(target_url).hostname
 
     while True:
+        ip, pin_reason = pin_host(
+            urllib.parse.urlsplit(current_url).hostname or "", pins, resolver=resolver
+        )
+        if ip is None:
+            # Only reachable for the first URL of a direct probe_url call: probe_host
+            # pins the host first, and redirect hops are pinned before they are followed.
+            return UrlProbeResult(
+                url=target_url,
+                reachable=False,
+                error_type=ProbeErrorType.OTHER.value,
+                error_message=f"Not contacted (SSRF guard): {pin_reason}",
+            )
+        wire_url, pin_headers, extensions = pinned_request(current_url, ip)
         timeout = hop_timeout(deadline)
         start_time = time.perf_counter()
 
         with client.stream(
-            "GET", current_url, follow_redirects=False, timeout=timeout
+            "GET",
+            wire_url,
+            headers=pin_headers,
+            extensions=extensions,
+            follow_redirects=False,
+            timeout=timeout,
         ) as response:
             response_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
             body_bytes = _stream_and_read_body(response, deadline)
@@ -337,10 +360,11 @@ def _execute_single_url_probe(
                     )
 
                 # SSRF: an in-scope hostname may still point at a private/metadata IP.
-                hop_safe, hop_reason = is_redirect_target_safe(
-                    next_url, original_host, resolver=resolver
+                # The hop's host is resolved and pinned once, before it is followed.
+                hop_ip, hop_reason = pin_host(
+                    urllib.parse.urlsplit(next_url).hostname or "", pins, resolver=resolver
                 )
-                if not hop_safe:
+                if hop_ip is None:
                     redirect_chain.append(
                         RedirectHop(url=next_url, status_code=status_code, out_of_scope=True)
                     )
@@ -403,6 +427,7 @@ def probe_url(
     base_domain: str,
     client: httpx.Client,
     resolver: dns.resolver.Resolver | None = None,
+    pins: dict[str, str] | None = None,
 ) -> UrlProbeResult:
     """Probe a single URL with error classification and TLS verification fallback.
 
@@ -415,18 +440,20 @@ def probe_url(
         target_url: The URL to probe (e.g. 'https://host.example.com/').
         base_domain: Authorized root domain.
         client: Pre-configured httpx.Client instance (with verify=True).
+        pins: hostname -> validated IP, shared with the retry so it hits the same IP.
 
     Returns:
         UrlProbeResult.
     """
+    pins = {} if pins is None else pins
     deadline = time.perf_counter() + TOTAL_URL_TIMEOUT
     is_https = target_url.lower().startswith("https://")
 
     try:
         result = _execute_single_url_probe(
-            target_url, base_domain, client, deadline, resolver=resolver
+            target_url, base_domain, client, deadline, resolver=resolver, pins=pins
         )
-        if is_https:
+        if is_https and result.reachable:
             result.tls_valid = True
         return result
 
@@ -446,7 +473,7 @@ def probe_url(
             )
             try:
                 retry_result = _execute_single_url_probe(
-                    target_url, base_domain, retry_client, deadline, resolver=resolver
+                    target_url, base_domain, retry_client, deadline, resolver=resolver, pins=pins
                 )
                 retry_result.tls_valid = False
                 retry_result.error_type = ProbeErrorType.TLS_ERROR.value
@@ -518,17 +545,13 @@ def probe_host(
             skip_reason=scope_error,
         )
 
-    # 2. SSRF Protection: Pre-probe private IP check
-    safe_ip, reason = check_host_for_ssrf(validated_host, resolver=resolver)
-    if not safe_ip:
-        unresolved = (reason or "").startswith(UNRESOLVED_REASON_PREFIX)
+    # 2. SSRF Protection: resolve once, require public IPs, pin the address used
+    pins: dict[str, str] = {}
+    ip, reason = pin_host(validated_host, pins, resolver=resolver)
+    if ip is None:
         return HostProbeResult(
             subdomain=validated_host,
-            status=(
-                HostProbeStatus.SKIPPED_UNRESOLVED.value
-                if unresolved
-                else HostProbeStatus.SKIPPED_PRIVATE_IP.value
-            ),
+            status=skip_status_for(reason),
             skip_reason=reason,
         )
 
@@ -549,8 +572,10 @@ def probe_host(
         https_url = f"https://{validated_host}/"
         http_url = f"http://{validated_host}/"
 
-        https_res = probe_url(https_url, base_domain, active_client, resolver=resolver)
-        http_res = probe_url(http_url, base_domain, active_client, resolver=resolver)
+        https_res = probe_url(
+            https_url, base_domain, active_client, resolver=resolver, pins=pins
+        )
+        http_res = probe_url(http_url, base_domain, active_client, resolver=resolver, pins=pins)
 
         is_live = bool(https_res.reachable or http_res.reachable)
 
