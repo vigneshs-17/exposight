@@ -1,4 +1,4 @@
-"""Background worker package for ASM SaaS."""
+"""Background worker package for Exposight."""
 
 from asm.worker.exceptions import (
     EXPECTED_SCANNER_ERRORS,

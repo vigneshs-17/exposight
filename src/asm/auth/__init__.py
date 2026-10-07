@@ -1,4 +1,4 @@
-"""Authentication and authorization package for ASM SaaS."""
+"""Authentication and authorization package for Exposight."""
 
 from asm.auth.config import AuthSettings, get_auth_settings
 from asm.auth.jwks import JWKSManager, JWKSUnavailableError

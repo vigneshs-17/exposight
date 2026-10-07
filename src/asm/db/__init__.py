@@ -1,1 +1,1 @@
-"""Database package for ASM SaaS."""
+"""Database package for Exposight."""

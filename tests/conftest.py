@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for ASM SaaS test suite."""
+"""Shared pytest fixtures for Exposight test suite."""
 
 from __future__ import annotations
 
@@ -12,14 +12,18 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from asm.api.deps import get_current_user
 from asm.api.main import app
-from asm.db.models import Base, Membership, Organization, User
+from asm.db.models import Membership, Organization, User
 from asm.db.session import get_db
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -58,6 +62,19 @@ def validate_test_database_url(test_db_url: str) -> None:
         )
 
 
+def _alembic_head() -> str:
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    return ScriptDirectory.from_config(config).get_current_head()
+
+
+def _alembic_version(engine) -> str | None:
+    with engine.connect() as conn:
+        if conn.execute(text("SELECT to_regclass('alembic_version')")).scalar() is None:
+            return None
+        return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+
+
 @pytest.fixture(scope="session")
 def db_engine():
     """Verify TEST_DATABASE_URL and yield an Engine for the test database."""
@@ -79,8 +96,15 @@ def db_engine():
     except Exception as err:
         pytest.fail(f"Could not connect to PostgreSQL at TEST_DATABASE_URL: {err}")
 
-    # Ensure tables exist for test suite
-    Base.metadata.create_all(bind=engine)
+    # The schema comes from the Alembic migrations, never from the models, so the
+    # test database cannot drift from production.
+    current = _alembic_version(engine)
+    head = _alembic_head()
+    if current != head:
+        pytest.fail(
+            f"Test database is at Alembic revision {current!r}, expected {head!r}. "
+            "Rebuild it with: python scripts/reset_test_db.py"
+        )
     yield engine
     engine.dispose()
 

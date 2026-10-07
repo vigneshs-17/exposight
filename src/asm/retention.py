@@ -38,7 +38,7 @@ def _purgeable_scans(now: datetime) -> Select:
         .group_by(ScanRun.domain_id)
     )
     return select(ScanRun.id).where(
-        ScanRun.status.in_(("succeeded", "failed")),
+        ScanRun.status.in_(("succeeded", "failed", "cancelled")),
         ScanRun.created_at < now - SCAN_RETENTION,
         ScanRun.id.not_in(latest_succeeded),
         ~select(ScanChange.id).where(ScanChange.baseline_scan_run_id == ScanRun.id).exists(),

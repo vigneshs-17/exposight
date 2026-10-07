@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 declarative models for ASM SaaS."""
+"""SQLAlchemy 2.0 declarative models for Exposight."""
 
 import uuid
 from datetime import UTC, datetime
@@ -201,7 +201,7 @@ class ScanRun(Base):
         nullable=False,
         index=True,
     )
-    # Status lifecycle: queued -> running -> succeeded / failed
+    # Status lifecycle: queued -> running -> succeeded / failed; queued -> cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     trigger: Mapped[str] = mapped_column(
         String(20), default="manual", server_default="manual", nullable=False

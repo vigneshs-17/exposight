@@ -1,4 +1,4 @@
-"""Administrative CLI operations for ASM SaaS."""
+"""Administrative CLI operations for Exposight."""
 
 from __future__ import annotations
 
@@ -442,9 +442,9 @@ def _stop_org_scanning(session: Session, org_id: int) -> tuple[int, int]:
             update(ScanRun)
             .where(ScanRun.id.in_(queued_ids))
             .values(
-                status="failed",
+                status="cancelled",
                 finished_at=func.now(),
-                error="Cancelled: every owner of this organization is suspended",
+                error="Scanning is paused for this organization.",
             )
         )
         session.execute(

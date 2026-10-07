@@ -1,6 +1,6 @@
-# ASM SaaS - Learning Notes
+# Exposight - Learning Notes
 
-These notes explain the architecture, design choices, and cybersecurity principles behind the implementation of **ASM SaaS**.
+These notes explain the architecture, design choices, and cybersecurity principles behind the implementation of **Exposight**.
 
 ---
 
@@ -562,7 +562,7 @@ DNS Rebinding is an attack where an attacker controls an authoritative nameserve
 - **Key Entities:**
   - `Domain`: Represents a target domain registered for reconnaissance. Includes `name` (unique, indexed, normalized), `authorized` (boolean), `authorization_note` (optional string), and `created_at` (UTC timestamp).
   - **Fail-Safe Default:** `authorized` defaults to `False` in the database schema. Even if a record were inserted bypassing API validation, it remains unauthorized by default.
-  - `ScanRun`: Represents an instance of a scheduled or manual scan pipeline run for a domain. Tracks `domain_id` (foreign key with `ON DELETE CASCADE`), `status` (`queued`, `running`, `succeeded`, `failed`), `created_at`, `started_at`, `finished_at`, and `error` detail.
+  - `ScanRun`: Represents an instance of a scheduled or manual scan pipeline run for a domain. Tracks `domain_id` (foreign key with `ON DELETE CASCADE`), `status` (`queued`, `running`, `succeeded`, `failed`, `cancelled`; `cancelled` = a queued scan stopped by account suspension or organization deletion), `created_at`, `started_at`, `finished_at`, and `error` detail.
   - `ScanResult`: Stores individual stage reports produced during a scan run (`discover`, `probe`, `portscan`, `inspect`, `score`). Uses PostgreSQL's native binary JSON format (`JSONB`) to store polymorphic scan outputs efficiently while enabling indexing and queryability.
 
 ### `src/asm/db/session.py` (Database Engine & Session Dependency)
@@ -879,7 +879,7 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
 **Consequences of Violating the Principle:**
 - **Premature Vulnerability Closure (False Remediation):** If a firewall drops a probe packet against an exposed MySQL port (`3306`), a naive scanner that treats non-response as "absent" will emit `PORT_NO_LONGER_OPEN` and auto-close the ticket. The security team erroneously marks the finding as remediated while the database remains vulnerable to anyone bypassing the firewall.
 - **Notification Alert Fatigue:** If transient DNS timeouts cause subdomains to flip between "discovered", "removed", and "re-added" every day, analysts suffer from alert fatigue and begin ignoring notifications.
-- **Defensive Safeguard:** ASM SaaS requires explicit, positive counter-evidence before emitting removal or closure changes (e.g. `NXDOMAIN` for DNS, `CLOSED` with `RST` for ports, and non-timeout errors for HTTPS).
+- **Defensive Safeguard:** Exposight requires explicit, positive counter-evidence before emitting removal or closure changes (e.g. `NXDOMAIN` for DNS, `CLOSED` with `RST` for ports, and non-timeout errors for HTTPS).
 
 ---
 
@@ -891,7 +891,7 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
 
 ---
 
-### Question 3: Explain why Certificate Transparency pagination truncation and source switching can cause catastrophic false positive "asset removal" alerts, and how ASM SaaS prevents them.
+### Question 3: Explain why Certificate Transparency pagination truncation and source switching can cause catastrophic false positive "asset removal" alerts, and how Exposight prevents them.
 **Answer:**
 - **The Threat of Source Asymmetry:**
   - `crt.sh` is an archival aggregator spanning all historical certificate issuances, including certificates issued years ago for decommissioned subdomains.
@@ -900,7 +900,7 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
 - **The Threat of Truncation:**
   - To prevent memory exhaustion and rate-limit exhaustion, third-party API clients enforce pagination caps (e.g. Cert Spotter stops at 10 pages / 5,000 entries).
   - If a large domain exceeds this cap, its report contains only a subset of assets and sets `"truncated": true`. Comparing this against an uncapped baseline would spuriously declare thousands of un-paginated subdomains as deleted.
-- **The ASM SaaS Mitigation:**
+- **The Exposight Mitigation:**
   `evaluate_removal_eligibility()` enforces strict conditions: removal detection runs **only** if both the baseline and new scans used the identical source (e.g. both used `crt.sh` or both used `certspotter`) AND neither report was truncated. If either condition is violated, subdomain removal detection is bypassed, and a clear `skip_reason` is stored for transparency.
 
 ---
@@ -949,7 +949,7 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
   Suppose an enterprise ASM platform experiences an unscheduled 7-day outage for maintenance or database migration. If a domain is configured for 6-hour scans, 28 scheduled execution intervals elapsed during the downtime.
   - In a naive scheduling model (like Airflow or cron with catch-up enabled), the scheduler would attempt to run all 28 missed scans back-to-back.
   - For a platform monitoring 10,000 domains, this would generate 280,000 redundant scan jobs, hopelessly jamming the job queue for weeks.
-- **The ASM SaaS Design:**
+- **The Exposight Design:**
   Attack Surface Management is stateful and real-time: a security team cares about what the attack surface looks like *right now*, not what it looked like on Tuesday during an outage. By setting `next_scan_at = now() + interval + jitter`, the domain receives exactly **one** catch-up scan upon worker recovery, and its schedule is immediately reset to the future.
 
 ### Shared Enqueue & Trigger Provenance
@@ -1055,13 +1055,13 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
 
 ---
 
-### Question 2: What is Email Header Injection (CRLF Injection), how can attack surface discovery data facilitate it, and how does ASM SaaS defend against it?
+### Question 2: What is Email Header Injection (CRLF Injection), how can attack surface discovery data facilitate it, and how does Exposight defend against it?
 **Answer:**
 - **Email Header Injection (CRLF Injection):**
   The Internet Message Format (RFC 5322) and SMTP (RFC 5321) use Carriage Return and Line Feed (`\r\n` or `CRLF`) to separate header fields and delimit headers from the message body. If user input or external data is placed into an email header without sanitization, an attacker who can inject `\r\n` characters can inject arbitrary headers into the message.
 - **Attack Surface Reconnaissance as an Attack Vector:**
   In an ASM tool, target domain names, subdomains, TLS Subject Alternative Names (SANs), and server header values are retrieved directly from external, untrusted sources (e.g., DNS records or HTTP responses). If an adversary configures a malicious DNS record or TLS certificate containing `evil.com\r\nBcc: spy@attacker.com`, a naive alert generator placing the domain into the email `Subject:` would inject the `Bcc:` header. The SMTP server would quietly blind-carbon-copy the attacker on all future attack surface vulnerability digests for that organization.
-- **ASM SaaS Defenses:**
+- **Exposight Defenses:**
   1. **Strict CRLF Stripping:** The `clean_header()` utility aggressively strips `\r` and `\n` characters from all header values (`Subject`, `From`, `To`).
   2. **API Input Validation:** The `PUT /domains/{id}/alerts` endpoint validates all email addresses using Pydantic's `EmailStr` and explicitly verifies that no email string contains `\r` or `\n`.
   3. **Body Plain-Text Sanitization:** All untrusted finding values inserted into the email body are passed through `clean_body_text()`, which strips control characters and truncates strings to 200 characters.
@@ -1178,7 +1178,7 @@ In network reconnaissance, an observation failure is not evidence of absence. Wh
   Authentication answers *"Who is the user?"* while authorization answers *"What actions can this user perform on these resources?"*.
   Identity management involves high-risk, specialized security requirements: password hashing (Argon2/bcrypt), credential breach detection, rate limiting, Multi-Factor Authentication (MFA), password reset flows, session invalidation, and OAuth integrations. Handling this internally introduces significant attack surfaces and compliance burdens (SOC 2, ISO 27001).
 - **Zero-Password Backend Architecture:**
-  By delegating authentication to Supabase Auth, the ASM SaaS backend never handles, hashes, or stores user passwords. The backend only validates short-lived, cryptographically signed JWTs using public keys (JWKS). Compromise of the application database exposes zero user credentials.
+  By delegating authentication to Supabase Auth, the Exposight backend never handles, hashes, or stores user passwords. The backend only validates short-lived, cryptographically signed JWTs using public keys (JWKS). Compromise of the application database exposes zero user credentials.
 - **Internal Domain Ownership of Authorization:**
   Conversely, authorization depends directly on application business logic: organizations, workspace memberships, role tiers (`owner`, `admin`, `viewer`), and scan permissions. Outsourcing authorization to a third-party token provider leads to stale claim issues and complex claim synchronization. Retaining authorization in the application database guarantees real-time, ACID-compliant permission checks.
 
@@ -1245,7 +1245,7 @@ In a multi-tenant application, multiple customers (organizations) share the same
   *Defense:* Handled at the database query choke points (`get_domain_for_org` and `get_scan_for_org`). The SQL query itself enforces tenant scoping (`WHERE id = :id AND org_id = :org_id`). If the resource belongs to another organization, 0 rows match, and the helper raises `404 Not Found`.
 
 ### The Single Choke Point Architectural Pattern
-Relying on individual route handlers to manually inspect and compare tenant IDs is fragile and prone to developer omissions. ASM SaaS centralizes all resource retrieval through dedicated scoping helpers in `src/asm/api/deps.py`:
+Relying on individual route handlers to manually inspect and compare tenant IDs is fragile and prone to developer omissions. Exposight centralizes all resource retrieval through dedicated scoping helpers in `src/asm/api/deps.py`:
 - `get_domain_for_org(db, org_id, domain_id) -> Domain`:
   ```sql
   SELECT * FROM domains
@@ -1882,7 +1882,7 @@ The audit log is accessible via `GET /orgs/{org_id}/audit-events`:
     Caps findings at 50 for performance and renders `more_count = max(0, total - 50)`. Computes per-tier counts (`dict.fromkeys(TIER_ORDER, 0)`) across *all* parsed findings before the cap, guaranteeing count cards stay synchronized with the data regardless of the producer's internal dictionary keys.
   - `format_duration(started_at, finished_at)`: Formats execution duration into human-readable strings (`"--"`, `"In progress"`, `"45s"`, or `"2m 15s"`).
   - `format_change_summary(change_detection)`: Reads `scan_runs.change_detection` as produced by `worker.py`. Sums non-zero counts across the five tiers (`critical`, `high`, `medium`, `low`, `info`). Renders `"Baseline scan"` for baseline runs, `"No changes"` when total differences are zero, or a comma-separated breakdown (e.g. `"1 critical, 2 info"`).
-  - `check_polling_status(status, created_at, now)`: Returns `(should_poll, is_stale_active)`. If status is `queued` or `running` and `(now - created_at) < 15 minutes`, `should_poll` is `True`. If active but $\ge 15$ minutes old, `should_poll` is `False` and `is_stale_active` is `True`. For all terminal states (`succeeded`, `failed`), both are `False`.
+  - `check_polling_status(status, created_at, now)`: Returns `(should_poll, is_stale_active)`. If status is `queued` or `running` and `(now - created_at) < 15 minutes`, `should_poll` is `True`. If active but $\ge 15$ minutes old, `should_poll` is `False` and `is_stale_active` is `True`. For all terminal states (`succeeded`, `failed`, `cancelled`), both are `False`.
 
 ### `src/asm/api/routes_ui.py` (New v3.4b Routes)
 - **`GET /ui/orgs/{org_id}/domains/{domain_id}/scans`**:

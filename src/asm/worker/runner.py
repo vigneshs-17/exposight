@@ -1,4 +1,4 @@
-"""Scanner execution runner and protocol for ASM SaaS background worker."""
+"""Scanner execution runner and protocol for Exposight background worker."""
 
 from datetime import UTC, datetime
 from typing import Any, Protocol

@@ -177,7 +177,9 @@ def delete_organization(
             update(ScanRun)
             .where(ScanRun.id.in_(queued_ids))
             .values(
-                status="failed", finished_at=func.now(), error="Cancelled: organization deleted"
+                status="cancelled",
+                finished_at=func.now(),
+                error="The organization was deleted.",
             )
         ).rowcount
     schedules_cancelled = db.execute(
@@ -557,7 +559,7 @@ def update_member_role(
         )
         if (remaining_owners or 0) == 0:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail="Cannot demote the last owner of an organization",
             )
 
@@ -660,7 +662,7 @@ def remove_organization_member(
         )
         if (remaining_owners or 0) == 0:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail="Cannot remove the last owner of an organization",
             )
 

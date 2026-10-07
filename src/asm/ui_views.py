@@ -1,4 +1,4 @@
-"""UI view models, data extractors, and pure presentation logic for ASM SaaS dashboard."""
+"""UI view models, data extractors, and pure presentation logic for Exposight dashboard."""
 
 from __future__ import annotations
 

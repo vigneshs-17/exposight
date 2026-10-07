@@ -1,4 +1,4 @@
-"""Audit logging for ASM SaaS.
+"""Audit logging for Exposight.
 
 append-only against the application; the table owner can disable the trigger
 """

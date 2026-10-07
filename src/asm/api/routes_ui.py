@@ -1,4 +1,4 @@
-"""Server-rendered UI routes for ASM SaaS dashboard (v3.4a/b/c)."""
+"""Server-rendered UI routes for Exposight dashboard (v3.4a/b/c)."""
 
 import json
 import logging

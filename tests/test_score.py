@@ -1,4 +1,4 @@
-"""Unit tests for ASM SaaS risk scoring and multi-stage report aggregation.
+"""Unit tests for Exposight risk scoring and multi-stage report aggregation.
 
 All tests are completely offline (mocked / synthetic JSON fixtures, 0 network activity).
 """

@@ -1,7 +1,7 @@
-# ASM SaaS - Project Rules
+# Exposight - Project Rules
 
 ## Project
-- ASM SaaS: Attack Surface Management tool. Discovers a domain's subdomains,
+- Exposight: Attack Surface Management tool. Discovers a domain's subdomains,
   live hosts, open ports, TLS and header issues, risk-scores them, and later
   monitors changes.
 - Build in phases. Only build what the current prompt asks. Never start the

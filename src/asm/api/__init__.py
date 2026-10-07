@@ -1,1 +1,1 @@
-"""API package for ASM SaaS."""
+"""API package for Exposight."""

@@ -413,6 +413,19 @@
 - **Switches:** the worker purges at most hourly and only when `RETENTION_PURGE_ENABLED` is `true`/`1`/`yes` (compose default `false`); `asm admin purge` needs `--dry-run` or `--execute`, so a bare `purge` deletes nothing.
 - **Evidence:** dry run counts `{'scans': 3, 'alert_notifications': 2, 'invites': 2}` and deletes nothing; removing each exclusion changes the counts (`'scans': 4`). 19 revert proofs, all failing on their own assertion.
 
+
+### Entry BO: v3.6c B-6 — Cancelled Scans Were Shown as Failed
+- **What happened:** B-4 and B-5 cancelled queued scans by writing `status='failed'` with "Cancelled: ..." in `error`, so the dashboard showed a red "Scan failed" box and a "Failed" badge for scans that never ran. The suspension text also named the suspension to every org member.
+- **Fix:** new status `cancelled` (the column is free text, no constraint) with a neutral reason: "Scanning is paused for this organization." (suspension) and "The organization was deleted." (org delete). The scan detail shows a neutral "Scan cancelled" note; the badge uses the grey skipped style; retention treats `cancelled` as finished. Migration 0014 rewrites only the two exact old shapes and its downgrade restores them, so other `failed` rows are untouched. `asm admin move-domain` refuses while a scan is queued or running, so it never cancelled anything. A cancelled scan never reaches change detection, so no alert can be queued for it.
+- **No proof possible:** the org-delete path cancels rows that the same transaction then deletes with their domain, so its new status is only visible in the `queued_scans_cancelled` audit count.
+- **Evidence:** `tests/test_b6_cancelled_scans_db.py`; reverting the status gives `assert 'failed' == 'cancelled'`, the dashboard branch `assert 'Scan cancelled:' in ...`, retention `assert 0 == 1`, either migration direction a row-list mismatch.
+
+### Entry BP: v3.6c B-6 — Deprecated Status Name and Local Schema Drift
+- **What happened:** routes used `status.HTTP_422_UNPROCESSABLE_ENTITY` (deprecated in Starlette 1.x; the replacement name does not exist in older Starlette that `fastapi>=0.115` allows), giving 11 warnings per run. `alembic.ini` had no `path_separator`. The test fixture built missing tables with `create_all`, so a local test DB could hold a schema that no migration produced.
+- **Fix:** status code `422` as a number; `filterwarnings` turns any "'HTTP_...' is deprecated" warning into an error; `path_separator = os`. `scripts/reset_test_db.py` drops, recreates and migrates the `_test` DB and runs `alembic check`; `db_engine` fails unless `alembic_version` is at head; the CI browser job now migrates before testing.
+- **Left (library internals):** `fastapi.testclient` imports `starlette.testclient`, which warns that using `httpx` is deprecated.
+- **Evidence:** putting the old name back fails `test_create_domain_invalid_syntax_rejected` with `StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated`; with the local DB at 0013 the fixture fails with "Test database is at Alembic revision '0013_user_suspension', expected '0014_cancelled_scan_status'".
+
 ---
 
 ## Architectural Decisions

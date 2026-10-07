@@ -1,4 +1,4 @@
-"""Unit tests for ASM SaaS change detection engine (src/asm/changes.py)."""
+"""Unit tests for Exposight change detection engine (src/asm/changes.py)."""
 
 from __future__ import annotations
 

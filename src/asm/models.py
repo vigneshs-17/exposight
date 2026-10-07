@@ -1,4 +1,4 @@
-"""Data models for ASM SaaS discovery, probe results, and reports."""
+"""Data models for Exposight discovery, probe results, and reports."""
 
 from __future__ import annotations
 

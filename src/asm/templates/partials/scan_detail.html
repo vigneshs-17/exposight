@@ -38,7 +38,11 @@
     </div>
   </div>
 
-  {% if scan_run.error %}
+  {% if scan_run.status == "cancelled" %}
+  <div class="alert-box alert-info">
+    <strong>Scan cancelled:</strong> {{ scan_run.error or "No reason recorded." }}
+  </div>
+  {% elif scan_run.error %}
   <div class="alert-box alert-error">
     <strong>Scan failed:</strong> {{ scan_run.error }}
   </div>

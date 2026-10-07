@@ -1,10 +1,10 @@
-# ASM SaaS — Architecture Target
+# Exposight — Architecture Target
 
 I want to add one important architectural constraint to this project going forward.
 
 DO NOT restart, redesign, rewrite, or expand the current project all at once.
 
-The existing ASM SaaS roadmap remains authoritative:
+The existing Exposight roadmap remains authoritative:
 
 ```
 v1 CLI — DONE (verified)

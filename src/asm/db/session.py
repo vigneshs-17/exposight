@@ -1,4 +1,4 @@
-"""Database engine and session management for ASM SaaS."""
+"""Database engine and session management for Exposight."""
 
 from collections.abc import Generator
 from functools import lru_cache

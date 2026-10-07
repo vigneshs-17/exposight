@@ -51,19 +51,19 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t asm-saas .
+          docker build -t exposight .
 
       - name: Run CLI smoke test
         run: |
-          docker run --rm asm-saas --help
+          docker run --rm exposight --help
 
       - name: Verify non-root user
         run: |
-          test "$(docker run --rm --entrypoint whoami asm-saas)" = "asm"
+          test "$(docker run --rm --entrypoint whoami exposight)" = "asm"
 
       - name: Verify worker entry point import
         run: |
-          docker run --rm --entrypoint python asm-saas -c "from asm.worker.__main__ import main"
+          docker run --rm --entrypoint python exposight -c "from asm.worker.__main__ import main"
 
   docker-arm64:
     name: Docker ARM64 Build (QEMU)
@@ -172,6 +172,12 @@ jobs:
       - name: Install Playwright browsers and system dependencies
         run: |
           playwright install --with-deps chromium
+
+      - name: Build the test database schema with Alembic
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/asm_test
+        run: |
+          alembic upgrade head
 
       - name: Run browser tests
         env:

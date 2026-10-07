@@ -105,7 +105,7 @@ def enforce_production_config(check_auth: bool) -> None:
 
 
 class Settings(BaseSettings):
-    """Runtime configuration for ASM SaaS services."""
+    """Runtime configuration for Exposight services."""
 
     model_config = SettingsConfigDict(
         env_file=".env",

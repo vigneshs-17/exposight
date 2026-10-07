@@ -1,4 +1,4 @@
-"""TLS certificate inspection and validation for ASM SaaS.
+"""TLS certificate inspection and validation for Exposight.
 
 Extracts certificate details, verifies trust, evaluates expiry and hostname
 matching, and flags certificate anomalies (expired, expiring soon, self-signed,

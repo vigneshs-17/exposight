@@ -1,4 +1,4 @@
-"""Risk scoring and multi-stage report aggregation engine for ASM SaaS.
+"""Risk scoring and multi-stage report aggregation engine for Exposight.
 
 Evaluates security findings from discovery, HTTP probing, TCP port scanning,
 and TLS/headers inspection to produce defensive risk scores per host and

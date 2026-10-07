@@ -1,4 +1,4 @@
-"""Exceptions and error classification for ASM SaaS worker."""
+"""Exceptions and error classification for Exposight worker."""
 
 from asm.discovery import DiscoveryError
 from asm.scan_common import ReportValidationError

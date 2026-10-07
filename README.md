@@ -108,7 +108,7 @@ Alternatively, run `asm` inside a containerized environment without installing P
 
 ### 1. Build the Docker Image
 ```bash
-docker build -t asm-saas .
+docker build -t exposight .
 ```
 
 ### 2. Run Commands Mounting the Local Output Directory
@@ -116,12 +116,12 @@ To persist generated reports to your host's `output/` directory, bind mount it t
 
 **Windows (PowerShell):**
 ```powershell
-docker run --rm -v "${PWD}/output:/app/output" asm-saas discover example.com
+docker run --rm -v "${PWD}/output:/app/output" exposight discover example.com
 ```
 
 **Linux / macOS:**
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/output:/app/output" asm-saas discover example.com
+docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/output:/app/output" exposight discover example.com
 ```
 > [!NOTE]
 > On Linux and macOS, `--user "$(id -u):$(id -g)"` is required because the container runs as a non-root user (UID 10001) while mounted host directories retain host ownership, ensuring reports written to the host have correct write permissions.
@@ -129,7 +129,7 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/output:/app/output" asm-sa
 > [!IMPORTANT]
 > Active reconnaissance commands (`probe`, `portscan`, `inspect`) still require the mandatory `--authorized` flag inside the container:
 > ```bash
-> docker run --rm -v "${PWD}/output:/app/output" asm-saas probe output/<report>.json --authorized
+> docker run --rm -v "${PWD}/output:/app/output" exposight probe output/<report>.json --authorized
 > ```
 
 ---
@@ -565,11 +565,22 @@ Security invariants enforced:
 
 ### 9. Local Database Testing Setup & Migrations
 
-#### How the Test Suite Creates the Database Schema
-The pytest integration test suite (`pytest -m db`) creates its database schema programmatically via SQLAlchemy:
-- When running tests, the session-scoped fixture `db_engine` in `tests/conftest.py` connects to `TEST_DATABASE_URL` (after validating that the database name ends with `_test` for safety).
-- It executes `Base.metadata.create_all(bind=engine)`, ensuring all tables, columns, indexes, and constraints defined across `src/asm/db/models.py` exist before tests execute.
+#### How the Test Suite Gets Its Database Schema
+The test database schema comes only from the Alembic migrations, the same ones production runs:
+- The session-scoped fixture `db_engine` in `tests/conftest.py` connects to `TEST_DATABASE_URL` (after validating that the database name ends with `_test` for safety).
+- It does not create tables. It fails with a pointer to `scripts/reset_test_db.py` unless the database is at the Alembic head revision, so a local schema cannot drift from production.
 - Per-test isolation is maintained via savepoint transactions (`join_transaction_mode="create_savepoint"`), rolling back all changes after each test.
+
+To rebuild the local test database (drops and recreates the `_test` database, then runs `alembic upgrade head` and `alembic check`):
+```bash
+# Windows (PowerShell)
+$env:TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5433/asm_test"
+python scripts/reset_test_db.py
+
+# Linux / macOS
+TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:5433/asm_test" python scripts/reset_test_db.py
+```
+Run it after pulling a new migration, or whenever the fixture reports a revision mismatch.
 
 #### Migration Testing in CI (`db-test` Job)
 To verify that Alembic migration scripts remain in 100% synchronization with SQLAlchemy ORM models, the CI `db-test` workflow executes a strict 4-step verification sequence against PostgreSQL:

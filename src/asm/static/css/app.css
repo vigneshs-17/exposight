@@ -267,7 +267,7 @@ body {
   border-color: rgba(194, 87, 0, 0.3);
 }
 
-.status-skipped {
+.status-skipped, .status-cancelled {
   background-color: var(--color-sea-glass);
   color: var(--color-muted-text);
   border-color: var(--color-border-subtle);

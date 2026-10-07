@@ -1,1 +1,1 @@
-"""Tests for ASM SaaS."""
+"""Tests for Exposight."""

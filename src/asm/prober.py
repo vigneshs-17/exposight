@@ -1,4 +1,4 @@
-"""Active HTTP/HTTPS host prober module for ASM SaaS."""
+"""Active HTTP/HTTPS host prober module for Exposight."""
 
 from __future__ import annotations
 

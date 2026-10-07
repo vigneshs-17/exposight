@@ -1,4 +1,4 @@
-"""Lightweight, asynchronous TCP port scanner and service identifier for ASM SaaS."""
+"""Lightweight, asynchronous TCP port scanner and service identifier for Exposight."""
 
 from __future__ import annotations
 

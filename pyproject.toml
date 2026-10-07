@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "asm-saas"
 version = "0.1.0"
-description = "Attack Surface Management (ASM) SaaS CLI - Passive Discovery & Recon"
+description = "Exposight - attack surface management: passive discovery and recon"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -66,6 +66,8 @@ ignore = []
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-v --strict-markers -m 'not integration and not browser'"
+# Our code must not use deprecated Starlette status names (e.g. HTTP_422_UNPROCESSABLE_ENTITY).
+filterwarnings = ["error:'HTTP_\\w+' is deprecated:Warning"]
 markers = [
     "integration: real network integration tests (deselected by default in CI)",
     "db: tests requiring a real PostgreSQL database (run when TEST_DATABASE_URL is set)",

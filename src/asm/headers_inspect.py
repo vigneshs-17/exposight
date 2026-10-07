@@ -1,4 +1,4 @@
-"""HTTP security headers inspection and single-connection TLS coordinator for ASM SaaS.
+"""HTTP security headers inspection and single-connection TLS coordinator for Exposight.
 
 Evaluates security headers (HSTS, CSP, X-Frame-Options, etc.), parses HSTS max-age,
 and detects information disclosure headers (Server, X-Powered-By, X-AspNet-Version).

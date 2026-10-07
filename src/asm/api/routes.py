@@ -1,4 +1,4 @@
-"""REST API routes for ASM SaaS (multi-tenant scoped)."""
+"""REST API routes for Exposight (multi-tenant scoped)."""
 
 import logging
 from collections.abc import Sequence
@@ -109,7 +109,7 @@ def create_domain(
         validated_name = validate_domain(payload.name)
     except DomainValidationError as err:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=f"Invalid domain: {err}",
         ) from err
 
@@ -456,7 +456,7 @@ def queue_scan(
 
     if domain.verification_status != "verified":
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=(
                 f"Domain '{domain.name}' is not verified for active scanning. "
                 "Ownership verification is required."
@@ -709,7 +709,7 @@ def list_domain_changes(
             since_dt = datetime.fromisoformat(since.replace(" ", "+"))
         except ValueError as err:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail=f"Invalid ISO-8601 datetime format for 'since': {since}",
             ) from err
         stmt = stmt.where(ScanChange.observed_at >= since_dt)
@@ -750,7 +750,7 @@ def update_domain_schedule(
     else:
         if domain.verification_status != "verified":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail=f"Domain '{domain.name}' is not verified for scanning.",
             )
 
@@ -806,7 +806,7 @@ def update_domain_alerts(
 
     if domain.verification_status != "verified" and payload.alerts_enabled:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=f"Domain '{domain.name}' is not verified.",
         )
 

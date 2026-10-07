@@ -1,4 +1,4 @@
-"""Change detection engine for ASM SaaS.
+"""Change detection engine for Exposight.
 
 Compares consecutive succeeded scan runs for the same domain to identify
 attack surface exposure changes, security posture improvements, and

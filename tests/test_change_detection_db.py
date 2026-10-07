@@ -1,4 +1,4 @@
-"""Database and worker integration tests for ASM SaaS change detection (v2.3)."""
+"""Database and worker integration tests for Exposight change detection (v2.3)."""
 
 from __future__ import annotations
 

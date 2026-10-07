@@ -1,4 +1,4 @@
-"""Pydantic request and response schemas for the ASM SaaS REST API."""
+"""Pydantic request and response schemas for the Exposight REST API."""
 
 from __future__ import annotations
 

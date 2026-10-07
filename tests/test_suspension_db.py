@@ -116,8 +116,8 @@ def test_d4_scanning_stops_only_where_every_owner_is_suspended(db_engine, clean_
         solo = session.get(Domain, solo_domain)
         assert solo.scan_interval_hours is None and solo.next_scan_at is None
         cancelled = session.get(ScanRun, solo_queued)
-        assert cancelled.status == "failed"
-        assert "suspended" in cancelled.error
+        assert cancelled.status == "cancelled"
+        assert cancelled.error == "Scanning is paused for this organization."
         stage = session.scalar(select(ScanStage).where(ScanStage.scan_run_id == solo_queued))
         assert stage.status == "skipped"
 
