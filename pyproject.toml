@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "asm-saas"
+name = "exposight"
 version = "0.1.0"
 description = "Exposight - attack surface management: passive discovery and recon"
 readme = "README.md"

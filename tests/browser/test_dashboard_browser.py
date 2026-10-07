@@ -558,7 +558,10 @@ def test_browser_production_app_rejects_fake_token_401(
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(req, timeout=5)
-        assert exc_info.value.code == 401
+        # Close the error's response: left open, its socket was garbage-collected during
+        # the next test and raised a ResourceWarning there (found with -W default).
+        with exc_info.value:
+            assert exc_info.value.code == 401
     finally:
         if orig_override:
             app.dependency_overrides[get_current_user] = orig_override

@@ -53,8 +53,7 @@ def app_role_grant_statements(app_role: str) -> list[str]:
 def app_role_revoke_statements(app_role: str) -> list[str]:
     """Return statements that undo app_role_grant_statements (migration downgrade)."""
     role = validate_role_name(app_role)
-    # Bandit B608 accepted: a role name cannot be a bind parameter
-    # in DDL, and validate_role_name allows only ^[a-z_][a-z0-9_]*$ (operator env input).
+    # Bandit B608 accepted: role is validated by validate_role_name; DDL cannot bind a name.
     return [
         "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public "
         f"REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM {role}",
@@ -74,8 +73,7 @@ def transfer_ownership_statements(owner_role: str) -> list[str]:
     bootstrap superuser. Sequences owned by a table move with the table.
     """
     role = validate_role_name(owner_role)
-    # Bandit B608 accepted: role is a validated identifier (^[a-z_][a-z0-9_]*$), and DDL
-    # cannot take it as a bind parameter.
+    # Bandit B608 accepted: role is validated by validate_role_name; DDL cannot bind a name.
     return [
         "DO $$ DECLARE r record; BEGIN "
         "FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP "  # nosec B608

@@ -444,6 +444,13 @@
 - **Found by a revert proof:** `fail_under = 91` still passed at 90.63% because coverage compares at `precision` 0 (rounds to 91). `precision = 2` added; the mutated floor then fails with `ERROR: Coverage failure: total of 90.63 is less than fail-under=91.00` (exit 1). Also: `pip-audit --strict --skip-editable` fails on the editable install itself, so the job audits `pip freeze --exclude-editable`.
 - **Evidence:** bandit without one `nosec`: `[B501:request_with_no_cert_validation]` exit 1; bare `# nosec`: hygiene test fails (bandit alone would pass); B110 fixes reverted: bandit `B110` and both behaviour tests fail. pip-audit with `jinja2==3.1.2`: 10 known vulnerabilities, exit 1. gitleaks with one fingerprint removed: 1 leak (README:283), all commented: 8 leaks, exit 1; fake AWS key in a scanned tree: 1 leak. trivy: egress on `alpine:3.22.2` `Total: 21 (HIGH: 19, CRITICAL: 2)`, app without `apt-get upgrade` `Total: 7 (HIGH: 7)`, both exit 1; repo Dockerfiles exit 0. After the change the egress check still passes on 3.22.6 and api/worker run without pip.
 
+### Entry BT: v3.6c Phase E — Cleanup Checkpoint
+- **Rename:** distribution `asm-saas` -> `exposight` in `pyproject.toml`; package `asm`, imports and the `asm` CLI unchanged. `tests/test_brand_text.py` no longer allows the old name line and also matches `asm_saas`; putting the old name back fails it.
+- **nosec in roles.py:** believed unnecessary, but removing both gives `bandit -r src -ll` two `B608` issues (exit 1): role names are interpolated into DDL. Restored, each with a one-line `Bandit B608 accepted:` reason.
+- **Warnings (-W default, full suite incl. browser):** a browser test caught `HTTPError` without closing its response; the socket was collected during the next test (`ResourceWarning: unclosed <socket.socket ...>` and `Implicitly cleaning up <HTTPError 401>`). Closing the error fixes both; reverting the fix brings them back. Left (third party): `fastapi.testclient` -> `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated`.
+- **Logging decision:** Caddy access logs stay off (Option A). Every service in `compose.prod.yml` uses json-file with `max-size: 10m`, `max-file: 3` through one `x-logging` anchor; `test_every_service_has_log_rotation` fails (`AssertionError: worker`) when one service loses it.
+- **Unexplained:** one run without `TEST_DATABASE_URL` reported `1 failed, 478 passed, 228 skipped, 3 warnings`; the failing test was not captured and 29 reruns passed. Treat as a possible flaky test until seen again with `-rf`.
+
 ---
 
 ## Architectural Decisions

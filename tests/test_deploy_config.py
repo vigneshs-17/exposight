@@ -303,3 +303,15 @@ def test_egress_check_does_not_count_a_closed_port_as_blocked():
         port = sock.getsockname()[1]  # bound, not listening: connects are refused
         outcome, _ = check.probe("127.0.0.1", port)
     assert outcome == "REFUSED"
+
+
+def test_every_service_has_log_rotation():
+    """Phase E: json-file logs are capped for every service (Caddy access logs stay off)."""
+    services = _prod_services()
+    assert services, "compose.prod.yml has no services"
+    for name, svc in services.items():
+        logging_cfg = svc.get("logging") or {}
+        assert logging_cfg.get("driver") == "json-file", name
+        options = logging_cfg.get("options") or {}
+        assert options.get("max-size") == "10m", name
+        assert options.get("max-file") == "3", name

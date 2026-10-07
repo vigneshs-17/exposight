@@ -1,5 +1,14 @@
+# Log rotation for every service (Phase E): Docker's json-file driver keeps at most
+# 3 files of 10 MB per container. Caddy access logs stay off by decision (docs/DEPLOY.md).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
+    logging: *default-logging
     image: postgres:18.6-alpine
     restart: unless-stopped
     environment:
@@ -28,6 +37,7 @@ services:
     # Port 5432 is strictly internal to app-tier; no host port publishing.
 
   migrate:
+    logging: *default-logging
     build:
       context: .
       dockerfile: Dockerfile
@@ -46,6 +56,7 @@ services:
       app-tier:
 
   api:
+    logging: *default-logging
     build:
       context: .
       dockerfile: Dockerfile
@@ -89,6 +100,7 @@ services:
     # Port 8000 is internal only; reverse-proxied exclusively by Caddy.
 
   egress:
+    logging: *default-logging
     # Worker egress firewall (Phase D-2, docs/DEPLOY.md). Owns the network namespace
     # the worker joins; applies deploy/egress/rules.sh, then idles. Only this container
     # has NET_ADMIN. If the rules fail it exits and the worker never starts.
@@ -116,6 +128,7 @@ services:
     # Publishes no ports.
 
   worker:
+    logging: *default-logging
     build:
       context: .
       dockerfile: Dockerfile
@@ -150,6 +163,7 @@ services:
     # Worker is a background task processor; publishes no ports.
 
   caddy:
+    logging: *default-logging
     image: caddy:2.11.4-alpine
     restart: unless-stopped
     environment:

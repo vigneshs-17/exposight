@@ -33,7 +33,8 @@ ALLOWED_FILES = {
     "tests/test_brand_text.py",
     "tests/test_dashboard_ui.py",
 }
-ALLOWED_LINES = {'name = "asm-saas"'}
+# The distribution was renamed to "exposight" in Phase E; no line may keep the old name.
+ALLOWED_LINES: set[str] = set()
 
 
 def test_tracked_files_do_not_use_the_old_name():
@@ -55,6 +56,6 @@ def test_tracked_files_do_not_use_the_old_name():
         except UnicodeDecodeError:
             continue  # binary
         for number, line in enumerate(text.splitlines(), 1):
-            if re.search(r"ASM SaaS|asm-saas", line) and line.strip() not in ALLOWED_LINES:
+            if re.search(r"ASM SaaS|asm-saas|asm_saas", line) and line.strip() not in ALLOWED_LINES:
                 offenders.append(f"{name}:{number}")
     assert offenders == []

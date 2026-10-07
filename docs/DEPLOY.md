@@ -138,7 +138,7 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
 
 ### Log redaction
 
-The api, worker and admin CLI install a log filter (`src/asm/logredact.py`) that masks email addresses (`[email]`), secret-looking URL parameters such as `token=`, `code=` and `access_token=` (`[redacted]`), and JWT-shaped strings (`[jwt]`) in every log line, uvicorn's access log included. Delivery-failure log lines name the notification id, never the recipient. When debugging alert delivery, look up the recipient by notification id in the database instead of in the logs. PostgreSQL's own error log is not filtered: an error such as a unique-constraint violation can print the offending value. Caddy writes no access log (the `Caddyfile` has no `log` directive).
+The api, worker and admin CLI install a log filter (`src/asm/logredact.py`) that masks email addresses (`[email]`), secret-looking URL parameters such as `token=`, `code=` and `access_token=` (`[redacted]`), and JWT-shaped strings (`[jwt]`) in every log line, uvicorn's access log included. Delivery-failure log lines name the notification id, never the recipient. When debugging alert delivery, look up the recipient by notification id in the database instead of in the logs. PostgreSQL's own error log is not filtered: an error such as a unique-constraint violation can print the offending value. Caddy access logs are off by decision (Phase E, Option A: the `Caddyfile` has no `log` directive; the masked uvicorn access log is the only request log). Every service in `compose.prod.yml` uses Docker's json-file log driver capped at `max-size: 10m` and `max-file: 3` (about 30 MB per container).
 
 ### Database downgrades
 
