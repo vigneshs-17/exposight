@@ -1,9 +1,9 @@
 [![CI](https://github.com/vigneshs-17/exposight/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vigneshs-17/exposight/actions/workflows/ci.yml)
 [![Security](https://github.com/vigneshs-17/exposight/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/vigneshs-17/exposight/actions/workflows/security.yml)
 
-# Exposight - Attack Surface Management CLI
+# Exposight - Attack Surface Management
 
-A lightweight, modular, and defensible Attack Surface Management (ASM) reconnaissance tool designed for cybersecurity engineers and students.
+Exposight is a multi-tenant Attack Surface Management (ASM) service: a FastAPI web app (JSON API and server-rendered dashboard) where organizations verify the domains they own and schedule scans, a background worker that runs the scans, detects changes and sends email alerts, and the original `asm` command-line scanner.
 
 ---
 
@@ -14,12 +14,14 @@ A lightweight, modular, and defensible Attack Surface Management (ASM) reconnais
 - **v3.1a User Auth & Organizations**: Done. Supabase JWT authentication, organization RBAC, and multi-tenant scoping.
 - **v3.1b Tenant Isolation**: Done. Foreign keys, row-level organization fences, and anti-enumeration defenses.
 - **v3.2 Domain Verification**: Done. Domain ownership proof via DNS TXT, continuous background re-verification, operator overrides, and scan gating.
-- **v3.3 Audit Log & Event Tracking**: Done. Append-only audit events table, trigger against app tampering, 15 structured actions, and organization audit API.
+- **v3.3 Audit Log & Event Tracking**: Done. Append-only audit events table, trigger against app tampering, structured actions (21 today), and organization audit API.
 - **v3.4a Dashboard Shell & Verification UI**: Done. Server-rendered dashboard (FastAPI + Jinja2 + HTMX), Supabase browser authentication, organization management, domains list, and DNS TXT verification UI.
 - **v3.4b Scans, Results & Changes UI**: Done. Scans list (latest 20 runs, status, trigger, duration, changes summary), Run scan button (gated by domain verification and role), scan detail with 5 pipeline stages, Fix first prioritized findings (capped at 50 with overflow count), per-tier count cards, and changes table with auto-polling (3s, 15m cap).
 - **v3.4c Schedule, Alerts & Audit Log UI**: Done. Domain schedule settings with presets (Off, 6h, 12h, 24h, 7 days, 30 days) and next scan time; email alerts settings (toggle, min severity, up to 5 recipients) with viewer email redaction; domain alert history outbox log with offset paging; and organization audit log with action/domain filtering, keyset pagination, and escaped metadata.
 - **v3.4d Playwright Browser Tests**: Done. Real browser interaction tests in Chromium with live uvicorn server, route interception, 0 CSP violations, and multi-tenant UI verification.
-- **Next: v3.5**: landing page.
+- **v3.5 Landing Page**: Done. Public landing page at `/` and terms page at `/terms`.
+- **v3.6 Production hardening**: Done. Production compose with Caddy (v3.6a); security hardening, least-privilege database roles and invites (v3.6b); log redaction, account suspension, org and account deletion, retention purge (v3.6c); DNS pinning for every scanner connection and a worker egress firewall (v3.6d); CI security scanners and a coverage gate (Phase G); cleanup (Phase E).
+- **Current: Phase H, deployment on Azure (in progress)**: the worker blocks the Azure WireServer (`168.63.129.16`) in the egress firewall and the SSRF checks; the public domain is still pending.
 
 ---
 
@@ -586,7 +588,7 @@ TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:5433/asm_tes
 Run it after pulling a new migration, or whenever the fixture reports a revision mismatch.
 
 #### Migration Testing in CI (`db-test` Job)
-To verify that Alembic migration scripts remain in 100% synchronization with SQLAlchemy ORM models, the CI `db-test` workflow executes a strict 4-step verification sequence against PostgreSQL:
+To verify that Alembic migration scripts stay in sync with the SQLAlchemy ORM models, the CI `db-test` workflow executes a strict 4-step verification sequence against PostgreSQL:
 ```bash
 # 1. Apply all migrations up to head
 alembic upgrade head
@@ -966,7 +968,7 @@ Hosts: 4 total (0 Critical, 2 High, 2 Medium, 0 Low, 0 Info)
 ## Running Tests and Linting
 
 
-To run the unit test suite (100% mocked, zero network calls, integration tests deselected):
+To run the default test suite (integration and browser tests deselected; database tests skip unless `TEST_DATABASE_URL` is set):
 ```bash
 pytest
 ```
