@@ -28,6 +28,8 @@ for net in \
     203.0.113.0/24 224.0.0.0/4 240.0.0.0/4; do
     iptables -A OUTPUT -d "$net" -j REJECT --reject-with icmp-admin-prohibited
 done
+# Azure WireServer / platform DNS: a public-looking address every Azure VM can reach.
+iptables -A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-admin-prohibited
 
 ip6tables -F OUTPUT
 ip6tables -A OUTPUT -o lo -j ACCEPT

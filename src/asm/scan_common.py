@@ -30,6 +30,9 @@ IPV6_ONLY_REASON_PREFIX = "IPv6-only host"
 _NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
 _SITE_LOCAL_PREFIX = ipaddress.IPv6Network("fec0::/10")
+# Public-looking addresses that are cloud platform endpoints, reachable from inside the VM.
+# 168.63.129.16: Azure WireServer / platform DNS (also blocked by deploy/egress/rules.sh).
+_PLATFORM_ENDPOINTS = (ipaddress.IPv4Network("168.63.129.16/32"),)
 
 
 def sanitize_error_text(error: str | None, max_length: int = 300) -> str | None:
@@ -176,6 +179,7 @@ def is_safe_public_ip(ip_str: str) -> bool:
     - CGNAT addresses (100.64.0.0/10)
     - Unspecified addresses (0.0.0.0, ::)
     - Multicast groups
+    - Cloud platform endpoints with public addresses (Azure WireServer 168.63.129.16)
 
     Args:
         ip_str: The IP address string to check.
@@ -204,6 +208,9 @@ def is_safe_public_ip(ip_str: str) -> bool:
         elif ip in _SITE_LOCAL_PREFIX:
             # Deprecated site-local fec0::/10 is internal but not flagged by is_global
             return False
+
+    if any(ip in net for net in _PLATFORM_ENDPOINTS):
+        return False
 
     return bool(ip.is_global and not ip.is_multicast)
 

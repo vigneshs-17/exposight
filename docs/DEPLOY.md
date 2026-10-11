@@ -237,7 +237,7 @@ What the worker can reach:
 - The public internet: scan targets, crt.sh, Cert Spotter, SMTP.
 - DNS through Docker's embedded resolver, which forwards to 1.1.1.1 and 9.9.9.9 (`dns:` on `egress`). Oracle's VCN resolver is 169.254.169.254, which is blocked, so do not remove these.
 
-What it cannot reach (rejected with "No route to host"): 0.0.0.0/8, 10.0.0.0/8 (including the api, Caddy and the host's VCN private IP), 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 (cloud metadata), 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4. All IPv6 except loopback is dropped; the scanner also skips IPv6-only hosts (`SKIPPED_IPV6_ONLY`) unless `SCAN_IPV6_ENABLED=true`, which this firewall would block anyway.
+What it cannot reach (rejected with "No route to host"): 0.0.0.0/8, 10.0.0.0/8 (including the api, Caddy and the host's VCN private IP), 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 (cloud metadata), 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4, and 168.63.129.16/32 (Azure WireServer). All IPv6 except loopback is dropped; the scanner also skips IPv6-only hosts (`SKIPPED_IPV6_ONLY`) unless `SCAN_IPV6_ENABLED=true`, which this firewall would block anyway.
 
 Fail closed: if `rules.sh` fails, `egress` exits, its healthcheck never passes and the worker stays in `Created`. `docker compose restart egress` also restarts the worker (`depends_on: restart: true`), because a restarted `egress` is a new namespace. If Docker restarts `egress` on its own (crash), the worker is left without network; recover with:
 ```bash
@@ -261,6 +261,15 @@ Every line must read `OK` and the last line `egress check: PASSED`. A blocked ta
 6. The iptables backend in the Alpine image coexists with the host Docker's own rules (the check is the proof; rule listings may differ).
 7. Oracle's preinstalled host iptables rules do not block traffic between the bridge containers.
 8. Decide on host `DOCKER-USER`/`INPUT` rules as a second network layer (D13, revisited in Phase H).
+
+### Azure
+- **NSG:** the network security group must allow inbound TCP 22, 80 and 443 only (80 is needed for the ACME HTTP challenge and the HTTPS redirect).
+- **WireServer blocked:** 168.63.129.16 is Azure's WireServer and platform DNS. It looks like a public address and every Azure VM can reach it, so no private range covers it. The egress firewall rejects it explicitly (`deploy/egress/rules.sh`), and the scanner refuses any target that resolves to it (`is_safe_public_ip` in `src/asm/scan_common.py`). The worker does not need it for DNS: `egress` sets `dns: 1.1.1.1 / 9.9.9.9`, so do not remove those lines.
+- **Metadata (IMDS) check:** from the host, this must answer with the instance JSON:
+  ```bash
+  curl -s -H Metadata:true "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+  ```
+  From the worker, the egress check must show `169.254.169.254:80 BLOCKED` and `168.63.129.16:80 BLOCKED`.
 
 ### Tag Releases & Rollbacks
 Always deploy tagged Git releases in production:

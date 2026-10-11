@@ -190,6 +190,14 @@ trivy, the 7 fixable HIGH in the app image: CVE-2026-75804 and CVE-2026-84782 (O
 4. Caddy logging: report only (no config change), with two options for the owner to decide.
 5. Decision (2026-10-07): Option A, Caddy access logs stay OFF (Caddyfile unchanged). Every service in `compose.prod.yml` gets json-file log rotation, max-size 10m, max-file 3 (one YAML anchor); a test asserts it; DEPLOY.md states both.
 
+### Phase H-Azure-1 plan: block Azure platform endpoints for the worker (requested 2026-10-11)
+1. `deploy/egress/rules.sh`: REJECT (icmp-admin-prohibited) 168.63.129.16/32, commented as the Azure WireServer / platform DNS.
+2. `src/asm/scan_common.py` `is_safe_public_ip`: refuse 168.63.129.16/32 (also in IPv4-mapped/NAT64/6to4/compatible IPv6 forms), so a scan target resolving to it is refused before any connection; unit tests.
+3. `scripts/egress_check.py`: `168.63.129.16:80` must be BLOCKED.
+4. `tests/test_deploy_config.py`: the rule and the check target are required.
+5. Worker DNS stays on 1.1.1.1 / 9.9.9.9 (`dns:` on `egress`), so blocking Azure's resolver does not break resolution.
+6. `docs/DEPLOY.md`: "Azure" subsection (NSG inbound 22/80/443; WireServer blocked; IMDS answers from the host, BLOCKED from the worker).
+
 ### Decisions D6-D9 (approved 2026-10-05)
 - **D6:** `DELETE /me` while the user is an org's only owner: refuse with 409 naming those orgs; the user transfers ownership or deletes them first. No automatic tombstoning.
 - **D7:** Exposight holds no Supabase `service_role` key, so `DELETE /me` cannot remove the Supabase login account. Documented in docs/DEPLOY.md and /terms; the operator deletes the Supabase identity on request.

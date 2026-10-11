@@ -111,7 +111,8 @@ services:
     cap_add: ["NET_ADMIN", "NET_RAW"]
     environment:
       EGRESS_DB_IP: 10.89.0.10
-    # Public resolvers (D14): Oracle's VCN resolver is 169.254.169.254, which the rules block.
+    # Public resolvers (D14): Oracle's VCN resolver is 169.254.169.254 and Azure's is
+    # 168.63.129.16; the rules block both.
     dns:
       - 1.1.1.1
       - 9.9.9.9

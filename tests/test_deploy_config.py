@@ -267,6 +267,11 @@ def test_egress_rules_block_internal_ranges_and_fail_closed():
         "172.16.0.0/12", "192.168.0.0/16",
     ):
         assert net in rules, net
+    # Azure WireServer / platform DNS: public-looking, so no range above covers it.
+    assert (
+        "iptables -A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-admin-prohibited"
+        in rules.splitlines()
+    )
     assert "ip6tables -P OUTPUT DROP" in rules  # D12
     # The readiness marker is written only after every rule was applied.
     assert rules.rindex("touch /run/egress-ready") > rules.rindex("ip6tables -P OUTPUT DROP")
@@ -291,6 +296,7 @@ def test_egress_check_covers_the_required_targets():
     assert expected[("api", 8000)] == "BLOCKED"
     assert expected[("api", 5432)] == "BLOCKED"  # another private IP on 5432
     assert expected[("169.254.169.254", 80)] == "BLOCKED"
+    assert expected[("168.63.129.16", 80)] == "BLOCKED"  # Azure WireServer
 
 
 def test_egress_check_does_not_count_a_closed_port_as_blocked():

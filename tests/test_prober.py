@@ -97,6 +97,9 @@ class TestIPAndSSRFValidation:
             "64:ff9b::a9fe:a9fe",     # NAT64 embedding 169.254.169.254 (metadata)
             "2002:7f00:1::1",         # 6to4 embedding 127.0.0.1
             "fec0::1",                # Deprecated IPv6 site-local
+            "168.63.129.16",          # Azure WireServer / platform DNS (public-looking)
+            "::ffff:168.63.129.16",   # IPv4-mapped Azure WireServer
+            "64:ff9b::a83f:8110",     # NAT64 embedding 168.63.129.16
         ],
     )
     def test_private_and_restricted_ips_rejected(self, private_or_restricted_ip: str):
@@ -402,6 +405,28 @@ class TestSSRFFailClosedAndRedirectGuard:
         )
         assert res.status == HostProbeStatus.SKIPPED_UNRESOLVED.value
         assert calls["n"] == 0
+
+    def test_host_resolving_to_azure_wireserver_is_never_contacted(self):
+        """168.63.129.16 passes is_global but is the Azure WireServer: refuse before connecting."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(200)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        resolver = _resolver_returning({"wire.example.com": "168.63.129.16"})
+        safe, reason = check_host_for_ssrf("wire.example.com", resolver=resolver)
+        res = probe_host("wire.example.com", "example.com", resolver=resolver, client=client)
+
+        assert safe is False and "168.63.129.16" in (reason or "")
+        assert res.status == HostProbeStatus.SKIPPED_PRIVATE_IP.value
+        assert calls["n"] == 0
+
+    def test_azure_block_is_exactly_one_address(self):
+        """The neighbours of 168.63.129.16 are ordinary public addresses."""
+        assert is_safe_public_ip("168.63.129.15") is True
+        assert is_safe_public_ip("168.63.129.17") is True
 
     def test_redirect_to_in_scope_host_with_private_ip_is_not_followed(self):
         """sso.example.com -> meta.example.com (169.254.169.254) must stop before the hop."""

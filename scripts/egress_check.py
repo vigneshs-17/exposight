@@ -74,6 +74,7 @@ def targets() -> list[tuple[str, str, int, str]]:
         ("another private IP on 5432 (api)", "api", 5432, "BLOCKED"),
         ("bridge gateway / host", gateway, 22, "BLOCKED"),
         ("cloud metadata endpoint", "169.254.169.254", 80, "BLOCKED"),
+        ("Azure WireServer", "168.63.129.16", 80, "BLOCKED"),
         ("private network 10.0.0.1", "10.0.0.1", 22, "BLOCKED"),
         ("public IPv6 (IPv6 is off)", "2606:4700:4700::1111", 443, "BLOCKED"),
         ("crt.sh", "crt.sh", 443, "CONNECTED"),
