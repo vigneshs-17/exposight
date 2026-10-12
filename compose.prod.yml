@@ -82,6 +82,8 @@ services:
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-authenticated}
+      # Accounts allowed to create organizations (H-Auth-1); unset: nobody, invites only.
+      ORG_CREATION_ALLOWED_EMAILS: '${ORG_CREATION_ALLOWED_EMAILS:-[]}'
       # Domain-verification DNS check resolvers (E-4); unset keeps the app default.
       VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     healthcheck:

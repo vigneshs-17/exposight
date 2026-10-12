@@ -6,7 +6,7 @@ import sys
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import EmailStr, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -150,6 +150,22 @@ class Settings(BaseSettings):
         if not all(is_safe_public_ip(ip) for ip in ips):
             raise ValueError("VERIFICATION_RESOLVERS must be public IP addresses")
         return ips
+
+    org_creation_allowed_emails: list[EmailStr] = Field(
+        default=[],
+        description=(
+            "Accounts allowed to create organizations (JSON list of emails). "
+            "Empty: nobody; everyone else joins by invite."
+        ),
+    )
+
+    @field_validator("org_creation_allowed_emails", mode="before")
+    @classmethod
+    def normalize_org_creation_allowed_emails(cls, v: object) -> object:
+        # Trimmed and lower-cased here; EmailStr then rejects malformed entries at startup.
+        if isinstance(v, list):
+            return [e.strip().lower() if isinstance(e, str) else e for e in v]
+        return v
 
     @field_validator("supabase_publishable_key")
     @classmethod

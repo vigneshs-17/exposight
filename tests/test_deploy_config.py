@@ -229,6 +229,20 @@ def test_verification_resolvers_passed_to_api_and_worker_with_app_default():
         assert yaml.safe_load(default) == Settings.model_fields["verification_resolvers"].default
 
 
+def test_org_creation_allowlist_passed_to_api_with_app_default():
+    """H-Auth-1: the api enforces it; unset falls back to the Settings default (nobody)."""
+    from asm.config import Settings
+
+    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    value = config["services"]["api"]["environment"]["ORG_CREATION_ALLOWED_EMAILS"]
+    assert value.startswith("${ORG_CREATION_ALLOWED_EMAILS:-") and value.endswith("}")
+    default = value[len("${ORG_CREATION_ALLOWED_EMAILS:-") : -1]
+    app_default = Settings.model_fields["org_creation_allowed_emails"].default
+    assert yaml.safe_load(default) == app_default == []
+    example = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
+    assert any(line.startswith("ORG_CREATION_ALLOWED_EMAILS=") for line in example.splitlines())
+
+
 # --- v3.6c D-2: worker egress firewall ---------------------------------------------------
 
 

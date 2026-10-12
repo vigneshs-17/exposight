@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from asm.api.deps import get_current_user
+from asm.api.deps import get_current_user, get_org_creation_allowlist
 from asm.api.main import app
 from asm.db.models import Membership, Organization, User
 from asm.db.session import get_db
@@ -39,6 +39,18 @@ def mock_sleep():
     """Autouse fixture to mock time.sleep across tests so no test actually waits."""
     with patch("time.sleep", return_value=None) as mocked:
         yield mocked
+
+
+# Accounts the shared fixtures sign in as; production defaults to nobody (H-Auth-1).
+TEST_ORG_CREATORS = frozenset({"testuser@example.com", "authenticated_user@example.com"})
+
+
+@pytest.fixture(autouse=True)
+def allow_test_org_creators() -> Generator[None, None, None]:
+    """Let the shared test users create orgs; tests of the gate override this."""
+    app.dependency_overrides[get_org_creation_allowlist] = lambda: TEST_ORG_CREATORS
+    yield
+    app.dependency_overrides.pop(get_org_creation_allowlist, None)
 
 
 @pytest.fixture(autouse=True)

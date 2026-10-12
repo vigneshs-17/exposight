@@ -1,4 +1,5 @@
 <section class="surface-panel">
+  {% if can_create_org %}
   <div class="surface-panel-header">
     <h2 class="panel-title">Create your organization</h2>
     <p class="panel-subtitle">You are not a member of any organization yet. Create an organization to begin monitoring.</p>
@@ -10,4 +11,10 @@
     </div>
     <button type="submit" class="btn btn-primary">Create organization</button>
   </form>
+  {% else %}
+  <div class="surface-panel-header" id="no-org-invite-only">
+    <h2 class="panel-title">No organization yet</h2>
+    <p class="panel-subtitle">You are not a member of any organization. Exposight is invite-only: ask an organization admin to invite this email address, then accept the invite.</p>
+  </div>
+  {% endif %}
 </section>

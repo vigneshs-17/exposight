@@ -126,13 +126,18 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
    - Set `DOMAIN=exposight.dev`.
    - Set `ENVIRONMENT=production`. In this mode the api and worker **refuse to start** if `DATABASE_URL` points to a `_test` database or localhost, or still contains a placeholder, and the api also refuses a non-https or placeholder `SUPABASE_URL` and an empty or placeholder `SUPABASE_PUBLISHABLE_KEY`. Error messages name the setting, never its value. `/docs`, `/redoc` and `/openapi.json` are disabled. An unknown `ENVIRONMENT` value (for example `prod`) also stops startup.
    - Populate `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
+   - Set `ORG_CREATION_ALLOWED_EMAILS` to the accounts allowed to create organizations, as a JSON list (for example `["operator@example.com"]`). Matching ignores case and surrounding spaces; a malformed entry stops the api at startup. Empty or unset means nobody can create an organization; everyone else gets `403` on `POST /orgs`, sees an invite-only notice instead of the create form, and can still join organizations by invite.
    - Configure SMTP if outgoing email notification digests are desired (leave `SMTP_HOST` empty to disable email). Use `SMTP_STARTTLS=true` (port 587) **or** `SMTP_SSL=true` (implicit TLS, port 465), never both. Both verify the server certificate. If `SMTP_USERNAME`/`SMTP_PASSWORD` are set and neither TLS mode is enabled, the worker refuses to send and records a delivery error instead of sending credentials in clear text.
 
 4. **Supabase Auth URLs (production project):** in the Supabase dashboard → Authentication → URL Configuration, set:
    - Site URL: `https://exposight.dev`
    - Redirect URLs: `https://exposight.dev/app` only (no `localhost` entries in the production project)
    - **Confirm email: must be ON** (Supabase docs: "This option can be found in the email provider under the provider-specific configuration"). Exposight invites (v3.6b) are accepted only when the signed-in user's email equals the invite email. Supabase access tokens carry no verified-email claim the API can trust (`user_metadata` is editable by the user), so the API relies on Supabase refusing sign-in until the email is confirmed. With Confirm email off, someone could sign up with another person's address and accept their invite.
-   - Signups may stay open: a new account can see nothing until an org owner or admin invites it.
+   - **Allow new users to sign up: OFF** for the invite-only demo. With sign-up on, any confirmed account can sign in; `ORG_CREATION_ALLOWED_EMAILS` still stops it from creating organizations (and so from adding domains, scanning or configuring alert email), but it should not be able to sign in at all. Turning sign-up off does not affect existing accounts: review Authentication → Users and remove or `asm admin suspend-user` any you do not recognise.
+   - **Onboarding an invitee** (sign-up off; the dashboard only signs in with email and password):
+     1. The operator creates the account in the Supabase dashboard: Authentication → Users → Add user → Create new user, with the invitee's email, a password and **Auto Confirm User** checked. Send the password to the invitee over a separate channel. Do not use Supabase's "Send invitation" magic link: the dashboard cannot set a password afterwards.
+     2. An org owner or admin creates the invite (`POST /orgs/{org_id}/invites`) and sends the one-time token to the invitee.
+     3. The invitee signs in and accepts it (`POST /invites/accept`, single use, 7 days, the signed-in email must equal the invite email).
 
 ---
 

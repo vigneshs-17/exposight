@@ -10,7 +10,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import delete, func, select, update
 
-from asm.api.deps import CurrentUser, DbSession, require_org_role
+from asm.api.deps import (
+    CurrentUser,
+    DbSession,
+    OrgCreationAllowlist,
+    can_create_orgs,
+    require_org_role,
+)
 from asm.api.schemas import (
     OrgCreate,
     OrgInviteAccept,
@@ -30,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orgs", tags=["Organizations"])
 
+ORG_CREATION_FORBIDDEN_DETAIL = (
+    "Organization creation is limited to approved accounts. "
+    "Ask an organization admin for an invite."
+)
+
 INVITE_TTL = timedelta(days=7)
 
 
@@ -41,14 +52,25 @@ INVITE_TTL = timedelta(days=7)
     responses={
         201: {"description": "Organization created successfully"},
         401: {"description": "Authentication required"},
+        403: {"description": "Account is not allowed to create organizations"},
     },
 )
 def create_organization(
     payload: OrgCreate,
     current_user: CurrentUser,
     db: DbSession,
+    allowlist: OrgCreationAllowlist,
 ) -> OrgRead:
-    """Create a new organization and assign creator as owner."""
+    """Create a new organization and assign creator as owner.
+
+    Only accounts in ORG_CREATION_ALLOWED_EMAILS may create organizations; everyone
+    else joins by invite (POST /invites/accept).
+    """
+    if not can_create_orgs(current_user, allowlist):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ORG_CREATION_FORBIDDEN_DETAIL,
+        )
     # Lock the user row so concurrent creates cannot both pass the quota count.
     db.execute(select(User.id).where(User.id == current_user.id).with_for_update())
     owned = db.scalar(

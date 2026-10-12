@@ -15,6 +15,8 @@ from sqlalchemy import select
 from asm.api.deps import (
     CurrentUser,
     DbSession,
+    OrgCreationAllowlist,
+    can_create_orgs,
     get_current_auth_settings,
     get_domain_for_org,
     get_scan_for_org,
@@ -179,11 +181,12 @@ def get_empty_org(
     response: Response,
     current_user: CurrentUser,
     auth_settings: Annotated[AuthSettings, Depends(get_current_auth_settings)],
+    allowlist: OrgCreationAllowlist,
 ) -> str:
-    """Render organization creation view for users with no organizations."""
+    """Render the no-organization view: the create form only for approved accounts."""
     apply_security_headers(response, auth_settings, is_fragment=True)
     template = templates_env.get_template("partials/empty_org.html")
-    return template.render()
+    return template.render(can_create_org=can_create_orgs(current_user, allowlist))
 
 
 @ui_router.get(

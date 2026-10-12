@@ -15,3 +15,4 @@ Ideas outside the roadmap go here and are not built.
 - Make users.email unique, or drop it in favour of the JWT claim (needs a data check first)
 - Verification token expiry: tokens never expire today (rotated only by the rotate endpoint and `asm admin move-domain`); consider a maximum token age with forced rotation (E-4 follow-up).
 - Drop the legacy `_asm-verify` label from the verification checker once no verified domain still relies on it (needs a check of which label matched; E-4 follow-up).
+- Alert emails can go to any address an org admin enters (up to 5 per verified domain), so the alert sender can mail third parties; add a per-org send rate limit or require recipients to confirm (H-Auth-1 follow-up).

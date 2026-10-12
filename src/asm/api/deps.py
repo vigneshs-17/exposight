@@ -19,6 +19,7 @@ from asm.auth.token import (
     verify_access_token,
 )
 from asm.auth.upsert import upsert_user
+from asm.config import get_settings
 from asm.db.models import Domain, Membership, Organization, ScanRun, User
 from asm.db.session import get_db
 from asm.ratelimit import (
@@ -201,6 +202,18 @@ def get_active_user(
 
 
 CurrentUser = Annotated[User, Depends(get_active_user)]
+
+
+def get_org_creation_allowlist() -> frozenset[str]:
+    """Emails (trimmed, lower-case) allowed to create organizations (H-Auth-1)."""
+    return frozenset(get_settings().org_creation_allowed_emails)
+
+
+OrgCreationAllowlist = Annotated[frozenset[str], Depends(get_org_creation_allowlist)]
+
+
+def can_create_orgs(user: User, allowlist: frozenset[str]) -> bool:
+    return (user.email or "").strip().lower() in allowlist
 
 
 def require_org_role(minimum_role: str):
