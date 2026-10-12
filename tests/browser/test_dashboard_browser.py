@@ -597,7 +597,7 @@ def test_browser_check_now_result_stays_visible(
         "asm.api.routes.check_dns_txt_verification",
         return_value=(
             VerificationOutcome.ABSENT,
-            "No TXT records found at _asm-verify.check.example.com",
+            "No TXT records found at _exposight-challenge.check.example.com",
         ),
     ) as mock_check:
         check_btn.click()
@@ -605,7 +605,9 @@ def test_browser_check_now_result_stays_visible(
         result_box = page.locator("#verification-check-result .alert-box")
         expect(result_box).to_be_visible()
         expect(result_box).to_contain_text("Check outcome: absent")
-        expect(result_box).to_contain_text("No TXT records found at _asm-verify.check.example.com")
+        expect(result_box).to_contain_text(
+            "No TXT records found at _exposight-challenge.check.example.com"
+        )
 
         # Ensure outcome stays in DOM and doesn't get cleared by subsequent renders
         page.wait_for_load_state("networkidle")

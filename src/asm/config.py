@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+import ipaddress
 import os
 import sys
 from functools import lru_cache
@@ -129,6 +130,26 @@ class Settings(BaseSettings):
         default="",
         description="Public non-secret Supabase publishable key for browser client authentication",
     )
+
+    verification_resolvers: list[str] = Field(
+        default=["1.1.1.1", "9.9.9.9"],
+        description=(
+            "Public validating resolvers for the domain-verification DNS check "
+            "(JSON list, at least two). The host resolver is never used."
+        ),
+    )
+
+    @field_validator("verification_resolvers")
+    @classmethod
+    def validate_verification_resolvers(cls, v: list[str]) -> list[str]:
+        ips = [str(ipaddress.ip_address(ip.strip())) for ip in v]
+        if len(set(ips)) < 2:
+            raise ValueError("VERIFICATION_RESOLVERS needs at least two distinct resolvers")
+        from asm.scan_common import is_safe_public_ip
+
+        if not all(is_safe_public_ip(ip) for ip in ips):
+            raise ValueError("VERIFICATION_RESOLVERS must be public IP addresses")
+        return ips
 
     @field_validator("supabase_publishable_key")
     @classmethod

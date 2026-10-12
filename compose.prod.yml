@@ -82,6 +82,8 @@ services:
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-authenticated}
+      # Domain-verification DNS check resolvers (E-4); unset keeps the app default.
+      VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     healthcheck:
       test:
         - "CMD"
@@ -151,6 +153,8 @@ services:
       CERTSPOTTER_API_KEY: ${CERTSPOTTER_API_KEY:-}
       # Retention purge (D9): off unless set to true after a dry run (docs/DEPLOY.md)
       RETENTION_PURGE_ENABLED: ${RETENTION_PURGE_ENABLED:-false}
+      # Domain-verification DNS check resolvers (E-4); unset keeps the app default.
+      VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -22,7 +22,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from asm.verification import generate_verification_token
+from asm.verification import (
+    generate_verification_token,
+    get_expected_record_value,
+    get_verification_record_name,
+)
 
 
 def utc_now() -> datetime:
@@ -142,12 +146,12 @@ class Domain(Base):
     @property
     def verification_record_name(self) -> str:
         """Return the designated DNS TXT record label for domain verification."""
-        return f"_asm-verify.{self.name}"
+        return get_verification_record_name(self.name)
 
     @property
     def verification_record_value(self) -> str:
         """Return the exact DNS TXT payload string required to verify domain control."""
-        return f"asm-verify={self.verification_token}"
+        return get_expected_record_value(self.verification_token)
 
     # Relationships
     organization: Mapped["Organization"] = relationship(back_populates="domains")

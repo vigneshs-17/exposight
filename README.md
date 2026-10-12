@@ -282,9 +282,9 @@ Response (HTTP 201 Created):
   "alert_emails": [],
   "alert_min_severity": "MEDIUM",
   "created_at": "2026-10-02T08:00:00Z",
-  "verification_record_name": "_asm-verify.example.com",
+  "verification_record_name": "_exposight-challenge.example.com",
   "verification_record_type": "TXT",
-  "verification_record_value": "asm-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
+  "verification_record_value": "exposight-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
   "is_verified": false
 }
 ```
@@ -303,9 +303,9 @@ Response:
   "status": "pending",
   "method": "dns_txt",
   "token": "k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
-  "record_name": "_asm-verify.example.com",
+  "record_name": "_exposight-challenge.example.com",
   "record_type": "TXT",
-  "record_value": "asm-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
+  "record_value": "exposight-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
   "verified_at": null,
   "last_checked_at": null,
   "consecutive_misses": 0,
@@ -319,9 +319,9 @@ Response:
 
 ##### Step 3: Add DNS TXT Record
 Publish the TXT record in your authoritative DNS zone:
-- **Host / Name**: `_asm-verify.example.com`
+- **Host / Name**: `_exposight-challenge.example.com`
 - **Type**: `TXT`
-- **Value**: `asm-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO`
+- **Value**: `exposight-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO`
 
 ##### Step 4: Verify DNS Record
 Trigger immediate DNS verification check (requires `admin` or `owner` role; rate-limited with a 30s cooldown):
@@ -337,9 +337,9 @@ Response (HTTP 200 OK):
   "status": "verified",
   "method": "dns_txt",
   "token": "k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
-  "record_name": "_asm-verify.example.com",
+  "record_name": "_exposight-challenge.example.com",
   "record_type": "TXT",
-  "record_value": "asm-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
+  "record_value": "exposight-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO",
   "verified_at": "2026-10-02T08:05:00Z",
   "last_checked_at": "2026-10-02T08:05:00Z",
   "consecutive_misses": 0,
@@ -894,15 +894,17 @@ Hosts: 4 total (0 Critical, 2 High, 2 Medium, 0 Low, 0 Info)
 
 1. **Proof of DNS Control**:
    Ownership is verified by publishing a high-entropy secret token (`secrets.token_urlsafe(32)`) as a DNS TXT record at a dedicated verification label.
-   - **Label Name**: `_asm-verify.<domain>`
+   - **Label Name**: `_exposight-challenge.<domain>`
    - **Record Type**: `TXT`
-   - **Record Value**: `asm-verify=<token>`
+   - **Record Value**: `exposight-verify=<token>`
    - *Example*:
      For domain `example.com` with token `k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO`:
      ```text
-     _asm-verify.example.com.  300  IN  TXT  "asm-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO"
+     _exposight-challenge.example.com.  300  IN  TXT  "exposight-verify=k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO"
      ```
    - Multi-string TXT records (RFC 1035 chunking) are joined before evaluation.
+   - The check asks the public resolvers in `VERIFICATION_RESOLVERS` (default 1.1.1.1 and 9.9.9.9), never the host resolver. A DNSSEC-validated (AD) match from one resolver is enough; otherwise every resolver must return the record, and a disagreement counts as an indeterminate check (no status change).
+   - Records published under the earlier label (`_asm-verify.<domain>` = `asm-verify=<token>`) are still accepted, so domains verified before the rename do not lapse.
    - Per-tenant tokens ensure that verifying a domain in Organization A never grants scanning rights to Organization B.
 
 2. **Verification State Machine**:

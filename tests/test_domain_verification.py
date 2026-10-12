@@ -13,14 +13,17 @@ All tests adhere to zero-network, PostgreSQL-only database testing, and cover:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
 import dns.exception
+import dns.flags
 import dns.resolver
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -32,8 +35,11 @@ from asm.verification import (
     VERIFICATION_CHECK_COOLDOWN_SECONDS,
     VerificationOutcome,
     apply_check_outcome,
+    build_validating_resolver,
     check_dns_txt_verification,
     generate_verification_token,
+    get_expected_record_value,
+    get_verification_record_name,
     queue_domain_alert,
 )
 from asm.worker.worker import ASMWorker
@@ -51,108 +57,220 @@ class _MockRdata:
 
 
 class _MockAnswer:
-    """Mock dnspython resolver answer."""
+    """Mock dnspython resolver answer; `ad` sets the AD bit on the response."""
 
-    def __init__(self, rdatas: list[_MockRdata]) -> None:
+    def __init__(self, rdatas: list[_MockRdata], ad: bool = False) -> None:
         self._rdatas = rdatas
+        self.response = SimpleNamespace(flags=dns.flags.AD if ad else 0)
 
     def __iter__(self):
         return iter(self._rdatas)
 
 
-def test_dns_check_exact_match() -> None:
-    """Matching asm-verify=<token> TXT record returns MATCH."""
+class _FakeResolver:
+    """Resolver stand-in: label -> list of TXT chunk lists, or an exception; else NXDOMAIN."""
+
+    def __init__(self, ip: str, records: dict[str, Any] | None = None, ad: bool = False) -> None:
+        self.nameservers = [ip]
+        self.records = records or {}
+        self.ad = ad
+        self.queries: list[str] = []
+
+    def resolve(self, name: str, rdtype: str) -> _MockAnswer:
+        assert rdtype == "TXT"
+        self.queries.append(name)
+        value = self.records.get(name)
+        if value is None:
+            raise dns.resolver.NXDOMAIN()
+        if isinstance(value, BaseException):
+            raise value
+        return _MockAnswer([_MockRdata(chunks) for chunks in value], ad=self.ad)
+
+
+NEW_LABEL = "_exposight-challenge.example.com"
+OLD_LABEL = "_asm-verify.example.com"
+
+
+def _pair(records: dict[str, Any], ad: bool = False) -> list[_FakeResolver]:
+    """Two resolvers returning the same records."""
+    return [_FakeResolver("1.1.1.1", records, ad), _FakeResolver("9.9.9.9", records, ad)]
+
+
+def test_record_name_and_value_use_the_new_label() -> None:
+    assert get_verification_record_name("example.com.") == NEW_LABEL
+    assert get_expected_record_value(" tok ") == "exposight-verify=tok"
+
+
+def test_dns_check_new_label_match() -> None:
+    """exposight-verify=<token> at _exposight-challenge.<domain> on both resolvers -> MATCH."""
     token = generate_verification_token()
-    mock_rdata = _MockRdata([f"asm-verify={token}".encode()])
-    mock_answer = _MockAnswer([mock_rdata])
+    resolvers = _pair({NEW_LABEL: [[f"exposight-verify={token}".encode()]]})
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.MATCH
+    assert resolvers[0].queries == [NEW_LABEL]
 
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.return_value = mock_answer
 
-        outcome, detail = check_dns_txt_verification("example.com", token)
-        assert outcome == VerificationOutcome.MATCH
-        instance.resolve.assert_called_once_with("_asm-verify.example.com", "TXT")
+def test_dns_check_legacy_label_still_matches() -> None:
+    """Backward compat: asm-verify=<token> at _asm-verify.<domain> still verifies."""
+    token = generate_verification_token()
+    resolvers = _pair({OLD_LABEL: [[f"asm-verify={token}".encode()]]})
+    outcome, detail = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.MATCH
+    assert OLD_LABEL in (detail or "")
+    assert resolvers[0].queries == [NEW_LABEL, OLD_LABEL]
+
+
+def test_dns_check_values_are_not_interchangeable_between_labels() -> None:
+    """The legacy value at the new label (and vice versa) is not a match."""
+    token = generate_verification_token()
+    resolvers = _pair(
+        {
+            NEW_LABEL: [[f"asm-verify={token}".encode()]],
+            OLD_LABEL: [[f"exposight-verify={token}".encode()]],
+        }
+    )
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.ABSENT
+
+
+def test_dns_check_ad_match_from_one_resolver_is_enough() -> None:
+    """A DNSSEC-validated (AD) match from one resolver -> MATCH even if the other times out."""
+    token = generate_verification_token()
+    resolvers = [
+        _FakeResolver("1.1.1.1", {NEW_LABEL: [[f"exposight-verify={token}".encode()]]}, ad=True),
+        _FakeResolver("9.9.9.9", {NEW_LABEL: dns.exception.Timeout()}),
+    ]
+    outcome, detail = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.MATCH
+    assert "DNSSEC" in (detail or "")
+
+
+def test_dns_check_without_ad_requires_both_resolvers() -> None:
+    """Unsigned zone: one resolver matching and the other timing out is not enough."""
+    token = generate_verification_token()
+    resolvers = [
+        _FakeResolver("1.1.1.1", {NEW_LABEL: [[f"exposight-verify={token}".encode()]]}),
+        _FakeResolver("9.9.9.9", {NEW_LABEL: dns.exception.Timeout()}),
+    ]
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.UNKNOWN
+
+
+def test_dns_check_disagreement_is_unknown() -> None:
+    """One resolver matches, the other definitively has no record -> UNKNOWN, not ABSENT."""
+    token = generate_verification_token()
+    resolvers = [
+        _FakeResolver("1.1.1.1", {NEW_LABEL: [[f"exposight-verify={token}".encode()]]}),
+        _FakeResolver("9.9.9.9", {}),
+    ]
+    outcome, detail = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.UNKNOWN
+    assert "disagree" in (detail or "")
+
+
+def test_dns_check_both_absent_is_absent() -> None:
+    token = generate_verification_token()
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=_pair({}))
+    assert outcome == VerificationOutcome.ABSENT
 
 
 def test_dns_check_missing_record() -> None:
-    """TXT records present but none start with asm-verify= returns ABSENT."""
+    """TXT records present but none is a verification value -> ABSENT."""
     token = generate_verification_token()
-    mock_rdata = _MockRdata([b"v=spf1 include:_spf.google.com ~all"])
-    mock_answer = _MockAnswer([mock_rdata])
-
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.return_value = mock_answer
-
-        outcome, detail = check_dns_txt_verification("example.com", token)
-        assert outcome == VerificationOutcome.ABSENT
+    resolvers = _pair({NEW_LABEL: [[b"v=spf1 include:_spf.google.com ~all"]]})
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.ABSENT
 
 
 def test_dns_check_wrong_token() -> None:
-    """TXT record with asm-verify= but mismatched token returns ABSENT."""
+    """exposight-verify= with a mismatched token -> ABSENT."""
     token = generate_verification_token()
-    other_token = generate_verification_token()
-    mock_rdata = _MockRdata([f"asm-verify={other_token}".encode()])
-    mock_answer = _MockAnswer([mock_rdata])
-
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.return_value = mock_answer
-
-        outcome, detail = check_dns_txt_verification("example.com", token)
-        assert outcome == VerificationOutcome.ABSENT
+    other = generate_verification_token()
+    resolvers = _pair({NEW_LABEL: [[f"exposight-verify={other}".encode()]]})
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.ABSENT
 
 
 def test_dns_check_split_txt_strings() -> None:
     """RFC 1035 multi-chunk TXT records are joined before comparing."""
     token = generate_verification_token()
-    # Chunk 1: 'asm-verify=' (11 bytes), Chunk 2: first 10 chars, Chunk 3: remainder
-    c1 = b"asm-verify="
-    c2 = token[:10].encode("utf-8")
-    c3 = token[10:].encode("utf-8")
-    mock_rdata = _MockRdata([c1, c2, c3])
-    mock_answer = _MockAnswer([mock_rdata])
-
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.return_value = mock_answer
-
-        outcome, detail = check_dns_txt_verification("example.com", token)
-        assert outcome == VerificationOutcome.MATCH
+    chunks = [b"exposight-verify=", token[:10].encode(), token[10:].encode()]
+    resolvers = _pair({NEW_LABEL: [chunks]})
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.MATCH
 
 
-def test_dns_check_nxdomain_and_noanswer() -> None:
-    """NXDOMAIN or NoAnswer means definite absence -> ABSENT."""
+def test_dns_check_noanswer_is_absent() -> None:
     token = generate_verification_token()
-
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.side_effect = dns.resolver.NXDOMAIN()
-        outcome, _ = check_dns_txt_verification("nx.example.com", token)
-        assert outcome == VerificationOutcome.ABSENT
-
-    with patch("dns.resolver.Resolver") as mock_resolver_cls:
-        instance = mock_resolver_cls.return_value
-        instance.resolve.side_effect = dns.resolver.NoAnswer()
-        outcome, _ = check_dns_txt_verification("noanswer.example.com", token)
-        assert outcome == VerificationOutcome.ABSENT
+    resolvers = _pair({NEW_LABEL: dns.resolver.NoAnswer(), OLD_LABEL: dns.resolver.NoAnswer()})
+    outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+    assert outcome == VerificationOutcome.ABSENT
 
 
 def test_dns_check_timeout_and_servfail_returns_unknown() -> None:
     """Timeouts, SERVFAIL, and network drops are transient -> UNKNOWN."""
     token = generate_verification_token()
-
     for exc in (
         dns.exception.Timeout(),
-        dns.resolver.LifetimeTimeout(),
+        dns.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
         dns.resolver.NoNameservers(),
     ):
-        with patch("dns.resolver.Resolver") as mock_resolver_cls:
-            instance = mock_resolver_cls.return_value
-            instance.resolve.side_effect = exc
-            outcome, _ = check_dns_txt_verification("timeout.example.com", token)
-            assert outcome == VerificationOutcome.UNKNOWN
+        resolvers = _pair({NEW_LABEL: exc})
+        outcome, _ = check_dns_txt_verification("example.com", token, resolvers=resolvers)
+        assert outcome == VerificationOutcome.UNKNOWN
+
+
+def test_validating_resolver_uses_explicit_server_and_dnssec_flags() -> None:
+    resolver = build_validating_resolver("9.9.9.9")
+    assert resolver.nameservers == ["9.9.9.9"]
+    assert resolver.flags is not None and resolver.flags & dns.flags.AD
+    assert resolver.ednsflags & dns.flags.DO
+
+
+def _fail_default_resolver(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("default (system) resolver used in the verification path")
+
+
+def test_production_path_never_constructs_system_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default path: one resolver per configured IP; a configured (system) one is never built."""
+    queried: list[tuple[str, ...]] = []
+    real_init = dns.resolver.Resolver.__init__
+
+    def _init(self: dns.resolver.Resolver, *args: Any, **kwargs: Any) -> None:
+        configure = kwargs.get("configure", args[1] if len(args) > 1 else True)
+        if configure:
+            raise AssertionError("system resolver constructed in the verification path")
+        real_init(self, *args, **kwargs)
+
+    def _resolve(self: dns.resolver.Resolver, name: str, rdtype: str) -> Any:
+        queried.append(tuple(str(ns) for ns in self.nameservers))
+        raise dns.resolver.NXDOMAIN()
+
+    monkeypatch.setattr(dns.resolver.Resolver, "__init__", _init)
+    monkeypatch.setattr(dns.resolver.Resolver, "resolve", _resolve)
+    monkeypatch.setattr(dns.resolver, "get_default_resolver", _fail_default_resolver)
+    monkeypatch.setattr(
+        "asm.verification.get_settings",
+        lambda: SimpleNamespace(verification_resolvers=["1.1.1.1", "9.9.9.9"]),
+    )
+
+    outcome, _ = check_dns_txt_verification("example.com", "tok")
+    assert outcome == VerificationOutcome.ABSENT
+    assert set(queried) == {("1.1.1.1",), ("9.9.9.9",)}
+
+
+def test_verification_resolvers_setting_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from asm.config import Settings
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost:5432/x")
+    monkeypatch.delenv("VERIFICATION_RESOLVERS", raising=False)
+    assert Settings(_env_file=None).verification_resolvers == ["1.1.1.1", "9.9.9.9"]
+    for bad in ('["1.1.1.1"]', '["1.1.1.1", "10.0.0.2"]', '["168.63.129.16", "1.1.1.1"]'):
+        monkeypatch.setenv("VERIFICATION_RESOLVERS", bad)
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)
 
 
 # ==============================================================================
@@ -342,9 +460,9 @@ def test_verification_get_instructions(client: TestClient, test_org: Organizatio
     assert data["domain_id"] == domain_id
     assert data["domain_name"] == "instructions.com"
     assert data["status"] == "pending"
-    assert data["record_name"] == "_asm-verify.instructions.com"
+    assert data["record_name"] == "_exposight-challenge.instructions.com"
     assert data["record_type"] == "TXT"
-    assert data["record_value"].startswith("asm-verify=")
+    assert data["record_value"].startswith("exposight-verify=")
     assert data["consecutive_misses"] == 0
     assert data["is_verified"] is False
 

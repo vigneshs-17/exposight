@@ -32,7 +32,7 @@ def test_terms_page_served_with_strict_csp_and_no_auth():
 def test_terms_page_states_acceptable_use_rules():
     html = _get("/terms").text
     assert "Only scan what you own or are authorised to test" in html
-    assert "_asm-verify.&lt;your-domain&gt;" in html  # autoescaped, not raw markup
+    assert "_exposight-challenge.&lt;your-domain&gt;" in html  # autoescaped, not raw markup
     assert "<script" not in html
     assert "style=" not in html
     assert " on" + "click=" not in html

@@ -13,3 +13,5 @@ Ideas outside the roadmap go here and are not built.
 - Members and invites UI in the dashboard (API only today)
 - Shared rate-limit store (only if the api ever runs more than one process)
 - Make users.email unique, or drop it in favour of the JWT claim (needs a data check first)
+- Verification token expiry: tokens never expire today (rotated only by the rotate endpoint and `asm admin move-domain`); consider a maximum token age with forced rotation (E-4 follow-up).
+- Drop the legacy `_asm-verify` label from the verification checker once no verified domain still relies on it (needs a check of which label matched; E-4 follow-up).

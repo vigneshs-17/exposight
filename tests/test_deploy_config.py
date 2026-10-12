@@ -217,6 +217,18 @@ def test_retention_purge_is_off_by_default_in_production_config():
     assert "RETENTION_PURGE_ENABLED=false" in example.splitlines()
 
 
+def test_verification_resolvers_passed_to_api_and_worker_with_app_default():
+    """E-4: both processes run the DNS check; unset falls back to the Settings default."""
+    from asm.config import Settings
+
+    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    for svc in ("api", "worker"):
+        value = config["services"][svc]["environment"]["VERIFICATION_RESOLVERS"]
+        assert value.startswith("${VERIFICATION_RESOLVERS:-") and value.endswith("}")
+        default = value[len("${VERIFICATION_RESOLVERS:-") : -1]
+        assert yaml.safe_load(default) == Settings.model_fields["verification_resolvers"].default
+
+
 # --- v3.6c D-2: worker egress firewall ---------------------------------------------------
 
 

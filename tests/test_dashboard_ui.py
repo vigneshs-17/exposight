@@ -84,7 +84,7 @@ def test_landing_page_content_invariants():
                 "Active scans run only on domains you have verified with a DNS TXT record at"
                 in html
             )
-            assert "_asm-verify.&lt;domain&gt;" in html or "_asm-verify.<domain>" in html
+            assert "_exposight-challenge.&lt;domain&gt;" in html
             assert "A time-limited operator override exists for exceptional cases." in html
             audit_text = (
                 "Append-only audit log: a database trigger blocks updates, deletes and truncates "

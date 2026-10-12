@@ -262,6 +262,12 @@ Every line must read `OK` and the last line `egress check: PASSED`. A blocked ta
 7. Oracle's preinstalled host iptables rules do not block traffic between the bridge containers.
 8. Decide on host `DOCKER-USER`/`INPUT` rules as a second network layer (D13, revisited in Phase H).
 
+### Domain verification DNS
+- The api ("Check now") and the worker (re-verification about every 24 hours) both run the TXT check. They query the resolvers in `VERIFICATION_RESOLVERS` directly (default `["1.1.1.1", "9.9.9.9"]`, a JSON list of at least two public IPs; private addresses and 168.63.129.16 are refused at startup), never the host resolver. Outbound UDP/TCP 53 to those IPs must be allowed for both containers; the egress firewall already allows the public internet.
+- Record: `_exposight-challenge.<domain>` TXT `exposight-verify=<token>`. The legacy `_asm-verify.<domain>` / `asm-verify=<token>` is still accepted.
+- Decision: a matching answer with the AD bit (DNSSEC-validated) from one resolver verifies; otherwise all resolvers must return the record. Disagreement, timeouts and SERVFAIL change nothing and retry in about an hour; two consecutive definite misses (all resolvers absent) lapse the domain.
+- **Token lifetime:** a verification token never expires. It is created with the domain and replaced only by `POST /orgs/{org_id}/domains/{domain_id}/verification/rotate` (admin, resets the domain to `pending`) or `asm admin move-domain`. A record left in DNS keeps re-verifying the domain for as long as the domain exists in Exposight.
+
 ### Azure
 - **NSG:** the network security group must allow inbound TCP 22, 80 and 443 only (80 is needed for the ACME HTTP challenge and the HTTPS redirect).
 - **WireServer blocked:** 168.63.129.16 is Azure's WireServer and platform DNS. It looks like a public address and every Azure VM can reach it, so no private range covers it. The egress firewall rejects it explicitly (`deploy/egress/rules.sh`), and the scanner refuses any target that resolves to it (`is_safe_public_ip` in `src/asm/scan_common.py`). The worker does not need it for DNS: `egress` sets `dns: 1.1.1.1 / 9.9.9.9`, so do not remove those lines.

@@ -51,8 +51,8 @@ def test_create_domain_success(client: TestClient, test_org: Organization) -> No
     assert data["name"] == "example.com"
     assert data["verification_status"] == "pending"
     assert "verification_token" in data
-    assert data["verification_record_name"] == "_asm-verify.example.com"
-    assert data["verification_record_value"] == f"asm-verify={data['verification_token']}"
+    assert data["verification_record_name"] == "_exposight-challenge.example.com"
+    assert data["verification_record_value"] == f"exposight-verify={data['verification_token']}"
     assert data["is_verified"] is False
     assert "id" in data
     assert "created_at" in data

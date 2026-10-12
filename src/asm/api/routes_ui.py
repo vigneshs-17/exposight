@@ -39,7 +39,7 @@ from asm.ui_views import (
     format_change_summary,
     format_duration,
 )
-from asm.verification import get_expected_record_value
+from asm.verification import get_expected_record_value, get_verification_record_name
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def get_landing_page(
     template = templates_env.get_template("landing.html")
     return template.render(
         txt_example=get_expected_record_value("<your-token>"),
-        txt_label="_asm-verify.example.com",
+        txt_label=get_verification_record_name("example.com"),
     )
 
 
@@ -148,7 +148,7 @@ def get_terms_page(
     template = templates_env.get_template("terms.html")
     return template.render(
         last_updated=TERMS_LAST_UPDATED,
-        txt_label="_asm-verify.<your-domain>",
+        txt_label=get_verification_record_name("<your-domain>"),
     )
 
 
