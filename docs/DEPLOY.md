@@ -137,7 +137,7 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
    - **Onboarding an invitee** (sign-up off; the dashboard only signs in with email and password):
      1. The operator creates the account in the Supabase dashboard: Authentication → Users → Add user → Create new user, with the invitee's email, a password and **Auto Confirm User** checked. Send the password to the invitee over a separate channel. Do not use Supabase's "Send invitation" magic link: the dashboard cannot set a password afterwards.
      2. An org owner or admin creates the invite (`POST /orgs/{org_id}/invites`) and sends the one-time token to the invitee.
-     3. The invitee signs in and accepts it (`POST /invites/accept`, single use, 7 days, the signed-in email must equal the invite email).
+     3. The invitee signs in to the dashboard (`/app`), pastes the token into "Have an invite? Paste the invite token" and clicks **Join organization**. The form is on the no-organization screen and under every organization's domain list, so existing members can join another organization the same way. It calls `POST /invites/accept` (single use, valid 7 days, the signed-in email must equal the invite email); on success the dashboard switches to the joined organization, otherwise it shows the reason (wrong email, invalid, expired or already used token, already a member).
 
 ---
 
@@ -373,7 +373,7 @@ docker compose -f compose.prod.yml exec api asm admin unsuspend-user --user-id <
 ```
 
 - The next request from that user gets `403 {"detail": "Account suspended"}`: every signed-in API call and dashboard fragment. Public pages (`/`, `/app`, `/terms`, `/health`) still load; the dashboard then shows an "Account suspended" notice.
-- In every organization where **all** owners are now suspended, all domain scan schedules are turned off and queued scans are cancelled (`failed`, "Cancelled: every owner of this organization is suspended"). Scans already running finish. Organizations that still have an active owner are not changed.
+- In every organization where **all** owners are now suspended, all domain scan schedules are turned off and queued scans are cancelled (status `cancelled`, reason "Scanning is paused for this organization."). Scans already running finish. Organizations that still have an active owner are not changed.
 - Each organization the user belongs to gets an `account.suspended` audit event (operator actor) with the number of schedules and queued scans cancelled.
 - The `--reason` is stored on the user row and written to the operator's log line only. It is never returned by the API, shown in the dashboard or written to the tenant-visible audit log.
 - **Unsuspending restores access but does not turn schedules back on** and does not re-queue cancelled scans. Tell the organization owners to re-enable their schedules (domain settings, Schedule) after an unsuspension.

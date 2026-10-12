@@ -175,7 +175,7 @@
   }
 
   // Load organizations list for current user
-  async function loadOrgSwitcher() {
+  async function loadOrgSwitcher(preferredOrgId) {
     if (!currentAccessToken) return;
     try {
       const resp = await authenticatedFetch('/orgs');
@@ -206,8 +206,10 @@
         orgSelect.appendChild(opt);
       });
 
-      // Default to first organization
-      const selectedOrgId = orgs[0].id;
+      // Select the requested organization (e.g. one just joined), else the first one
+      const preferred = orgs.find(function (org) { return org.id === preferredOrgId; });
+      const selectedOrgId = preferred ? preferred.id : orgs[0].id;
+      orgSelect.value = String(selectedOrgId);
       loadDomainsList(selectedOrgId);
     } catch (err) {
       showError('Failed to load organizations: ' + err.message);
@@ -409,6 +411,38 @@
         await loadOrgSwitcher();
       } catch (err) {
         showError('Error creating organization: ' + err.message);
+      }
+      return;
+    }
+
+    // 2b. Accept Invite Form (POST /invites/accept)
+    if (form && form.id === 'accept-invite-form') {
+      evt.preventDefault();
+      clearError();
+      const tokenInput = form.querySelector('input[name="token"]');
+      const token = tokenInput ? tokenInput.value.trim() : '';
+      if (!token) {
+        showError('Invite token is required.');
+        return;
+      }
+
+      try {
+        const resp = await authenticatedFetch('/invites/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token }),
+        });
+
+        if (!resp.ok) {
+          const errData = await resp.json().catch(function () { return {}; });
+          showError(errData.detail, 'Could not accept the invite.');
+          return;
+        }
+
+        const joined = await resp.json();
+        await loadOrgSwitcher(joined.id);
+      } catch (err) {
+        showError('Error accepting invite: ' + err.message);
       }
       return;
     }

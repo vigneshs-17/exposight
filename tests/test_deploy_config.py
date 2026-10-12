@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -217,28 +218,35 @@ def test_retention_purge_is_off_by_default_in_production_config():
     assert "RETENTION_PURGE_ENABLED=false" in example.splitlines()
 
 
-def test_verification_resolvers_passed_to_api_and_worker_with_app_default():
+def _env_default(compose_file: str, service: str, var: str) -> object:
+    """Parsed `${VAR:-default}` default of one service's environment entry."""
+    config = yaml.safe_load((REPO_ROOT / compose_file).read_text(encoding="utf-8"))
+    value = config["services"][service]["environment"][var]
+    prefix = "${" + var + ":-"
+    assert value.startswith(prefix) and value.endswith("}"), value
+    return yaml.safe_load(value[len(prefix) : -1])
+
+
+@pytest.mark.parametrize("compose_file", ["compose.prod.yml", "docker-compose.yml"])
+def test_verification_resolvers_passed_to_api_and_worker_with_app_default(compose_file):
     """E-4: both processes run the DNS check; unset falls back to the Settings default."""
     from asm.config import Settings
 
-    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
+    app_default = Settings.model_fields["verification_resolvers"].default
     for svc in ("api", "worker"):
-        value = config["services"][svc]["environment"]["VERIFICATION_RESOLVERS"]
-        assert value.startswith("${VERIFICATION_RESOLVERS:-") and value.endswith("}")
-        default = value[len("${VERIFICATION_RESOLVERS:-") : -1]
-        assert yaml.safe_load(default) == Settings.model_fields["verification_resolvers"].default
+        assert _env_default(compose_file, svc, "VERIFICATION_RESOLVERS") == app_default
 
 
-def test_org_creation_allowlist_passed_to_api_with_app_default():
+@pytest.mark.parametrize("compose_file", ["compose.prod.yml", "docker-compose.yml"])
+def test_org_creation_allowlist_passed_to_api_with_app_default(compose_file):
     """H-Auth-1: the api enforces it; unset falls back to the Settings default (nobody)."""
     from asm.config import Settings
 
-    config = yaml.safe_load((REPO_ROOT / "compose.prod.yml").read_text(encoding="utf-8"))
-    value = config["services"]["api"]["environment"]["ORG_CREATION_ALLOWED_EMAILS"]
-    assert value.startswith("${ORG_CREATION_ALLOWED_EMAILS:-") and value.endswith("}")
-    default = value[len("${ORG_CREATION_ALLOWED_EMAILS:-") : -1]
     app_default = Settings.model_fields["org_creation_allowed_emails"].default
-    assert yaml.safe_load(default) == app_default == []
+    assert _env_default(compose_file, "api", "ORG_CREATION_ALLOWED_EMAILS") == app_default == []
+
+
+def test_env_production_example_lists_org_creation_allowlist():
     example = (REPO_ROOT / ".env.production.example").read_text(encoding="utf-8")
     assert any(line.startswith("ORG_CREATION_ALLOWED_EMAILS=") for line in example.splitlines())
 

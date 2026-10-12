@@ -230,7 +230,11 @@ def make_page(
                     path = urlparse(url).path
                     if status_code >= 500:
                         unexpected_responses.append(f"HTTP {status_code} from {url}")
-                    elif status_code == 404 and not path.endswith("favicon.ico"):
+                    elif (
+                        status_code == 404
+                        and status_code not in allowed_error_statuses
+                        and not path.endswith("favicon.ico")
+                    ):
                         unexpected_responses.append(f"HTTP 404 from {url}")
 
             page_instance.on("console", _on_console)

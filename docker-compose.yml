@@ -41,6 +41,8 @@ services:
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-authenticated}
+      ORG_CREATION_ALLOWED_EMAILS: '${ORG_CREATION_ALLOWED_EMAILS:-[]}'
+      VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     ports:
       # Bound strictly to 127.0.0.1 (not 0.0.0.0) because there is no authentication yet.
       - "127.0.0.1:8000:8000"
@@ -66,6 +68,7 @@ services:
       SMTP_SSL: ${SMTP_SSL:-false}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-10}
       CERTSPOTTER_API_KEY: ${CERTSPOTTER_API_KEY:-}
+      VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     depends_on:
       migrate:
         condition: service_completed_successfully

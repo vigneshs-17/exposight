@@ -82,9 +82,19 @@ def test_empty_org_view_hides_form_for_non_listed_user(client: TestClient) -> No
     assert 'id="create-org-form"' not in html
     assert "invite-only" in html
 
+    assert 'id="accept-invite-form"' in html
+
     _allow(CLIENT_EMAIL)
     html = client.get("/ui/empty-org").text
     assert 'id="create-org-form"' in html
+    assert 'id="accept-invite-form"' in html
+
+
+def test_domains_list_offers_accept_invite_form(client: TestClient) -> None:
+    """H-Fix-1: members of one org can join another from where they land."""
+    org_id = client.post("/orgs", json={"name": "Member Org"}).json()["id"]
+    html = client.get(f"/ui/orgs/{org_id}/domains").text
+    assert html.count('id="accept-invite-form"') == 1
 
 
 def test_setting_normalizes_and_validates(monkeypatch: pytest.MonkeyPatch) -> None:
