@@ -4,206 +4,250 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Exposight — External Attack Surface Management</title>
-  <meta name="description" content="Defensible external attack surface management. Continuous passive discovery, active probing, port scanning, and risk triage for verified infrastructure.">
+  <meta name="description" content="Exposight maps the subdomains, open ports and TLS problems of domains you have verified, and tells you when they change.">
+  <meta name="color-scheme" content="dark">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Exposight — Attack Surface Management">
-  <meta property="og:description" content="Defensible attack surface reconnaissance for verified domains.">
+  <meta property="og:description" content="Attack surface reconnaissance for domains you have verified.">
   <meta property="og:site_name" content="Exposight">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Exposight">
-  <meta name="twitter:description" content="Defensible external attack surface reconnaissance.">
-  <link rel="stylesheet" href="/static/css/app.css">
+  <meta name="twitter:description" content="Attack surface reconnaissance for domains you have verified.">
+  <link rel="preload" href="/static/fonts/SpaceGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/css/landing.css">
-  <script src="/static/vendor/gsap.min.js" defer></script>
-  <script src="/static/vendor/ScrollTrigger.min.js" defer></script>
   <script src="/static/js/landing.js" defer></script>
 </head>
 <body class="landing-body">
+  <!-- Icons: Lucide (https://lucide.dev), ISC licence, inlined as SVG. -->
+  <a class="skip-link" href="#main">Skip to content</a>
+
   <header class="landing-header">
     <div class="landing-header-inner">
-      <a href="/" class="brand-title">
-        <span class="brand-badge">EXP</span>
+      <a href="/" class="brand" aria-label="Exposight home">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><circle cx="12" cy="12" r="1.6"/></svg>
         <span>Exposight</span>
       </a>
       <nav class="landing-nav" aria-label="Main navigation">
         <a href="#how-it-works" class="landing-nav-link">How it works</a>
+        <a href="#pipeline" class="landing-nav-link">What a scan checks</a>
         <a href="#features" class="landing-nav-link">Features</a>
-        <a href="#trust" class="landing-nav-link">Trust &amp; safety</a>
-        <a href="/app" class="btn btn-secondary btn-sm landing-signin-btn">Sign in</a>
+        <a href="/app" class="btn btn-ghost landing-signin-btn">Sign in</a>
       </nav>
     </div>
   </header>
 
-  <main class="landing-main">
-    <!-- Hero Section -->
-    <section id="hero" class="landing-section hero-section">
+  <main id="main" class="landing-main">
+    <!-- Hero -->
+    <section id="hero" class="hero-section">
+      <div class="hero-backdrop" aria-hidden="true">
+        <div class="hero-floor"></div>
+        <div class="hero-radar"></div>
+      </div>
+
       <div class="landing-container hero-container">
         <div class="hero-copy">
-          <h1 class="hero-title">Defensible external attack surface reconnaissance.</h1>
-          <p class="hero-subhead">Continuous subdomain discovery, active probing, port scanning, and risk triage for verified infrastructure.</p>
+          <h1 class="hero-title">
+            <span class="hero-line">Know every host</span>
+            <span class="hero-line">you expose.</span>
+            <span class="hero-line hero-line-accent">Scan only what you own.</span>
+          </h1>
+          <p class="hero-subhead">Exposight finds the subdomains, open ports and weak TLS on domains you have proven you control, and tells you when something changes.</p>
           <div class="hero-actions">
-            <a href="/app" class="btn btn-primary hero-cta-btn">Sign in to dashboard</a>
+            <a href="/app" class="btn btn-primary hero-cta-btn">Sign in to the dashboard</a>
+            <a href="#how-it-works" class="btn btn-ghost">See how it works</a>
           </div>
         </div>
-        <div class="hero-chassis" aria-hidden="true">
-          <div class="chassis-plate">
-            <div class="chassis-header">
-              <span class="chassis-dot"></span>
-              <span class="chassis-label">RECON PIPELINE</span>
+
+        <div class="hero-stage" aria-hidden="true">
+          <div class="hero-card tilt">
+            <div class="hero-card-head">
+              <span class="hero-card-dot"></span>
+              <span class="mono">recon pipeline</span>
+              <span class="mono hero-card-meta">5 stages</span>
             </div>
-            <div class="chassis-nodes">
-              <div class="pipeline-stage-node">
-                <span class="node-idx">01</span>
+            <ol class="pipeline-nodes">
+              <li class="pipeline-stage-node">
+                <span class="node-idx mono">01</span>
                 <span class="node-title">Discovery</span>
-                <span class="node-desc">Passive CT logs</span>
-              </div>
-              <div class="pipeline-stage-node">
-                <span class="node-idx">02</span>
+                <span class="node-desc mono">Certificate Transparency</span>
+              </li>
+              <li class="pipeline-stage-node">
+                <span class="node-idx mono">02</span>
                 <span class="node-title">Probing</span>
-                <span class="node-desc">HTTP/HTTPS on 80/443</span>
-              </div>
-              <div class="pipeline-stage-node">
-                <span class="node-idx">03</span>
-                <span class="node-title">Portscan</span>
-                <span class="node-desc">16 default ports</span>
-              </div>
-              <div class="pipeline-stage-node">
-                <span class="node-idx">04</span>
+                <span class="node-desc mono">HTTP/HTTPS on 80, 443</span>
+              </li>
+              <li class="pipeline-stage-node">
+                <span class="node-idx mono">03</span>
+                <span class="node-title">Port scan</span>
+                <span class="node-desc mono">16 default ports</span>
+              </li>
+              <li class="pipeline-stage-node">
+                <span class="node-idx mono">04</span>
                 <span class="node-title">Inspection</span>
-                <span class="node-desc">TLS &amp; security headers</span>
-              </div>
-              <div class="pipeline-stage-node">
-                <span class="node-idx">05</span>
+                <span class="node-desc mono">TLS and security headers</span>
+              </li>
+              <li class="pipeline-stage-node">
+                <span class="node-idx mono">05</span>
                 <span class="node-title">Scoring</span>
-                <span class="node-desc">Triage &amp; risk band</span>
-              </div>
-            </div>
+                <span class="node-desc mono">Critical to Info</span>
+              </li>
+            </ol>
+            <span class="hero-card-beam"></span>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Problem Section -->
-    <section id="problem" class="landing-section problem-section">
-      <div class="landing-container">
-        <div class="section-intro">
-          <p class="section-eyebrow">The visibility gap</p>
-          <h2 class="section-title">Unverified scans produce noise. Blind spots produce breaches.</h2>
-          <p class="section-lead">Organizations accumulate forgotten subdomains, exposed test databases, and deprecated TLS configurations. Scanning without verified ownership creates authorization liabilities, while ad-hoc testing misses newly exposed ports and configuration drift.</p>
+    <!-- How it works: pinned sequence -->
+    <section id="how-it-works" class="how-section">
+      <div class="how-sticky">
+        <div class="landing-container how-container">
+          <div class="how-intro">
+            <h2 class="section-title">From domain to alert in four steps</h2>
+            <ol class="how-rail" aria-hidden="true">
+              <li class="how-rail-item"><span class="mono">01</span> Add domain</li>
+              <li class="how-rail-item"><span class="mono">02</span> Verify</li>
+              <li class="how-rail-item"><span class="mono">03</span> Scan</li>
+              <li class="how-rail-item"><span class="mono">04</span> Alert</li>
+            </ol>
+            <div class="how-progress" aria-hidden="true"><span></span></div>
+          </div>
+
+          <ol class="how-cards">
+            <li class="how-card">
+              <span class="how-card-step mono">Step 01</span>
+              <h3 class="how-card-title">Add a domain</h3>
+              <p class="how-card-text">Add the apex domain you want to watch to your organization. Owners and admins manage the domain list; viewers can read it.</p>
+              <div class="how-card-visual mono" aria-hidden="true">
+                <span class="field">example.com</span>
+                <span class="field-btn">Add domain</span>
+              </div>
+            </li>
+
+            <li id="trust" class="how-card how-card-verify">
+              <span class="how-card-step mono">Step 02</span>
+              <h3 class="how-card-title">Prove you own it</h3>
+              <p class="how-card-text trust-lead">Active scans run only on domains you have verified with a DNS TXT record at _exposight-challenge.&lt;domain&gt;. A time-limited operator override exists for exceptional cases.</p>
+              <div class="trust-code-chassis">
+                <span class="mono code-label">DNS TXT verification record</span>
+                <code class="trust-code">{{ txt_label }} IN TXT &quot;{{ txt_example }}&quot;</code>
+              </div>
+            </li>
+
+            <li class="how-card">
+              <span class="how-card-step mono">Step 03</span>
+              <h3 class="how-card-title">Scan on demand or on a schedule</h3>
+              <p class="how-card-text">Each scan runs discovery, probing, a port scan, TLS and header inspection, then scoring. Schedules run from every 6 hours to every 30 days.</p>
+              <div class="how-card-visual mono" aria-hidden="true">
+                <span class="chip">every 24 h</span>
+                <span class="chip chip-live">scan running</span>
+              </div>
+            </li>
+
+            <li class="how-card how-card-alert">
+              <span class="how-card-step mono">Step 04</span>
+              <h3 class="how-card-title">Get told what changed</h3>
+              <p class="how-card-text">Each scan is compared with the previous one. New subdomains, newly open ports and certificate problems are emailed to up to 5 recipients.</p>
+              <div class="how-card-visual mono" aria-hidden="true">
+                <span class="chip chip-alert">new open port</span>
+                <span class="chip chip-alert">certificate expired</span>
+              </div>
+            </li>
+          </ol>
         </div>
       </div>
     </section>
 
-    <!-- How It Works Section -->
-    <section id="how-it-works" class="landing-section pipeline-section">
+    <!-- What a scan checks -->
+    <section id="pipeline" class="landing-section pipeline-section">
       <div class="landing-container">
-        <div class="section-intro">
-          <p class="section-eyebrow">Architecture</p>
-          <h2 class="section-title">Structured five-stage reconnaissance pipeline</h2>
-        </div>
-        <div class="stages-grid">
-          <article class="stage-step-card">
-            <div class="stage-step-header">
-              <span class="stage-step-num">Stage 1</span>
-              <h3 class="stage-step-title">Passive Subdomain Discovery</h3>
+        <h2 class="section-title reveal">What a scan checks</h2>
+        <ol class="stages-list">
+          <li class="stage-step-card reveal">
+            <span class="stage-step-num mono">01</span>
+            <div>
+              <h3 class="stage-step-title">Passive subdomain discovery</h3>
+              <p class="stage-step-text">Queries Certificate Transparency logs and resolves live A (IPv4) and AAAA (IPv6) records without touching target hosts directly.</p>
             </div>
-            <p class="stage-step-text">Queries Certificate Transparency logs and resolves live A (IPv4) and AAAA (IPv6) records without touching target hosts directly.</p>
-            <span class="stage-step-source">discovery.py, resolver.py</span>
-          </article>
-
-          <article class="stage-step-card">
-            <div class="stage-step-header">
-              <span class="stage-step-num">Stage 2</span>
-              <h3 class="stage-step-title">Active Host Probing</h3>
+            <span class="stage-step-source mono">discovery.py, resolver.py</span>
+          </li>
+          <li class="stage-step-card reveal">
+            <span class="stage-step-num mono">02</span>
+            <div>
+              <h3 class="stage-step-title">Active host probing</h3>
+              <p class="stage-step-text">Checks HTTP and HTTPS on ports 80 and 443. Private and loopback addresses are refused, and responses are capped at 64 KB.</p>
             </div>
-            <p class="stage-step-text">Validates HTTP/HTTPS availability on ports 80/443 with SSRF defenses blocking private/loopback IP ranges and a 64 KB response streaming cap.</p>
-            <span class="stage-step-source">prober.py, scan_common.py</span>
-          </article>
-
-          <article class="stage-step-card">
-            <div class="stage-step-header">
-              <span class="stage-step-num">Stage 3</span>
-              <h3 class="stage-step-title">Lightweight TCP Port Scanning</h3>
+            <span class="stage-step-source mono">prober.py, scan_common.py</span>
+          </li>
+          <li class="stage-step-card reveal">
+            <span class="stage-step-num mono">03</span>
+            <div>
+              <h3 class="stage-step-title">Lightweight TCP port scan</h3>
+              <p class="stage-step-text">Connects to sixteen common service ports to classify them as open or closed and to read non-intrusive service greetings.</p>
             </div>
-            <p class="stage-step-text">Connects asynchronously across sixteen default service ports to classify open states and collect non-intrusive service greetings.</p>
-            <span class="stage-step-source">portscan.py</span>
-          </article>
-
-          <article class="stage-step-card">
-            <div class="stage-step-header">
-              <span class="stage-step-num">Stage 4</span>
-              <h3 class="stage-step-title">TLS &amp; Header Inspection</h3>
+            <span class="stage-step-source mono">portscan.py</span>
+          </li>
+          <li class="stage-step-card reveal">
+            <span class="stage-step-num mono">04</span>
+            <div>
+              <h3 class="stage-step-title">TLS and header inspection</h3>
+              <p class="stage-step-text">Evaluates certificate validity and deprecated TLS, and checks security headers such as HSTS, CSP and X-Content-Type-Options.</p>
             </div>
-            <p class="stage-step-text">Evaluates TLS certificate validity, deprecation, and defensive security headers like HSTS, CSP, and X-Content-Type-Options.</p>
-            <span class="stage-step-source">tls_inspect.py, headers_inspect.py</span>
-          </article>
-
-          <article class="stage-step-card">
-            <div class="stage-step-header">
-              <span class="stage-step-num">Stage 5</span>
-              <h3 class="stage-step-title">Heuristic Risk Scoring</h3>
+            <span class="stage-step-source mono">tls_inspect.py, headers_inspect.py</span>
+          </li>
+          <li class="stage-step-card reveal">
+            <span class="stage-step-num mono">05</span>
+            <div>
+              <h3 class="stage-step-title">Risk scoring</h3>
+              <p class="stage-step-text">Groups findings into severity tiers from Critical to Info, ordered by tier, score impact, then host.</p>
             </div>
-            <p class="stage-step-text">Groups findings into severity tiers from Critical to Info, ordered by severity tier, score impact, then host.</p>
-            <span class="stage-step-source">scoring.py</span>
-          </article>
-        </div>
+            <span class="stage-step-source mono">scoring.py</span>
+          </li>
+        </ol>
       </div>
     </section>
 
-    <!-- Features Section -->
+    <!-- Features -->
     <section id="features" class="landing-section features-section">
       <div class="landing-container">
-        <div class="section-intro">
-          <p class="section-eyebrow">Capabilities</p>
-          <h2 class="section-title">Built for operational security rigor</h2>
-        </div>
+        <h2 class="section-title reveal">Built for the people who answer for the perimeter</h2>
         <div class="features-grid">
-          <div class="feature-item">
-            <h3 class="feature-title">Automated Change Detection</h3>
-            <p class="feature-desc">Differential engine compares consecutive scans to detect new subdomains, newly open ports, and certificate problems (expired, untrusted, self-signed, hostname mismatch).</p>
-          </div>
-          <div class="feature-item">
-            <h3 class="feature-title">Scheduled Cadences</h3>
-            <p class="feature-desc">Configurable automated scan intervals from 6 hours to 720 hours (30 days) with randomized execution jitter to disperse network load.</p>
-          </div>
-          <div class="feature-item">
-            <h3 class="feature-title">Transactional Email Alerts</h3>
-            <p class="feature-desc">Transactional outbox delivery issues notification digests to up to 5 configured recipients upon new risk discoveries.</p>
-          </div>
-          <div class="feature-item">
-            <h3 class="feature-title">Append-Only Audit Log</h3>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></svg>
+            <h3 class="feature-title">Change detection</h3>
+            <p class="feature-desc">Consecutive scans are compared to find new subdomains, newly open ports and certificate problems: expired, untrusted, self-signed or hostname mismatch.</p>
+          </article>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            <h3 class="feature-title">Scheduled scans</h3>
+            <p class="feature-desc">Pick an interval from 6 to 720 hours. Start times get random jitter so scans do not all run at once.</p>
+          </article>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
+            <h3 class="feature-title">Email alerts</h3>
+            <p class="feature-desc">Alerts are written to an outbox in the database and sent by the worker, with retries, to up to 5 recipients per domain.</p>
+          </article>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></svg>
+            <h3 class="feature-title">Audit log</h3>
             <p class="feature-desc">Append-only audit log: a database trigger blocks updates, deletes and truncates from the application.</p>
-          </div>
-          <div class="feature-item">
-            <h3 class="feature-title">Multi-Tenant Isolation</h3>
-            <p class="feature-desc">Role-based access control with owner, admin, and viewer ranks, enforced by tenant-scoped database queries and anti-enumeration defenses.</p>
-          </div>
+          </article>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>
+            <h3 class="feature-title">Tenant isolation</h3>
+            <p class="feature-desc">Owner, admin and viewer roles. Every query is scoped to the organization, and another tenant's ids return 404.</p>
+          </article>
         </div>
       </div>
     </section>
 
-    <!-- Trust & Safety Section -->
-    <section id="trust" class="landing-section trust-section">
-      <div class="landing-container">
-        <div class="trust-card">
-          <p class="section-eyebrow">Authorization Gate</p>
-          <h2 class="section-title">Ownership verification before active scanning</h2>
-          <p class="trust-lead">Active scans run only on domains you have verified with a DNS TXT record at _exposight-challenge.&lt;domain&gt;. A time-limited operator override exists for exceptional cases.</p>
-          <div class="trust-code-chassis">
-            <span class="chassis-label">DNS TXT VERIFICATION RECORD</span>
-            <code class="trust-code">{{ txt_label }} IN TXT &quot;{{ txt_example }}&quot;</code>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- CTA Section -->
+    <!-- CTA -->
     <section id="cta" class="landing-section cta-section">
-      <div class="landing-container cta-container">
-        <h2 class="cta-title">Monitor your organization&#39;s perimeter</h2>
-        <p class="cta-desc">Access your domain inventory, configure scan schedules, and triage findings.</p>
+      <div class="landing-container cta-container reveal">
+        <h2 class="cta-title">Watch the domains you own.</h2>
+        <p class="cta-desc">Sign in to see your domain inventory, set scan schedules and work through findings.</p>
         <div class="cta-action">
-          <a href="/app" class="btn btn-primary cta-btn">Get started</a>
+          <a href="/app" class="btn btn-primary cta-btn">Sign in to the dashboard</a>
         </div>
       </div>
     </section>
@@ -215,7 +259,7 @@
       <div class="footer-links">
         <a href="/app" class="footer-link">Dashboard</a>
         <a href="/terms" class="footer-link">Terms &amp; acceptable use</a>
-        <a href="https://github.com/vigneshs-17/exposight" class="footer-link" target="_blank" rel="noopener noreferrer">Source Code</a>
+        <a href="https://github.com/vigneshs-17/exposight" class="footer-link" target="_blank" rel="noopener noreferrer">Source code</a>
       </div>
     </div>
   </footer>

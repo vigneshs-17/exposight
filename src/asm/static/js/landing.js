@@ -1,114 +1,36 @@
 /**
- * Landing Page GSAP Animations (v3.5)
- * Strict requirements:
- * - Entrance reveals only (gsap.from + ScrollTrigger with once: true)
- * - NO pinning, NO scrub
- * - Transform and opacity only
- * - Fully wrapped in gsap.matchMedia for (prefers-reduced-motion: no-preference)
- * - No setAttribute('style'), no DOM html injection
+ * Landing page pointer tilt (C-UI-1).
+ * All other motion is CSS (landing.css). This only sets CSS custom properties
+ * (--rx, --ry, --mx, --my) on .tilt elements through style.setProperty, which the
+ * strict CSP allows. Off for reduced motion and for touch/coarse pointers.
+ * No setAttribute('style'), no DOM html injection.
  */
 
 document.addEventListener("DOMContentLoaded", function () {
-  if (typeof window.gsap === "undefined") {
-    return;
+  var finePointer = window.matchMedia("(hover: hover) and (pointer: fine)");
+  var reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var MAX_DEG = 7;
+
+  function reset(el) {
+    el.style.setProperty("--rx", "0deg");
+    el.style.setProperty("--ry", "0deg");
   }
 
-  var gsap = window.gsap;
-  if (typeof window.ScrollTrigger !== "undefined") {
-    gsap.registerPlugin(window.ScrollTrigger);
-  }
-
-  var mm = gsap.matchMedia();
-
-  mm.add("(prefers-reduced-motion: no-preference)", function () {
-    // 1. Hero Entrance Sequence
-    var heroTl = gsap.timeline({ defaults: { ease: "power2.out" } });
-
-    heroTl
-      .from(".hero-copy > *", {
-        y: 28,
-        opacity: 0,
-        stagger: 0.12,
-        duration: 0.75,
-      })
-      .from(
-        ".pipeline-stage-node",
-        {
-          y: 20,
-          opacity: 0,
-          stagger: 0.08,
-          duration: 0.6,
-        },
-        "-=0.4"
-      );
-
-    // 2. Problem Section Entrance
-    gsap.from(".problem-section .section-intro > *", {
-      scrollTrigger: {
-        trigger: ".problem-section",
-        start: "top 80%",
-        once: true,
-      },
-      y: 24,
-      opacity: 0,
-      stagger: 0.1,
-      duration: 0.7,
-      ease: "power2.out",
+  document.querySelectorAll(".tilt").forEach(function (el) {
+    el.addEventListener("pointermove", function (event) {
+      if (!finePointer.matches || reducedMotion.matches) {
+        return;
+      }
+      var rect = el.getBoundingClientRect();
+      var x = (event.clientX - rect.left) / rect.width;
+      var y = (event.clientY - rect.top) / rect.height;
+      el.style.setProperty("--ry", ((x - 0.5) * 2 * MAX_DEG).toFixed(2) + "deg");
+      el.style.setProperty("--rx", ((0.5 - y) * 2 * MAX_DEG).toFixed(2) + "deg");
+      el.style.setProperty("--mx", (x * 100).toFixed(1) + "%");
+      el.style.setProperty("--my", (y * 100).toFixed(1) + "%");
     });
-
-    // 3. Pipeline Stages Cards Entrance
-    gsap.from(".stage-step-card", {
-      scrollTrigger: {
-        trigger: ".stages-grid",
-        start: "top 80%",
-        once: true,
-      },
-      y: 30,
-      opacity: 0,
-      stagger: 0.12,
-      duration: 0.65,
-      ease: "power2.out",
-    });
-
-    // 4. Features Grid Entrance
-    gsap.from(".feature-item", {
-      scrollTrigger: {
-        trigger: ".features-grid",
-        start: "top 80%",
-        once: true,
-      },
-      y: 25,
-      opacity: 0,
-      stagger: 0.08,
-      duration: 0.6,
-      ease: "power2.out",
-    });
-
-    // 5. Trust Card Entrance
-    gsap.from(".trust-card", {
-      scrollTrigger: {
-        trigger: ".trust-section",
-        start: "top 80%",
-        once: true,
-      },
-      y: 25,
-      opacity: 0,
-      duration: 0.7,
-      ease: "power2.out",
-    });
-
-    // 6. CTA Container Entrance
-    gsap.from(".cta-container > *", {
-      scrollTrigger: {
-        trigger: ".cta-section",
-        start: "top 85%",
-        once: true,
-      },
-      y: 20,
-      opacity: 0,
-      stagger: 0.1,
-      duration: 0.65,
-      ease: "power2.out",
+    el.addEventListener("pointerleave", function () {
+      reset(el);
     });
   });
 });

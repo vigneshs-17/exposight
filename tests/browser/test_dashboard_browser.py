@@ -617,135 +617,146 @@ def test_browser_check_now_result_stays_visible(
         assert mock_check.call_count == 1
 
 
+# Landing page (C-UI-1): motion is CSS only (load animation, scroll-driven reveals,
+# pinned "How it works"). These elements must end up visible with opacity 1.
 ANIMATED_SELECTORS = [
     ".hero-copy > *",
+    ".hero-card",
     ".pipeline-stage-node",
-    ".problem-section .section-intro > *",
     ".stage-step-card",
     ".feature-item",
-    ".trust-card",
     ".cta-container > *",
 ]
 
+_ALL_OPAQUE_JS = """
+(selectors) => selectors.every((sel) => {
+    const els = document.querySelectorAll(sel);
+    return els.length > 0 && [...els].every((el) => getComputedStyle(el).opacity === "1");
+})
+"""
 
-def test_browser_landing_page_loads_and_gsap_runs(
+
+def _assert_all_visible_and_opaque(page: Page, selectors: list[str]) -> None:
+    # The hero load animation takes about 1.4 s; wait for it instead of sampling mid-way.
+    # Polled from Python: wait_for_function cannot poll in a page with JavaScript disabled.
+    for _ in range(40):
+        if page.evaluate(_ALL_OPAQUE_JS, selectors):
+            break
+        page.wait_for_timeout(200)
+    for sel in selectors:
+        loc = page.locator(sel)
+        count = loc.count()
+        assert count > 0, f"No elements matched for selector {sel}"
+        for i in range(count):
+            el = loc.nth(i)
+            expect(el).to_be_visible()
+            opacity = el.evaluate("e => window.getComputedStyle(e).opacity")
+            assert opacity == "1", f"Opacity not 1 for {sel}[{i}]"
+
+
+def test_browser_landing_page_loads_with_css_motion_and_no_external_requests(
     page: Page,
     live_server: str,
 ) -> None:
-    """Landing page loads with 0 CSP violations, GSAP initialized, and ScrollTriggers created."""
+    """Landing loads with 0 CSP violations (fixture), only same-origin requests, no GSAP,
+    and the scroll-driven reveal wired to a view() timeline in this Chromium."""
+    requests: list[str] = []
+    page.on("request", lambda req: requests.append(req.url))
     page.goto(f"{live_server}/")
     expect(page.locator("#hero h1")).to_be_visible()
+    page.wait_for_load_state("networkidle")
 
-    # Verify GSAP ran and window.gsap is defined
-    has_gsap = page.evaluate("typeof window.gsap !== 'undefined'")
-    assert has_gsap is True
+    external = [url for url in requests if not url.startswith(live_server)]
+    assert external == [], f"Landing page requested external origins: {external}"
+    assert any(url.endswith("/static/fonts/SpaceGrotesk-Variable.woff2") for url in requests)
+    assert page.evaluate("typeof window.gsap") == "undefined"
 
-    # Assert window.ScrollTrigger.getAll().length > 0 right after load
-    # (proves triggers exist for below-fold sections)
-    trigger_count = page.evaluate(
-        "typeof window.ScrollTrigger !== 'undefined' ? window.ScrollTrigger.getAll().length : 0"
+    assert page.evaluate("CSS.supports('animation-timeline: view()')") is True
+    timeline = page.locator(".stage-step-card").first.evaluate(
+        "e => getComputedStyle(e).animationTimeline"
     )
-    assert trigger_count > 0
+    assert "view" in timeline
+    font = page.locator(".hero-title").evaluate("e => getComputedStyle(e).fontFamily")
+    assert "Space Grotesk" in font
 
 
 def test_browser_landing_page_reduced_motion(
     make_page,
     live_server: str,
 ) -> None:
-    """With reducedMotion='reduce', all animated elements are visible, opacity 1, transform none,
-    and 0 ScrollTriggers created.
-    """
+    """With reducedMotion='reduce', no animation runs, nothing is tilted, and every step of
+    "How it works" is shown as a plain list (not pinned)."""
     with make_page(reduced_motion="reduce") as page:
         page.goto(f"{live_server}/")
 
-        # ScrollTrigger should have 0 triggers registered
-        st_count = page.evaluate(
-            "typeof window.ScrollTrigger !== 'undefined' ? window.ScrollTrigger.getAll().length : 0"
-        )
-        assert st_count == 0
-
-        for sel in ANIMATED_SELECTORS:
+        for sel in [*ANIMATED_SELECTORS, ".how-card"]:
             loc = page.locator(sel)
             count = loc.count()
             assert count > 0, f"No elements matched for selector {sel}"
             for i in range(count):
                 el = loc.nth(i)
                 expect(el).to_be_visible()
-                opacity = el.evaluate("e => window.getComputedStyle(e).opacity")
+                style = el.evaluate(
+                    "e => { const c = getComputedStyle(e);"
+                    " return [c.opacity, c.transform, c.animationName, c.position]; }"
+                )
+                opacity, transform, animation_name, position = style
                 assert opacity == "1", f"Opacity not 1 for {sel}[{i}]"
-                tf = el.evaluate("e => window.getComputedStyle(e).transform")
-                assert tf in (
-                    "none",
-                    "matrix(1, 0, 0, 1, 0, 0)",
-                ), f"Transform not none for {sel}[{i}]: {tf}"
+                assert transform in ("none", "matrix(1, 0, 0, 1, 0, 0)"), (
+                    f"Transform not none for {sel}[{i}]: {transform}"
+                )
+                assert animation_name == "none", f"Animation still on for {sel}[{i}]"
+                assert position != "absolute", f"{sel}[{i}] is still pinned/stacked"
 
 
 def test_browser_landing_page_no_js(
     make_page,
     live_server: str,
 ) -> None:
-    """With JavaScript disabled, all animated elements remain fully visible in static HTML."""
+    """With JavaScript disabled, all animated elements remain fully visible."""
     with make_page(java_script_enabled=False) as page:
         page.goto(f"{live_server}/")
-
-        for sel in ANIMATED_SELECTORS:
-            loc = page.locator(sel)
-            count = loc.count()
-            assert count > 0, f"No elements matched for selector {sel}"
-            for i in range(count):
-                el = loc.nth(i)
-                expect(el).to_be_visible()
-                opacity = el.evaluate("e => window.getComputedStyle(e).opacity")
-                assert opacity == "1", f"Opacity not 1 for {sel}[{i}] without JS"
+        _assert_all_visible_and_opaque(page, ANIMATED_SELECTORS)
 
 
 def test_browser_landing_all_sections_reveal_on_scroll(
     page: Page,
     live_server: str,
 ) -> None:
-    """Full motion: scrolling down section by section reveals all ANIMATED elements to opacity 1."""
+    """Full motion: scrolling through every section leaves every animated element visible."""
     page.goto(f"{live_server}/")
 
-    sections = ["#hero", "#problem", "#how-it-works", "#features", "#trust", "#cta"]
-    for sec in sections:
+    for sec in ["#hero", "#how-it-works", "#pipeline", "#features", "#cta"]:
         page.locator(sec).scroll_into_view_if_needed()
         page.wait_for_timeout(100)
+    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+    page.wait_for_timeout(200)
 
-    # Wait until every ANIMATED element has opacity '1' (timeout 5s)
-    check_all_revealed = """
-    () => {
-        const selectors = [
-            ".hero-copy > *",
-            ".pipeline-stage-node",
-            ".problem-section .section-intro > *",
-            ".stage-step-card",
-            ".feature-item",
-            ".trust-card",
-            ".cta-container > *"
-        ];
-        for (const sel of selectors) {
-            const elements = document.querySelectorAll(sel);
-            if (elements.length === 0) return false;
-            for (const el of elements) {
-                if (window.getComputedStyle(el).opacity !== "1") {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-    """
-    page.wait_for_function(check_all_revealed, timeout=5000)
+    _assert_all_visible_and_opaque(page, ANIMATED_SELECTORS)
 
-    # Double-check each individual element explicitly
-    for sel in ANIMATED_SELECTORS:
-        loc = page.locator(sel)
-        count = loc.count()
-        assert count > 0
-        for i in range(count):
-            el = loc.nth(i)
-            expect(el).to_be_visible()
-            assert el.evaluate("e => window.getComputedStyle(e).opacity") == "1"
+
+def test_browser_landing_how_it_works_is_pinned_on_wide_screens(
+    page: Page,
+    live_server: str,
+) -> None:
+    """The four steps play as a pinned sequence: mid-way through, one card is in focus."""
+    page.goto(f"{live_server}/")
+    section = page.locator("#how-it-works")
+    top = section.evaluate("e => e.getBoundingClientRect().top + window.scrollY")
+    height = section.evaluate("e => e.offsetHeight")
+    viewport = page.evaluate("window.innerHeight")
+    assert height > 2 * viewport, "How it works is not tall enough to pin"
+
+    # Scroll to the middle of the second step's range.
+    page.evaluate(f"window.scrollTo(0, {top} + ({height} - {viewport}) * 0.37)")
+    page.wait_for_timeout(300)
+    opacities = page.locator(".how-card").evaluate_all(
+        "els => els.map(e => parseFloat(getComputedStyle(e).opacity))"
+    )
+    assert opacities[1] > 0.95, opacities
+    assert opacities[0] < 0.05 and opacities[3] < 0.05, opacities
+    sticky = page.locator(".how-sticky").evaluate("e => getComputedStyle(e).position")
+    assert sticky == "sticky"
 
 
 def test_browser_landing_page_cta_navigation(

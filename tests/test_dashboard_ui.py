@@ -275,11 +275,88 @@ def test_templates_package_data_exists():
         ("static", "fonts", "IBMPlexSans-Regular.woff2"),
         ("static", "fonts", "IBMPlexSans-SemiBold.woff2"),
         ("static", "fonts", "IBMPlexMono-Regular.woff2"),
+        ("static", "fonts", "SpaceGrotesk-Variable.woff2"),
+        ("static", "fonts", "SpaceGrotesk-OFL.txt"),
     ]
     pkg_files = importlib.resources.files("asm")
     for parts in expected_files:
         res = pkg_files.joinpath(*parts)
         assert res.is_file(), f"{'/'.join(parts)} is not a valid package data file!"
+
+
+LANDING_CSS = (
+    Path(__file__).resolve().parent.parent / "src" / "asm" / "static" / "css" / "landing.css"
+)
+
+
+def _landing_html() -> str:
+    with patch.dict(
+        os.environ,
+        {
+            "SUPABASE_URL": "https://testproj.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+        },
+    ):
+        reset_auth_dependencies()
+        with TestClient(app) as client:
+            resp = client.get("/")
+            assert resp.status_code == 200
+            return resp.text
+
+
+def test_landing_page_loads_no_external_origins():
+    """C-UI-1: every resource the landing page loads (scripts, stylesheets, preloads,
+    images, CSS url()) comes from our own /static/ path; no CDN, no Google Fonts."""
+    html = _landing_html()
+    resource_refs = re.findall(
+        r"<(?:script|link|img|source|iframe|video|audio)\b[^>]*?\s(?:src|href)=\"([^\"]*)\"",
+        html,
+        re.IGNORECASE,
+    )
+    assert resource_refs, "no resource references found"
+    for ref in resource_refs:
+        assert ref.startswith("/static/"), f"landing loads a non-local resource: {ref}"
+    assert "@import" not in html
+
+    css = LANDING_CSS.read_text(encoding="utf-8")
+    assert "@import" not in css
+    urls = re.findall(r"url\(\s*['\"]?([^'\")]+)", css)
+    assert urls, "landing.css has no url() at all (font-face missing?)"
+    for url in urls:
+        assert url.startswith("/static/"), f"landing.css loads a non-local url: {url}"
+    for banned in ("fonts.googleapis", "fonts.gstatic", "cdn.", "unpkg", "jsdelivr", "gsap"):
+        assert banned not in html.lower() and banned not in css.lower(), banned
+
+
+def test_landing_font_is_self_hosted_with_licence():
+    """The landing font is served from /static/fonts/ as real woff2, with its OFL licence."""
+    css = LANDING_CSS.read_text(encoding="utf-8")
+    assert 'url("/static/fonts/SpaceGrotesk-Variable.woff2") format("woff2")' in css
+    assert '<link rel="preload" href="/static/fonts/SpaceGrotesk-Variable.woff2"' in _landing_html()
+    with TestClient(app) as client:
+        font = client.get("/static/fonts/SpaceGrotesk-Variable.woff2")
+        assert font.status_code == 200
+        assert font.content[:4] == b"wOF2"
+        licence = client.get("/static/fonts/SpaceGrotesk-OFL.txt")
+        assert licence.status_code == 200
+        assert "SIL Open Font License, Version 1.1" in licence.text
+
+
+def test_landing_css_respects_reduced_motion():
+    """landing.css turns motion off for prefers-reduced-motion and gates every scroll-driven
+    animation behind @supports, so unsupported browsers get static, visible content."""
+    css = LANDING_CSS.read_text(encoding="utf-8")
+    match = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\n\}", css, re.S)
+    assert match, "no prefers-reduced-motion: reduce block"
+    block = match.group(1)
+    assert "animation: none !important" in block
+    assert "transition: none !important" in block
+    assert "transform: none !important" in block
+    assert "@supports (animation-timeline: view())" in css
+    supports_at = css.index("@supports (animation-timeline: view())")
+    for prop in ("view()", "scroll(", "--how"):
+        prop = f"animation-timeline: {prop}"
+        assert css.index(prop) > supports_at, f"{prop} used outside @supports"
 
 
 def _score_card_value(html: str, label: str) -> int | None:
