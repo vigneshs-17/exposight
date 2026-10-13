@@ -355,3 +355,23 @@ def test_every_service_has_log_rotation():
         options = logging_cfg.get("options") or {}
         assert options.get("max-size") == "10m", name
         assert options.get("max-file") == "3", name
+
+
+def test_shell_scripts_are_executable_in_git():
+    """Cron runs scripts/*.sh directly; a 100644 index mode gives "Permission denied" on the VM."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None or not (REPO_ROOT / ".git").exists():
+        pytest.skip("needs a git checkout")
+    listing = subprocess.run(
+        ["git", "ls-files", "-s", "--", "scripts/*.sh"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    modes = {line.split("\t", 1)[1]: line.split()[0] for line in listing}
+    assert "scripts/backup_db.sh" in modes, "scripts/backup_db.sh must be tracked"
+    not_executable = {path: mode for path, mode in modes.items() if mode != "100755"}
+    assert not not_executable, f"run git update-index --chmod=+x on: {not_executable}"

@@ -108,9 +108,13 @@ Exposight uses Caddy for automated TLS via ACME HTTP-01 challenges.
    Retrieve:
    - `SUPABASE_URL` (`https://<project-id>.supabase.co`)
    - `SUPABASE_PUBLISHABLE_KEY` (anon public key, e.g. `eyJ...`). Never set service_role keys.
+   - **JWT signing key:** in Project Settings → JWT Keys, the current key must be ECC (P-256) or RSA. The api verifies tokens against the project's JWKS and accepts only `ES256` and `RS256` (`src/asm/auth/token.py`); it rejects the legacy HS256 shared secret, so every signed-in request would get `401`. If the current key is "Legacy HS256", create a standby ECC key and rotate to it before going live.
 
 2. **Clone and Configure**:
+   `/opt` is owned by root, so create the directory and give it to the deployer user first:
    ```bash
+   sudo mkdir -p /opt/exposight
+   sudo chown "$USER": /opt/exposight
    git clone https://github.com/vigneshs-17/exposight.git /opt/exposight
    cd /opt/exposight
    cp .env.production.example .env
@@ -316,8 +320,9 @@ sudo crontab -e
 ```
 Add entry (runs at 03:00 UTC daily):
 ```cron
-0 3 * * * /opt/exposight/scripts/backup_db.sh /var/backups/exposight >> /var/log/exposight_backup.log 2>&1
+0 3 * * * bash /opt/exposight/scripts/backup_db.sh /var/backups/exposight >> /var/log/exposight_backup.log 2>&1
 ```
+Calling it through `bash` works even if the checkout lost the script's executable bit (it is tracked as `100755`; `tests/test_deploy_config.py` checks every `scripts/*.sh`).
 
 ### Off-Site Backup Sync (Off-Host Storage)
 Backups stored on the same VM will be lost if the instance is terminated or corrupted. Copy backup archives off the host to a remote server or local backup machine using `scp` / `rsync`:
