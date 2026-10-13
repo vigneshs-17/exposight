@@ -625,6 +625,10 @@ ANIMATED_SELECTORS = [
     ".pipeline-stage-node",
     ".stage-step-card",
     ".feature-item",
+    ".recon-panel",
+    ".inventory",
+    ".topology",
+    ".trust-code-chassis",
     ".cta-container > *",
 ]
 
@@ -668,7 +672,8 @@ def test_browser_landing_page_loads_with_css_motion_and_no_external_requests(
 
     external = [url for url in requests if not url.startswith(live_server)]
     assert external == [], f"Landing page requested external origins: {external}"
-    assert any(url.endswith("/static/fonts/SpaceGrotesk-Variable.woff2") for url in requests)
+    for font_file in ("PlusJakartaSans-Variable.woff2", "Inter-Variable.woff2"):
+        assert any(url.endswith(f"/static/fonts/{font_file}") for url in requests), font_file
     assert page.evaluate("typeof window.gsap") == "undefined"
 
     assert page.evaluate("CSS.supports('animation-timeline: view()')") is True
@@ -677,7 +682,10 @@ def test_browser_landing_page_loads_with_css_motion_and_no_external_requests(
     )
     assert "view" in timeline
     font = page.locator(".hero-title").evaluate("e => getComputedStyle(e).fontFamily")
-    assert "Space Grotesk" in font
+    assert "Plus Jakarta Sans" in font
+    body_font = page.locator(".hero-subhead").evaluate("e => getComputedStyle(e).fontFamily")
+    assert body_font.startswith('"Inter"') or body_font.startswith("Inter")
+    assert page.evaluate("document.fonts.check('700 16px \"Plus Jakarta Sans\"')") is True
 
 
 def test_browser_landing_page_reduced_motion(
@@ -726,7 +734,15 @@ def test_browser_landing_all_sections_reveal_on_scroll(
     """Full motion: scrolling through every section leaves every animated element visible."""
     page.goto(f"{live_server}/")
 
-    for sec in ["#hero", "#how-it-works", "#pipeline", "#features", "#cta"]:
+    for sec in [
+        "#hero",
+        "#surface",
+        "#how-it-works",
+        "#pipeline",
+        "#features",
+        "#ownership",
+        "#cta",
+    ]:
         page.locator(sec).scroll_into_view_if_needed()
         page.wait_for_timeout(100)
     page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
@@ -745,7 +761,7 @@ def test_browser_landing_how_it_works_is_pinned_on_wide_screens(
     top = section.evaluate("e => e.getBoundingClientRect().top + window.scrollY")
     height = section.evaluate("e => e.offsetHeight")
     viewport = page.evaluate("window.innerHeight")
-    assert height > 2 * viewport, "How it works is not tall enough to pin"
+    assert height > 1.5 * viewport, "How it works is not tall enough to pin"
 
     # Scroll to the middle of the second step's range.
     page.evaluate(f"window.scrollTo(0, {top} + ({height} - {viewport}) * 0.37)")
@@ -757,6 +773,74 @@ def test_browser_landing_how_it_works_is_pinned_on_wide_screens(
     assert opacities[0] < 0.05 and opacities[3] < 0.05, opacities
     sticky = page.locator(".how-sticky").evaluate("e => getComputedStyle(e).position")
     assert sticky == "sticky"
+
+
+def test_browser_landing_how_it_works_has_no_empty_stretch(
+    page: Page,
+    live_server: str,
+) -> None:
+    """C-UI-2: the pinned section is at most 2 viewports tall (so a full-page render shows
+    under one viewport of empty space below the pinned frame), and at every scroll step
+    through it one step card is in focus."""
+    page.goto(f"{live_server}/")
+    section = page.locator("#how-it-works")
+    top = section.evaluate("e => e.getBoundingClientRect().top + window.scrollY")
+    height = section.evaluate("e => e.offsetHeight")
+    viewport = page.evaluate("window.innerHeight")
+    assert height <= 2 * viewport + 1, f"pinned section {height}px for viewport {viewport}px"
+
+    for step in range(21):
+        page.evaluate(f"window.scrollTo(0, {top} + ({height} - {viewport}) * {step / 20})")
+        page.wait_for_timeout(60)
+        best = page.locator(".how-card").evaluate_all(
+            "els => Math.max(...els.map(e => parseFloat(getComputedStyle(e).opacity)))"
+        )
+        assert best > 0.6, f"no step card in focus at {step * 5}% of the pinned range"
+
+
+def test_browser_landing_pill_nav_marks_active_section(
+    page: Page,
+    live_server: str,
+) -> None:
+    """C-UI-2: the floating pill nav stays hidden over the hero, appears once the hero is
+    scrolled past, highlights the section in view, and is never shown below 480 px."""
+    page.goto(f"{live_server}/")
+    pill_nav = page.locator(".pill-nav")
+    expect(pill_nav).to_be_hidden()
+
+    page.evaluate("document.querySelector('#features').scrollIntoView({block: 'center'})")
+    expect(pill_nav).to_be_visible()
+    active = page.locator(".pill-nav-link.is-active")
+    expect(active).to_have_count(1)
+    expect(active).to_have_attribute("href", "#features")
+    expect(active).to_have_attribute("aria-current", "true")
+
+    page.evaluate("window.scrollTo(0, 0)")
+    expect(pill_nav).to_be_hidden()
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.evaluate("document.querySelector('#features').scrollIntoView({block: 'center'})")
+    expect(pill_nav).to_be_hidden()
+
+
+def test_browser_landing_pill_nav_reduced_motion_and_no_js(
+    make_page,
+    live_server: str,
+) -> None:
+    """Reduced motion: the pill nav shows past the hero with no transition. Without
+    JavaScript it is always visible, so section links still work."""
+    with make_page(reduced_motion="reduce") as page:
+        page.goto(f"{live_server}/")
+        pill_nav = page.locator(".pill-nav")
+        expect(pill_nav).to_be_hidden()
+        page.evaluate("document.querySelector('#features').scrollIntoView({block: 'center'})")
+        expect(pill_nav).to_be_visible()
+        transition = pill_nav.evaluate("e => getComputedStyle(e).transitionDuration")
+        assert set(transition.replace(" ", "").split(",")) == {"0s"}, transition
+
+    with make_page(java_script_enabled=False) as page:
+        page.goto(f"{live_server}/")
+        expect(page.locator(".pill-nav")).to_be_visible()
 
 
 def test_browser_landing_page_cta_navigation(

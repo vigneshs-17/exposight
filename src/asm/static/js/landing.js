@@ -1,8 +1,9 @@
 /**
- * Landing page pointer tilt (C-UI-1).
- * All other motion is CSS (landing.css). This only sets CSS custom properties
+ * Landing page pointer tilt (C-UI-1) and pill-nav active state (C-UI-2).
+ * All other motion is CSS (landing.css). Tilt only sets CSS custom properties
  * (--rx, --ry, --mx, --my) on .tilt elements through style.setProperty, which the
  * strict CSP allows. Off for reduced motion and for touch/coarse pointers.
+ * The pill nav only toggles a class and aria-current.
  * No setAttribute('style'), no DOM html injection.
  */
 
@@ -14,6 +15,41 @@ document.addEventListener("DOMContentLoaded", function () {
   function reset(el) {
     el.style.setProperty("--rx", "0deg");
     el.style.setProperty("--ry", "0deg");
+  }
+
+  // Floating pill nav: hidden (class only) while the hero is in view, so it never covers
+  // the hero; without JavaScript it simply stays visible.
+  var pillNav = document.querySelector(".pill-nav");
+  var hero = document.getElementById("hero");
+  if ("IntersectionObserver" in window && pillNav && hero) {
+    pillNav.classList.add("is-hidden");
+    new IntersectionObserver(function (entries) {
+      pillNav.classList.toggle("is-hidden", entries[0].isIntersecting);
+    }, { rootMargin: "-64px 0px 0px 0px" }).observe(hero);
+  }
+
+  // Mark the link of the section in view (class + aria-current only).
+  var pillLinks = document.querySelectorAll(".pill-nav-link");
+  if ("IntersectionObserver" in window && pillLinks.length) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) {
+          return;
+        }
+        pillLinks.forEach(function (link) {
+          var active = link.getAttribute("href") === "#" + entry.target.id;
+          link.classList.toggle("is-active", active);
+          if (active) {
+            link.setAttribute("aria-current", "true");
+          } else {
+            link.removeAttribute("aria-current");
+          }
+        });
+      });
+    }, { rootMargin: "-45% 0px -50% 0px" });
+    document.querySelectorAll("section[data-nav]").forEach(function (section) {
+      observer.observe(section);
+    });
   }
 
   document.querySelectorAll(".tilt").forEach(function (el) {

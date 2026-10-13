@@ -13,7 +13,8 @@
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Exposight">
   <meta name="twitter:description" content="Attack surface reconnaissance for domains you have verified.">
-  <link rel="preload" href="/static/fonts/SpaceGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/PlusJakartaSans-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/Inter-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/css/landing.css">
   <script src="/static/js/landing.js" defer></script>
 </head>
@@ -31,31 +32,37 @@
         <a href="#how-it-works" class="landing-nav-link">How it works</a>
         <a href="#pipeline" class="landing-nav-link">What a scan checks</a>
         <a href="#features" class="landing-nav-link">Features</a>
-        <a href="/app" class="btn btn-ghost landing-signin-btn">Sign in</a>
+        <a href="/app" class="btn btn-primary landing-signin-btn">Sign in</a>
       </nav>
     </div>
   </header>
 
   <main id="main" class="landing-main">
     <!-- Hero -->
-    <section id="hero" class="hero-section">
+    <section id="hero" class="hero-section" data-nav>
       <div class="hero-backdrop" aria-hidden="true">
         <div class="hero-floor"></div>
-        <div class="hero-radar"></div>
       </div>
 
       <div class="landing-container hero-container">
         <div class="hero-copy">
+          <p class="status-pill mono"><span class="status-dot" aria-hidden="true"></span>Invite-only · scheduled scans</p>
           <h1 class="hero-title">
-            <span class="hero-line">Know every host</span>
-            <span class="hero-line">you expose.</span>
+            <span class="hero-line">Know every host you expose.</span>
             <span class="hero-line hero-line-accent">Scan only what you own.</span>
           </h1>
           <p class="hero-subhead">Exposight finds the subdomains, open ports and weak TLS on domains you have proven you control, and tells you when something changes.</p>
           <div class="hero-actions">
-            <a href="/app" class="btn btn-primary hero-cta-btn">Sign in to the dashboard</a>
-            <a href="#how-it-works" class="btn btn-ghost">See how it works</a>
+            <a href="/app" class="domain-box mono" aria-label="Sign in to add and verify a domain">
+              <span class="domain-box-text">example.com</span>
+            </a>
+            <a href="/app" class="btn btn-primary hero-cta-btn">Sign in to verify &amp; scan</a>
           </div>
+          <ul class="trust-labels mono">
+            <li>CT logs: crt.sh + CertSpotter</li>
+            <li>16 TCP ports · HTTP/HTTPS 80, 443</li>
+            <li>DNS TXT ownership check</li>
+          </ul>
         </div>
 
         <div class="hero-stage" aria-hidden="true">
@@ -96,14 +103,93 @@
           </div>
         </div>
       </div>
+
+      <div class="landing-container">
+        <figure class="recon-panel reveal">
+          <figcaption class="panel-bar">
+            <span class="window-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+            <span class="mono panel-title">Scan of example.com</span>
+            <span class="example-tag mono">Example</span>
+          </figcaption>
+          <div class="recon-panel-body">
+            <div class="radar" role="img" aria-label="Example radar: five subdomains found under example.com, one with a critical finding">
+              <span class="radar-sweep"></span>
+              <span class="radar-dot radar-dot-1"></span>
+              <span class="radar-dot radar-dot-2"></span>
+              <span class="radar-dot radar-dot-3"></span>
+              <span class="radar-dot radar-dot-4"></span>
+              <span class="radar-dot radar-dot-5 radar-dot-critical"></span>
+            </div>
+            <ol class="scan-feed mono" aria-label="Example scan feed">
+              <li><time>09:00:00</time><span class="feed-stage">scan</span><span>example.com, scheduled run</span></li>
+              <li><time>09:00:02</time><span class="feed-stage">discover</span><span>crt.sh + CertSpotter: 6 names</span></li>
+              <li><time>09:00:04</time><span class="feed-stage">resolve</span><span>db.example.com A 198.51.100.12</span></li>
+              <li><time>09:00:07</time><span class="feed-stage">probe</span><span>https://api.example.com 200</span></li>
+              <li><time>09:00:11</time><span class="feed-stage">ports</span><span>db.example.com 3306/tcp open (mysql)</span></li>
+              <li><time>09:00:14</time><span class="feed-stage">tls</span><span>staging.example.com certificate expired</span></li>
+              <li class="feed-critical"><time>09:00:15</time><span class="feed-stage">score</span><span>CRITICAL db.example.com Confirmed Exposed Database Service</span></li>
+            </ol>
+          </div>
+        </figure>
+      </div>
+    </section>
+
+    <!-- Surface: example topology + inventory -->
+    <section id="surface" class="landing-section surface-section" data-nav>
+      <div class="landing-container">
+        <p class="section-label mono reveal">Attack surface</p>
+        <h2 class="section-title reveal">From apex domain to <span class="accent">exposed subdomains</span></h2>
+        <p class="section-lead reveal">Discovery reads Certificate Transparency logs for names under your apex domain and resolves their A and AAAA records. Each host is then probed, port-scanned, inspected and scored.</p>
+
+        <div class="surface-grid">
+          <figure class="topology panel reveal">
+            <figcaption class="panel-bar">
+              <span class="mono panel-title">Topology</span>
+              <span class="example-tag mono">Example</span>
+            </figcaption>
+            <div class="topology-body">
+              <span class="topo-apex mono">example.com</span>
+              <ul class="topo-children mono" aria-label="Example subdomains of example.com">
+                <li class="topo-node">www.example.com</li>
+                <li class="topo-node">api.example.com</li>
+                <li class="topo-node">staging.example.com</li>
+                <li class="topo-node">mail.example.com</li>
+                <li class="topo-node topo-node-critical">db.example.com <span class="chip-sev sev-critical">3306 open</span></li>
+              </ul>
+            </div>
+          </figure>
+
+          <figure class="inventory panel reveal">
+            <figcaption class="panel-bar">
+              <span class="mono panel-title">Inventory, ordered by severity</span>
+              <span class="example-tag mono">Example</span>
+            </figcaption>
+            <div class="table-scroll">
+              <table class="inventory-table">
+                <thead>
+                  <tr><th scope="col">Host</th><th scope="col">Address</th><th scope="col">Open ports</th><th scope="col">Top finding</th><th scope="col">Severity</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="mono">db.example.com</td><td class="mono">198.51.100.12</td><td class="mono">3306</td><td>Confirmed Exposed Database Service</td><td><span class="chip-sev sev-critical">Critical</span></td></tr>
+                  <tr><td class="mono">staging.example.com</td><td class="mono">198.51.100.7</td><td class="mono">22, 443</td><td>Expired TLS Certificate</td><td><span class="chip-sev sev-high">High</span></td></tr>
+                  <tr><td class="mono">mail.example.com</td><td class="mono">198.51.100.30</td><td class="mono">25</td><td>Cleartext Protocol Service</td><td><span class="chip-sev sev-medium">Medium</span></td></tr>
+                  <tr><td class="mono">api.example.com</td><td class="mono">192.0.2.24</td><td class="mono">443</td><td>Certificate Expiring Soon (&lt;=30 Days)</td><td><span class="chip-sev sev-medium">Medium</span></td></tr>
+                  <tr><td class="mono">www.example.com</td><td class="mono">192.0.2.10</td><td class="mono">80, 443</td><td>Missing Content-Security-Policy (CSP)</td><td><span class="chip-sev sev-low">Low</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </figure>
+        </div>
+      </div>
     </section>
 
     <!-- How it works: pinned sequence -->
-    <section id="how-it-works" class="how-section">
+    <section id="how-it-works" class="how-section" data-nav>
       <div class="how-sticky">
         <div class="landing-container how-container">
           <div class="how-intro">
-            <h2 class="section-title">From domain to alert in four steps</h2>
+            <p class="section-label mono">How it works</p>
+            <h2 class="section-title">From domain to alert in <span class="accent">four steps</span></h2>
             <ol class="how-rail" aria-hidden="true">
               <li class="how-rail-item"><span class="mono">01</span> Add domain</li>
               <li class="how-rail-item"><span class="mono">02</span> Verify</li>
@@ -128,9 +214,8 @@
               <span class="how-card-step mono">Step 02</span>
               <h3 class="how-card-title">Prove you own it</h3>
               <p class="how-card-text trust-lead">Active scans run only on domains you have verified with a DNS TXT record at _exposight-challenge.&lt;domain&gt;. A time-limited operator override exists for exceptional cases.</p>
-              <div class="trust-code-chassis">
-                <span class="mono code-label">DNS TXT verification record</span>
-                <code class="trust-code">{{ txt_label }} IN TXT &quot;{{ txt_example }}&quot;</code>
+              <div class="how-card-visual mono" aria-hidden="true">
+                <span class="chip chip-ok">verified</span>
               </div>
             </li>
 
@@ -159,15 +244,16 @@
     </section>
 
     <!-- What a scan checks -->
-    <section id="pipeline" class="landing-section pipeline-section">
+    <section id="pipeline" class="landing-section pipeline-section" data-nav>
       <div class="landing-container">
+        <p class="section-label mono reveal">Scan stages</p>
         <h2 class="section-title reveal">What a scan checks</h2>
         <ol class="stages-list">
           <li class="stage-step-card reveal">
             <span class="stage-step-num mono">01</span>
             <div>
               <h3 class="stage-step-title">Passive subdomain discovery</h3>
-              <p class="stage-step-text">Queries Certificate Transparency logs and resolves live A (IPv4) and AAAA (IPv6) records without touching target hosts directly.</p>
+              <p class="stage-step-text">Queries Certificate Transparency logs through crt.sh and CertSpotter, and resolves A (IPv4) and AAAA (IPv6) records without touching target hosts directly.</p>
             </div>
             <span class="stage-step-source mono">discovery.py, resolver.py</span>
           </li>
@@ -191,7 +277,7 @@
             <span class="stage-step-num mono">04</span>
             <div>
               <h3 class="stage-step-title">TLS and header inspection</h3>
-              <p class="stage-step-text">Evaluates certificate validity and deprecated TLS, and checks security headers such as HSTS, CSP and X-Content-Type-Options.</p>
+              <p class="stage-step-text">Evaluates certificate validity, expiry and deprecated TLS, and checks security headers such as HSTS, CSP, X-Frame-Options and X-Content-Type-Options.</p>
             </div>
             <span class="stage-step-source mono">tls_inspect.py, headers_inspect.py</span>
           </li>
@@ -208,9 +294,10 @@
     </section>
 
     <!-- Features -->
-    <section id="features" class="landing-section features-section">
+    <section id="features" class="landing-section features-section" data-nav>
       <div class="landing-container">
-        <h2 class="section-title reveal">Built for the people who answer for the perimeter</h2>
+        <p class="section-label mono reveal">Features</p>
+        <h2 class="section-title reveal">Built for the people who answer for the <span class="accent">perimeter</span></h2>
         <div class="features-grid">
           <article class="feature-item tilt reveal">
             <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></svg>
@@ -233,10 +320,31 @@
             <p class="feature-desc">Append-only audit log: a database trigger blocks updates, deletes and truncates from the application.</p>
           </article>
           <article class="feature-item tilt reveal">
-            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
             <h3 class="feature-title">Tenant isolation</h3>
-            <p class="feature-desc">Owner, admin and viewer roles. Every query is scoped to the organization, and another tenant's ids return 404.</p>
+            <p class="feature-desc">Every query is scoped to the organization, and another tenant's ids return 404.</p>
           </article>
+          <article class="feature-item tilt reveal">
+            <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>
+            <h3 class="feature-title">Roles and invites</h3>
+            <p class="feature-desc">Owner, admin and viewer roles. Organizations are created by allow-listed accounts; everyone else joins by invite.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Ownership verification -->
+    <section id="ownership" class="landing-section ownership-section" data-nav>
+      <div class="landing-container ownership-container">
+        <div class="ownership-copy reveal">
+          <p class="section-label mono">Ownership verification</p>
+          <h2 class="section-title">Scan only <span class="accent">what you own</span></h2>
+          <p class="section-lead">Before any active scan, you publish a TXT record with a token from the dashboard. Exposight looks it up through public resolvers, never the server's own, and keeps scanning only while the record checks out.</p>
+          <p class="section-lead">Probing and port scanning touch real hosts. Tying them to DNS control keeps Exposight pointed at your own infrastructure, not someone else's.</p>
+        </div>
+        <div class="trust-code-chassis panel reveal">
+          <span class="mono code-label">DNS TXT verification record</span>
+          <code class="trust-code">{{ txt_label }} IN TXT &quot;{{ txt_example }}&quot;</code>
         </div>
       </div>
     </section>
@@ -244,7 +352,7 @@
     <!-- CTA -->
     <section id="cta" class="landing-section cta-section">
       <div class="landing-container cta-container reveal">
-        <h2 class="cta-title">Watch the domains you own.</h2>
+        <h2 class="cta-title">Watch the domains <span class="accent">you own.</span></h2>
         <p class="cta-desc">Sign in to see your domain inventory, set scan schedules and work through findings.</p>
         <div class="cta-action">
           <a href="/app" class="btn btn-primary cta-btn">Sign in to the dashboard</a>
@@ -252,6 +360,15 @@
       </div>
     </section>
   </main>
+
+  <nav class="pill-nav" aria-label="Section navigation">
+    <a href="#hero" class="pill-nav-link">Overview</a>
+    <a href="#surface" class="pill-nav-link">Surface</a>
+    <a href="#how-it-works" class="pill-nav-link">How it works</a>
+    <a href="#pipeline" class="pill-nav-link">Checks</a>
+    <a href="#features" class="pill-nav-link">Features</a>
+    <a href="#ownership" class="pill-nav-link">Ownership</a>
+  </nav>
 
   <footer class="landing-footer">
     <div class="landing-container footer-container">

@@ -275,8 +275,10 @@ def test_templates_package_data_exists():
         ("static", "fonts", "IBMPlexSans-Regular.woff2"),
         ("static", "fonts", "IBMPlexSans-SemiBold.woff2"),
         ("static", "fonts", "IBMPlexMono-Regular.woff2"),
-        ("static", "fonts", "SpaceGrotesk-Variable.woff2"),
-        ("static", "fonts", "SpaceGrotesk-OFL.txt"),
+        ("static", "fonts", "PlusJakartaSans-Variable.woff2"),
+        ("static", "fonts", "PlusJakartaSans-OFL.txt"),
+        ("static", "fonts", "Inter-Variable.woff2"),
+        ("static", "fonts", "Inter-OFL.txt"),
     ]
     pkg_files = importlib.resources.files("asm")
     for parts in expected_files:
@@ -328,18 +330,69 @@ def test_landing_page_loads_no_external_origins():
         assert banned not in html.lower() and banned not in css.lower(), banned
 
 
+LANDING_FONTS = [
+    ("PlusJakartaSans-Variable.woff2", "PlusJakartaSans-OFL.txt"),
+    ("Inter-Variable.woff2", "Inter-OFL.txt"),
+    ("IBMPlexMono-Regular.woff2", "OFL.txt"),
+]
+
+
 def test_landing_font_is_self_hosted_with_licence():
-    """The landing font is served from /static/fonts/ as real woff2, with its OFL licence."""
+    """C-UI-2: every landing font is served from /static/fonts/ as real woff2, with its OFL
+    licence; Space Grotesk (C-UI-1) is gone."""
     css = LANDING_CSS.read_text(encoding="utf-8")
-    assert 'url("/static/fonts/SpaceGrotesk-Variable.woff2") format("woff2")' in css
-    assert '<link rel="preload" href="/static/fonts/SpaceGrotesk-Variable.woff2"' in _landing_html()
+    html = _landing_html()
+    assert "SpaceGrotesk" not in css and "Space Grotesk" not in css
+    assert "SpaceGrotesk" not in html
+    assert '<link rel="preload" href="/static/fonts/PlusJakartaSans-Variable.woff2"' in html
     with TestClient(app) as client:
-        font = client.get("/static/fonts/SpaceGrotesk-Variable.woff2")
-        assert font.status_code == 200
-        assert font.content[:4] == b"wOF2"
-        licence = client.get("/static/fonts/SpaceGrotesk-OFL.txt")
-        assert licence.status_code == 200
-        assert "SIL Open Font License, Version 1.1" in licence.text
+        for font_file, licence_file in LANDING_FONTS:
+            assert f'url("/static/fonts/{font_file}") format("woff2")' in css
+            font = client.get(f"/static/fonts/{font_file}")
+            assert font.status_code == 200
+            assert font.content[:4] == b"wOF2"
+            licence = client.get(f"/static/fonts/{licence_file}")
+            assert licence.status_code == 200
+            assert "SIL Open Font License, Version 1.1" in licence.text
+        assert client.get("/static/fonts/SpaceGrotesk-Variable.woff2").status_code == 404
+
+
+def test_landing_example_data_is_labelled_and_uses_reserved_names():
+    """C-UI-2 (DESIGN.md section 1): example panels are labelled "Example" and use only
+    example.com names and documentation IPs; banned Stitch-mock claims never appear."""
+    html = _landing_html()
+    assert html.count(">Example</span>") >= 3, "radar/feed, topology and inventory need labels"
+    text = re.sub(r"<[^>]+>", " ", html).lower()  # visible text only, not file names in tags
+    for host in re.findall(r"\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|co)\b", text):
+        assert host == "example.com" or host.endswith(".example.com"), host
+    for ip in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text):
+        assert ip.startswith(("192.0.2.", "198.51.100.", "203.0.113.")), ip
+    for banned in (
+        "acme-corp",
+        "google argon",
+        "cloudflare",
+        "digicert",
+        "cryptographic",
+        "zero false",
+        "no noise",
+        "zero-agent",
+        "real-time",
+        "realtime",
+        "live ingestion",
+        "continuous",
+        "asn",
+        "bgp",
+        "shodan",
+        "multi-cloud",
+        "subsidiar",
+        "cve",
+        "cvss",
+        "zero-day",
+        "sensor access",
+        "uptime",
+        "gb/s",
+    ):
+        assert not re.search(rf"\b{re.escape(banned)}", text), banned
 
 
 def test_landing_css_respects_reduced_motion():
