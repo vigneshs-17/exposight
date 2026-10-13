@@ -294,7 +294,7 @@ def _landing_html() -> str:
         os.environ,
         {
             "SUPABASE_URL": "https://testproj.supabase.co",
-            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_1",
         },
     ):
         reset_auth_dependencies()

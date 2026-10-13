@@ -10,6 +10,8 @@
 682df8e94ece5e342a5b9ecc330cbc3f746d6817:tests/test_dashboard_ui.py:generic-api-key:63
 51d6fd7eb6f94536ddfc3b6b3c510f9b916a4e09:tests/test_dashboard_ui.py:generic-api-key:43
 51d6fd7eb6f94536ddfc3b6b3c510f9b916a4e09:tests/test_dashboard_ui.py:generic-api-key:69
+# C-UI-1 _landing_html() fixture, same "anon_key_test_12345" value (now "anon_key_1").
+05979036217fa2c45d1f882dddd35d9cf3b6597f:tests/test_dashboard_ui.py:generic-api-key:297
 
 # README.md: the documented example domain-verification token
 # "k8P2qZ_v9LmNx0R4tYw1sA2bC3dE4fG5hI6jK7lM8nO" (visibly synthetic). Verification tokens
