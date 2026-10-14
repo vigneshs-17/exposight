@@ -227,10 +227,10 @@ def test_static_files_served_correctly():
         assert resp_st.status_code == 200
         assert len(resp_st.content) > 10000
 
-        # Stylesheet (verifies palette concept comment exists)
+        # Stylesheet (verifies the DESIGN.md concept comment exists)
         resp_css = client.get("/static/css/app.css")
         assert resp_css.status_code == 200
-        assert "A crisp radar-inspired visual hierarchy" in resp_css.text
+        assert "the signed-in dashboard on the DESIGN.md tokens" in resp_css.text
 
         # Landing CSS & JS
         resp_landing_css = client.get("/static/css/landing.css")
@@ -238,8 +238,8 @@ def test_static_files_served_correctly():
         resp_landing_js = client.get("/static/js/landing.js")
         assert resp_landing_js.status_code == 200
 
-        # IBM Plex Fonts
-        resp_font = client.get("/static/fonts/IBMPlexSans-Regular.woff2")
+        # Dashboard body font
+        resp_font = client.get("/static/fonts/Inter-Variable.woff2")
         assert resp_font.status_code == 200
         assert len(resp_font.content) > 10000
 
@@ -272,8 +272,6 @@ def test_templates_package_data_exists():
         ("static", "vendor", "ScrollTrigger.min.js"),
         ("static", "css", "app.css"),
         ("static", "css", "landing.css"),
-        ("static", "fonts", "IBMPlexSans-Regular.woff2"),
-        ("static", "fonts", "IBMPlexSans-SemiBold.woff2"),
         ("static", "fonts", "IBMPlexMono-Regular.woff2"),
         ("static", "fonts", "PlusJakartaSans-Variable.woff2"),
         ("static", "fonts", "PlusJakartaSans-OFL.txt"),

@@ -244,6 +244,37 @@ def test_browser_email_chips_interaction(
     expect(error_box).to_contain_text("Maximum of 5 alert emails allowed.")
 
 
+def test_browser_add_recipient_input_is_single_line_on_phone(
+    make_page,
+    live_server: str,
+    browser_session_factory: sessionmaker[Session],
+) -> None:
+    """C-UI-3: at 390px the add-recipient input keeps a single-line height, button below it."""
+    with browser_session_factory() as session:
+        user = User(id=UUID("00000000-0000-0000-0000-0000000000c4"), email="phone@example.com")
+        org = Organization(name="Phone Org")
+        session.add_all([user, org])
+        session.flush()
+        session.add_all(
+            [
+                Membership(org_id=org.id, user_id=user.id, role="owner"),
+                Domain(org_id=org.id, name="phone.example.com", verification_status="verified"),
+            ]
+        )
+        session.commit()
+
+    with make_page(viewport={"width": 390, "height": 844}) as page:
+        sign_in(page, "phone@example.com", live_server)
+        page.locator(".btn-view-domain").click()
+        email_input = page.locator("#input-alert-email")
+        expect(email_input).to_be_visible()
+        box = email_input.bounding_box()
+        btn = page.locator("#btn-add-alert-email").bounding_box()
+        assert box is not None and btn is not None
+        assert box["height"] < 60, f"add-recipient input is {box['height']}px tall at 390px"
+        assert btn["y"] >= box["y"] + box["height"], "Add email button is not below the input"
+
+
 def test_browser_alerts_save_decision_a(
     page: Page,
     live_server: str,
