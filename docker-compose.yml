@@ -74,7 +74,7 @@ services:
         condition: service_completed_successfully
 
   mailpit:
-    image: axllent/mailpit:v1.31.4
+    image: axllent/mailpit:v1.31.5
     profiles: ["dev"]
     restart: unless-stopped
     ports:
