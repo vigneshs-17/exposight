@@ -19,7 +19,7 @@ All third-party images and services used in production are pinned to specific im
 - **Role**: Relational store and append-only trigger-protected audit log (tenant isolation is enforced in application queries, not Postgres row-level security). Port 5432 is strictly bound to the internal `app-tier` Docker bridge network (`10.89.0.0/24`) and is never published to the host.
 
 ### Application & Worker
-- **Base Image**: `python:3.12.14-slim-trixie`
+- **Base Image**: `python:3.12.15-slim-trixie`
 - **Supported Architectures**: `linux/amd64`, `linux/arm64`
 - **User**: Non-root system user `asm` (UID 10001, GID 10001).
 

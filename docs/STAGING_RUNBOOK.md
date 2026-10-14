@@ -47,7 +47,7 @@ Staging resources must be provisioned inside a dedicated, isolated Azure resourc
 - Pinned third-party images (referenced in `compose.prod.yml` and Dockerfile):
   - `postgres:18.6-alpine`
   - `caddy:2.11.4-alpine`
-  - `python:3.12.14-slim-trixie`
+  - `python:3.12.15-slim-trixie`
 
 ---
 
