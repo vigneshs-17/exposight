@@ -70,3 +70,11 @@ def test_dashboard_header_has_logo_and_controls():
     for element_id in ("org-switcher-select", "user-email-display", "signout-button"):
         assert f'id="{element_id}"' in html
     assert "style=" not in html and "<style" not in html
+
+
+def test_hover_border_is_a_documented_token():
+    css = _css()
+    assert css.count("#3F3F46") == 1 and "--border-hover: #3F3F46;" in css
+    design = (ROOT.parent.parent / "DESIGN.md").read_text(encoding="utf-8")
+    for documented in ("--border-hover: #3F3F46", "#F87171", "#60A5FA"):
+        assert documented in design, f"DESIGN.md does not document {documented}"

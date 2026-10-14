@@ -42,6 +42,7 @@
   --surface-3: #18191D;
   --border: #27272A;
   --border-subtle: #1E1F24;
+  --border-hover: #3F3F46;
   --text: #FAFAFA;
   --text-muted: #A1A1AA;
   --text-faint: #52525B;
@@ -257,7 +258,7 @@ h3.panel-title {
 }
 
 .form-input:hover, .form-select:hover {
-  border-color: #3F3F46;
+  border-color: var(--border-hover);
 }
 
 .form-input:focus, .form-select:focus {
@@ -772,6 +773,20 @@ input[type="checkbox"] {
   justify-content: space-between;
   align-items: center;
   margin-top: 1rem;
+}
+
+/* Error pages (404, 403, 500) */
+.error-main {
+  max-width: 560px;
+}
+
+.error-code {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
 }
 
 /* Phones (390 px): stack inline forms, keep tables scrolling inside their container */

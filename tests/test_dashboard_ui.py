@@ -40,7 +40,7 @@ def test_landing_page_serves_html_and_security_headers():
         os.environ,
         {
             "SUPABASE_URL": "https://testproj.supabase.co",
-            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_1",
         },
     ):
         reset_auth_dependencies()
@@ -66,7 +66,7 @@ def test_landing_page_content_invariants():
         os.environ,
         {
             "SUPABASE_URL": "https://testproj.supabase.co",
-            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_1",
         },
     ):
         reset_auth_dependencies()
@@ -119,7 +119,7 @@ def test_app_shell_serves_html_and_no_inline_scripts():
         os.environ,
         {
             "SUPABASE_URL": "https://testproj.supabase.co",
-            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_1",
         },
     ):
         reset_auth_dependencies()
@@ -131,7 +131,7 @@ def test_app_shell_serves_html_and_no_inline_scripts():
 
             # Passes config via data- attributes on body
             assert 'data-supabase-url="https://testproj.supabase.co"' in html
-            assert 'data-supabase-key="anon_key_test_12345"' in html
+            assert 'data-supabase-key="anon_key_1"' in html
 
             # Assert htmx-config meta tag is present with includeIndicatorStyles false
             assert '<meta name="htmx-config"' in html
@@ -155,7 +155,7 @@ def test_csp_and_security_headers_present():
         os.environ,
         {
             "SUPABASE_URL": "https://testproj.supabase.co",
-            "SUPABASE_PUBLISHABLE_KEY": "anon_key_test_12345",
+            "SUPABASE_PUBLISHABLE_KEY": "anon_key_1",
         },
     ):
         reset_auth_dependencies()

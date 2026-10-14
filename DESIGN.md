@@ -5,7 +5,7 @@ Visual tokens are taken from the Stitch export. All copy rules below override th
 the mock contained claims the product does not make, and those are listed under "Do not use".
 
 Scope: the public landing page (`templates/landing.html`, `static/css/landing.css`, `static/js/landing.js`).
-The dashboard is out of scope for this spec.
+The dashboard follows the same tokens; its additions are in section 9.
 
 ---
 
@@ -150,3 +150,22 @@ Suggested hero headline (C-UI-1, shorter and true):
 - "Zero-agent", "real-time", "live ingestion", "continuous" as literal claims → scans are scheduled; use "scheduled" or "on a schedule".
 - ASN, BGP, Shodan, multi-cloud, subsidiaries, CVE / CVSS / zero-day, "Request Sensor Access", invented counters (nodes, GB/s, latency, uptime).
 - `acme-corp.com` or any real-looking company domain → use `example.com`.
+
+---
+
+## 9. Dashboard additions (C-UI-3, C-UI-4)
+
+The dashboard (`static/css/app.css`) and the error pages use the tokens above, plus:
+
+| Token / value | Use | Why |
+|---|---|---|
+| `--border-hover: #3F3F46` | input and select border on hover | one step lighter than `--border`, so hover is visible without the accent (cyan stays for focus) |
+| `#F87171` | Critical chip **text** | `#EF4444` text on its own chip background over the hover row `#18191D` is 4.0:1, below WCAG AA 4.5:1; `#F87171` is 5.4:1 |
+| `#60A5FA` | Low chip **text** | `#3B82F6` is 4.0:1 there; `#60A5FA` is 5.8:1 |
+
+Chip borders and backgrounds keep the section 2 values; only the text of these two tiers is lighter.
+All other chip texts pass AA with the section 2 colours (lowest: High `#F97316` at 5.1:1).
+
+- **Error pages** (404, 403, 500 for browser page requests): `templates/error.html`, the dashboard header with the radar logo, one panel with a mono "Error NNN" label, a title, one sentence and links to `/` and `/app`. They never show the path, the error or any request data.
+- **Favicon:** `static/favicon.svg`, the radar mark in `--accent` on a `--bg` rounded square.
+- **Social image:** `static/og-image.png`, 1200x630, `--bg`, radar mark, "Exposight", the hero lines (second line in `--accent`) and a mono label. No numbers or claims beyond section 7.

@@ -874,6 +874,42 @@ def test_browser_landing_pill_nav_reduced_motion_and_no_js(
         expect(page.locator(".pill-nav")).to_be_visible()
 
 
+def test_browser_landing_signin_label_reflects_session_key(
+    make_page,
+    live_server: str,
+) -> None:
+    """C-UI-4: the header label reads "Open dashboard" only when a Supabase session key is in
+    sessionStorage; no key, JavaScript off, or a throwing sessionStorage keep "Sign in".
+    make_page fails the test on page errors, CSP violations and off-origin requests."""
+    label = ".landing-header .landing-signin-btn"
+
+    with make_page() as page:
+        page.add_init_script("sessionStorage.setItem('sb-test-auth-token', 'dummy');")
+        page.goto(f"{live_server}/")
+        expect(page.locator(label)).to_have_text("Open dashboard")
+        expect(page.locator(label)).to_have_attribute("href", "/app")
+        assert page.evaluate("window.__cspViolations.length") == 0
+
+    with make_page() as page:
+        page.add_init_script("sessionStorage.setItem('unrelated-key', 'x');")
+        page.goto(f"{live_server}/")
+        page.wait_for_load_state("load")
+        expect(page.locator(label)).to_have_text("Sign in")
+
+    with make_page() as page:
+        page.add_init_script(
+            "Object.defineProperty(window, 'sessionStorage', "
+            "{get() { throw new Error('storage blocked'); }});"
+        )
+        page.goto(f"{live_server}/")
+        page.wait_for_load_state("load")
+        expect(page.locator(label)).to_have_text("Sign in")
+
+    with make_page(java_script_enabled=False) as page:
+        page.goto(f"{live_server}/")
+        expect(page.locator(label)).to_have_text("Sign in")
+
+
 def test_browser_landing_page_cta_navigation(
     page: Page,
     live_server: str,

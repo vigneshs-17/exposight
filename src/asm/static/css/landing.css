@@ -1127,6 +1127,73 @@ a {
   color: var(--accent);
 }
 
+/* Terms page (/terms): long-form text on the landing theme */
+.terms-content {
+  max-width: 72ch;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.terms-content .section-title {
+  max-width: none;
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.terms-updated {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 40px;
+}
+
+.terms-content h2 {
+  margin: 40px 0 12px;
+  font-family: var(--display);
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+
+.terms-content p,
+.terms-content ul {
+  margin: 0 0 16px;
+}
+
+.terms-content ul {
+  padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.terms-content li::marker {
+  color: var(--text-faint);
+}
+
+.terms-content li + li {
+  margin-top: 8px;
+}
+
+.terms-content code {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1px 6px;
+  overflow-wrap: anywhere;
+}
+
+.terms-content a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* ---------------------------------------------------------------------------
  * Motion. Everything below runs only when the visitor has not asked for less motion.
  * ------------------------------------------------------------------------- */

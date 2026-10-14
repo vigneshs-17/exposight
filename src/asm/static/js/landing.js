@@ -3,7 +3,8 @@
  * All other motion is CSS (landing.css). Tilt only sets CSS custom properties
  * (--rx, --ry, --mx, --my) on .tilt elements through style.setProperty, which the
  * strict CSP allows. Off for reduced motion and for touch/coarse pointers.
- * The pill nav only toggles a class and aria-current.
+ * The pill nav only toggles a class and aria-current. The header Sign in label reads
+ * "Open dashboard" when a Supabase session key exists in sessionStorage (C-UI-4).
  * No setAttribute('style'), no DOM html injection.
  */
 
@@ -15,6 +16,21 @@ document.addEventListener("DOMContentLoaded", function () {
   function reset(el) {
     el.style.setProperty("--rx", "0deg");
     el.style.setProperty("--ry", "0deg");
+  }
+
+  // Signed in already (same tab): the dashboard keeps its Supabase session in sessionStorage
+  // under "sb-<project>-auth-token". Only key names are checked; the token is never read,
+  // parsed or sent. A label hint only: /app still verifies the session (C-UI-4).
+  var signIn = document.querySelector(".landing-header .landing-signin-btn");
+  try {
+    for (var i = 0; signIn && i < window.sessionStorage.length; i++) {
+      if (/^sb-.+-auth-token$/.test(window.sessionStorage.key(i))) {
+        signIn.textContent = "Open dashboard";
+        break;
+      }
+    }
+  } catch (err) {
+    // Storage blocked (privacy mode, sandbox): keep "Sign in".
   }
 
   // Floating pill nav: hidden (class only) while the hero is in view, so it never covers

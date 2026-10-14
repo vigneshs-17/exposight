@@ -5,15 +5,17 @@ import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, Response, status
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from asm.api.deps import get_current_auth_settings
 from asm.api.routes import public_router, router
 from asm.api.routes_orgs import invites_router, me_router
 from asm.api.routes_orgs import router as orgs_router
-from asm.api.routes_ui import build_csp_header, ui_router
+from asm.api.routes_ui import build_csp_header, templates_env, ui_router
 from asm.config import enforce_production_config, is_production
 from asm.logredact import install_log_redaction
 from asm.ratelimit import UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP, limiter
@@ -87,34 +89,73 @@ async def unauthenticated_rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+PAGE_PATH_PREFIXES = ("/app", "/ui", "/static")
+
+# First path segment of every JSON API, HTMX partial, static or docs route. Requests under
+# these never get an HTML error page, whatever their Accept header says (C-UI-4).
+NON_PAGE_SEGMENTS = frozenset(
+    {"orgs", "invites", "me", "health", "ui", "static", "docs", "redoc", "openapi.json"}
+)
+
+ERROR_PAGES = {
+    403: ("Access denied", "You do not have access to this page."),
+    404: ("Page not found", "This page does not exist."),
+    500: ("Something went wrong", "The server could not complete this request. Try again later."),
+}
+
+
+def apply_response_security_headers(path: str, response: Response) -> None:
+    """Set the security headers for a response to `path`. The one place they are defined:
+    used by the middleware and by the 500 handler, which runs outside every middleware."""
+    headers = response.headers
+    if path == "/" or path.startswith(PAGE_PATH_PREFIXES):
+        if "Content-Security-Policy" not in headers:
+            headers["Content-Security-Policy"] = build_csp_header(
+                get_current_auth_settings().supabase_url
+            )
+        if path.startswith("/ui"):
+            headers["Cache-Control"] = "no-store"
+    else:
+        # JSON API, /health, docs and 404s: never cached (tenant data), never framed.
+        # Framing-only CSP so the dev Swagger UI still loads its assets.
+        headers.setdefault("Cache-Control", "no-store")
+        headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    if response.status_code >= 400:
+        headers.setdefault("Cache-Control", "no-store")  # error responses are never cached
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("Referrer-Policy", "no-referrer")
+    # Clickjacking: legacy header for browsers without CSP frame-ancestors (H-Hdr-1).
+    headers["X-Frame-Options"] = "DENY"
+
+
 @app.middleware("http")
 async def add_security_headers_middleware(request: Request, call_next):
     """Enforce strict CSP on HTML pages and nosniff/no-store on every other response."""
     response = await call_next(request)
-    path = request.url.path
-    if (
-        path == "/"
-        or path.startswith("/app")
-        or path.startswith("/ui")
-        or path.startswith("/static")
-    ):
-        settings = get_current_auth_settings()
-        if "Content-Security-Policy" not in response.headers:
-            response.headers["Content-Security-Policy"] = build_csp_header(settings.supabase_url)
-        if "X-Content-Type-Options" not in response.headers:
-            response.headers["X-Content-Type-Options"] = "nosniff"
-        if "Referrer-Policy" not in response.headers:
-            response.headers["Referrer-Policy"] = "no-referrer"
-        if path.startswith("/ui"):
-            response.headers["Cache-Control"] = "no-store"
-    else:
-        # JSON API, /health, docs and 404s: never MIME-sniffed, never cached (tenant data),
-        # never framed. Framing-only CSP so the dev Swagger UI still loads its assets.
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("Cache-Control", "no-store")
-        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
-    # Clickjacking: legacy header for browsers without CSP frame-ancestors (H-Hdr-1).
-    response.headers["X-Frame-Options"] = "DENY"
+    apply_response_security_headers(request.url.path, response)
+    return response
+
+
+def is_page_request(request: Request) -> bool:
+    """A browser navigation to a page: asks for HTML and is not an API/partial/asset path."""
+    segment = request.url.path.split("/")[1]
+    return "text/html" in request.headers.get("accept", "") and segment not in NON_PAGE_SEGMENTS
+
+
+def render_error_page(request: Request, status_code: int) -> HTMLResponse:
+    """Themed error page. Never echoes the path, the exception or other request data."""
+    title, message = ERROR_PAGES[status_code]
+    html = templates_env.get_template("error.html").render(
+        status_code=status_code, title=title, message=message
+    )
+    response = HTMLResponse(html, status_code=status_code)
+    try:
+        supabase_url = get_current_auth_settings().supabase_url
+    except Exception:  # an error page must render even when settings are the problem
+        supabase_url = ""
+    response.headers["Content-Security-Policy"] = build_csp_header(supabase_url)
+    response.headers["Cache-Control"] = "no-store"
+    apply_response_security_headers(request.url.path, response)
     return response
 
 
@@ -128,11 +169,26 @@ app.include_router(invites_router)
 app.include_router(me_router)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def page_aware_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """HTML error page for browser page requests (403/404); FastAPI's JSON otherwise."""
+    if exc.status_code in ERROR_PAGES and is_page_request(request):
+        return render_error_page(request, exc.status_code)
+    return await http_exception_handler(request, exc)
+
+
 @app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Ensure unhandled internal server errors never leak stack traces to clients."""
+async def generic_exception_handler(request: Request, exc: Exception) -> Response:
+    """Ensure unhandled internal server errors never leak stack traces to clients.
+
+    Runs in Starlette's outermost ServerErrorMiddleware, outside add_security_headers_middleware,
+    so it sets the security headers itself (before C-UI-4 a 500 carried none)."""
     logger.exception("Unhandled server exception processing request: %s", request.url)
-    return JSONResponse(
+    if is_page_request(request):
+        return render_error_page(request, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    response = JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal server error. Please consult system logs."},
     )
+    apply_response_security_headers(request.url.path, response)
+    return response
