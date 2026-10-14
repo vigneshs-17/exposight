@@ -75,6 +75,7 @@ services:
       - "1"
       - "--proxy-headers"
       - "--forwarded-allow-ips=10.89.0.0/24"
+      - "--no-server-header"
     restart: unless-stopped
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-production}

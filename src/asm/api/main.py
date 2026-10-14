@@ -108,9 +108,13 @@ async def add_security_headers_middleware(request: Request, call_next):
         if path.startswith("/ui"):
             response.headers["Cache-Control"] = "no-store"
     else:
-        # JSON API, /health and docs: never MIME-sniffed, never cached (tenant data).
+        # JSON API, /health, docs and 404s: never MIME-sniffed, never cached (tenant data),
+        # never framed. Framing-only CSP so the dev Swagger UI still loads its assets.
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    # Clickjacking: legacy header for browsers without CSP frame-ancestors (H-Hdr-1).
+    response.headers["X-Frame-Options"] = "DENY"
     return response
 
 
