@@ -15,11 +15,16 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from asm.models import Finding
+from asm.models import Finding, HostScore
 from asm.scoring import (
+    LARGE_ATTACK_SURFACE_THRESHOLD,
     TIER_RANK,
+    create_finding,
+    derive_domain_band,
+    derive_host_band,
     evaluate_inspect_findings,
     evaluate_portscan_findings,
+    evaluate_probe_findings,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +140,31 @@ def _classify_https_probe_observation(host_data: dict[str, Any] | None) -> str:
     return "UNKNOWN"
 
 
+def classify_discovery_observation(
+    sub_name: str,
+    scan_source: str,
+    scan_truncated: bool,
+    scan_empty: bool,
+    scan_sub_map: dict[str, dict[str, Any]],
+    anchor_source: str,
+) -> str:
+    """Classify a discovery scan observation for bounded change and inventory tracking.
+
+    Returns:
+        'PRESENT': Subdomain was observed present in the scan's discovery results.
+        'QUALIFYING_ABSENCE': Subdomain was absent from a non-empty, non-truncated scan
+            whose discovery source matched the host's historical anchor source.
+        'UNKNOWN': Any absence where the scan was empty (provider outage/failure),
+            truncated (pagination/entry limit cap reached), or queried a different provider
+            source (incomparable provider switch).
+    """
+    if sub_name in scan_sub_map:
+        return "PRESENT"
+    if scan_empty or scan_truncated or (scan_source != anchor_source):
+        return "UNKNOWN"
+    return "QUALIFYING_ABSENCE"
+
+
 def _is_valid_cert_data(cert: Any) -> bool:
     """Return True if cert dictionary contains non-empty certificate evidence."""
     return (
@@ -206,8 +236,14 @@ def _find_latest_clean_cert(
         tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
     ],
     host: str,
+    *,
+    issuer: str | None = None,
 ) -> tuple[int | None, dict[str, Any], dict[str, Any]] | None:
-    """Search history window for latest valid certificate observation with no TLS defects."""
+    """Search history window for latest valid certificate observation with no TLS defects.
+
+    When `issuer` is provided, returns the latest clean certificate in the bounded
+    history window issued by that same issuer, if one exists.
+    """
     for scan_id, host_map, findings_map in history_indexed:
         h_data = host_map.get(host)
         if not h_data or str(h_data.get("status", "")).upper() != "PROBED":
@@ -218,7 +254,67 @@ def _find_latest_clean_cert(
         host_findings = findings_map.get(host, [])
         tls_findings = [f for f in host_findings if f.id.startswith("TLS_")]
         if not tls_findings:
+            if issuer is not None and cert.get("issuer") != issuer:
+                continue
             return (scan_id, h_data, cert)
+    return None
+
+
+def _certs_are_identical(cert1: dict[str, Any], cert2: dict[str, Any]) -> bool:
+    """Return True only if two clean cert dicts represent the same certificate instance.
+
+    Matching issuer name alone is never treated as proof that two certificates are
+    identical: both certs must have matching non-empty issuer and not_after values,
+    and any additional identity fields present on either certificate (serial_hex,
+    not_before, subject_cn, sans) must also match.
+    """
+    if not (
+        cert1.get("issuer")
+        and cert2.get("issuer")
+        and cert1.get("issuer") == cert2.get("issuer")
+        and cert1.get("not_after")
+        and cert2.get("not_after")
+        and cert1.get("not_after") == cert2.get("not_after")
+    ):
+        return False
+    for field in ("serial_hex", "not_before", "subject_cn"):
+        v1 = cert1.get(field)
+        v2 = cert2.get(field)
+        if (v1 is not None or v2 is not None) and v1 != v2:
+            return False
+    sans1 = cert1.get("sans")
+    sans2 = cert2.get("sans")
+    if (sans1 is not None or sans2 is not None) and (
+        not isinstance(sans1, list)
+        or not isinstance(sans2, list)
+        or sorted(sans1) != sorted(sans2)
+    ):
+        return False
+    return True
+
+
+def _find_latest_definite_dns_observation(
+    disc_history_indexed: list[
+        tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]
+    ],
+    sub: str,
+) -> tuple[str, bool, int | None] | None:
+    """Search up to 3 historical scans for the latest definite DNS resolution observation.
+
+    Returns:
+        (status, resolved, scan_run_id) where status is 'RESOLVED' (resolved=True)
+        or 'NXDOMAIN' (resolved=False). Skips TIMEOUT/ERROR and missing entries.
+    """
+    for s_id, _s_src, _s_trunc, _s_empty, s_subs in disc_history_indexed:
+        entry = s_subs.get(sub)
+        if not isinstance(entry, dict):
+            continue
+        stat = entry.get("status")
+        res = entry.get("resolved", False) is True
+        if stat == "RESOLVED" and res:
+            return ("RESOLVED", True, s_id)
+        if stat == "NXDOMAIN" and not res:
+            return ("NXDOMAIN", False, s_id)
     return None
 
 
@@ -491,10 +587,10 @@ def detect_changes(
     ) -> bool:
         """Return True if scan is a non-empty, non-truncated absence matching anchor source."""
         return (
-            sub_name not in scan_sub_map
-            and not scan_empty
-            and not scan_truncated
-            and scan_source == anchor_source
+            classify_discovery_observation(
+                sub_name, scan_source, scan_truncated, scan_empty, scan_sub_map, anchor_source
+            )
+            == "QUALIFYING_ABSENCE"
         )
 
     # 2a. Additions (NEW_SUBDOMAIN) and DNS Resolution Changes
@@ -567,42 +663,47 @@ def detect_changes(
                     "observed_at": observed_at,
                     **({"baseline_scan_run_id": s1_id} if s1_id is not None else {}),
                 })
-            # Case 3: Noise recovery -> suppress duplicate addition
+            else:
+                # Case 3: Noise recovery or stable presence -> evaluate DNS resolution transitions
+                # against the latest definite DNS observation in the bounded history window.
+                latest_dns = _find_latest_definite_dns_observation(disc_history_indexed, sub)
+                if latest_dns is not None:
+                    b_stat, b_res, b_dns_id = latest_dns
+                    n_stat = n_entry.get("status")
+                    n_res = n_entry.get("resolved", False) is True
 
-        # DNS resolution transitions (evaluated if present in immediate baseline S1)
-        if disc_history_indexed and sub in disc_history_indexed[0][4]:
-            b_entry = disc_history_indexed[0][4][sub]
-            b_stat = b_entry.get("status")
-            n_stat = n_entry.get("status")
-            b_res = b_entry.get("resolved", False) is True
-            n_res = n_entry.get("resolved", False) is True
-
-            # NXDOMAIN -> RESOLVED
-            if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
-                changes.append({
-                    "change_type": "NEWLY_RESOLVING",
-                    "category": "exposure",
-                    "severity": "INFO",
-                    "asset": sub,
-                    "detail": "",
-                    "evidence": "discover",
-                    "previous_state": {"status": b_stat, "resolved": b_res},
-                    "new_state": {"status": n_stat, "resolved": n_res},
-                    "observed_at": observed_at,
-                })
-            # RESOLVED -> NXDOMAIN (Definite stop; TIMEOUT / ERROR are ignored)
-            elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
-                changes.append({
-                    "change_type": "STOPPED_RESOLVING",
-                    "category": "exposure",
-                    "severity": "INFO",
-                    "asset": sub,
-                    "detail": "",
-                    "evidence": "discover",
-                    "previous_state": {"status": b_stat, "resolved": b_res},
-                    "new_state": {"status": n_stat, "resolved": n_res},
-                    "observed_at": observed_at,
-                })
+                    # NXDOMAIN -> RESOLVED
+                    if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
+                        change_dict: dict[str, Any] = {
+                            "change_type": "NEWLY_RESOLVING",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": {"status": b_stat, "resolved": b_res},
+                            "new_state": {"status": n_stat, "resolved": n_res},
+                            "observed_at": observed_at,
+                        }
+                        if b_dns_id is not None:
+                            change_dict["baseline_scan_run_id"] = b_dns_id
+                        changes.append(change_dict)
+                    # RESOLVED -> NXDOMAIN (Definite stop; TIMEOUT / ERROR are ignored)
+                    elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
+                        change_dict = {
+                            "change_type": "STOPPED_RESOLVING",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": {"status": b_stat, "resolved": b_res},
+                            "new_state": {"status": n_stat, "resolved": n_res},
+                            "observed_at": observed_at,
+                        }
+                        if b_dns_id is not None:
+                            change_dict["baseline_scan_run_id"] = b_dns_id
+                        changes.append(change_dict)
 
     # 2b. Removals (REMOVED_SUBDOMAIN)
     if allow_removal and len(disc_history_indexed) >= 1:
@@ -1020,33 +1121,24 @@ def detect_changes(
                 # 1c. Clean Certificate Rotation (Field rule when neither cert had TLS defects)
                 # Established policy: if issuer changed, emit issuer; elif not_after changed,
                 # emit not_after. Never emits two rotation events for the same host transition.
+                # Same-issuer lookback within the 3-scan window detects not_after rotation across
+                # an intervening alternate edge cert (A_old -> B -> A_rotated) and suppresses
+                # return-leg issuer events only when returning to the exact same certificate
+                # instance (A -> B -> A verified by _certs_are_identical).
                 if len(b_tls_findings) == 0 and len(n_tls_findings) == 0:
-                    clean_base = _find_latest_clean_cert(inspect_history_indexed, host)
-                    if clean_base is not None:
-                        b_clean_id, _b_h, b_clean_cert = clean_base
+                    n_issuer = n_cert.get("issuer")
+                    same_issuer_base = (
+                        _find_latest_clean_cert(inspect_history_indexed, host, issuer=n_issuer)
+                        if n_issuer
+                        else None
+                    )
+                    handled_by_same_issuer = False
+                    if same_issuer_base is not None:
+                        b_same_id, _b_h, b_same_cert = same_issuer_base
                         if (
-                            b_clean_cert.get("issuer")
-                            and n_cert.get("issuer")
-                            and b_clean_cert.get("issuer") != n_cert.get("issuer")
-                        ):
-                            change_dict = {
-                                "change_type": "CERTIFICATE_CHANGED",
-                                "category": "exposure",
-                                "severity": "INFO",
-                                "asset": host,
-                                "detail": "issuer",
-                                "evidence": "inspect",
-                                "previous_state": {"issuer": b_clean_cert.get("issuer")},
-                                "new_state": {"issuer": n_cert.get("issuer")},
-                                "observed_at": observed_at,
-                            }
-                            if b_clean_id is not None:
-                                change_dict["baseline_scan_run_id"] = b_clean_id
-                            changes.append(change_dict)
-                        elif (
-                            b_clean_cert.get("not_after")
+                            b_same_cert.get("not_after")
                             and n_cert.get("not_after")
-                            and b_clean_cert.get("not_after") != n_cert.get("not_after")
+                            and b_same_cert.get("not_after") != n_cert.get("not_after")
                         ):
                             change_dict = {
                                 "change_type": "CERTIFICATE_CHANGED",
@@ -1055,13 +1147,59 @@ def detect_changes(
                                 "asset": host,
                                 "detail": "not_after",
                                 "evidence": "inspect",
-                                "previous_state": {"not_after": b_clean_cert.get("not_after")},
+                                "previous_state": {"not_after": b_same_cert.get("not_after")},
                                 "new_state": {"not_after": n_cert.get("not_after")},
                                 "observed_at": observed_at,
                             }
-                            if b_clean_id is not None:
-                                change_dict["baseline_scan_run_id"] = b_clean_id
+                            if b_same_id is not None:
+                                change_dict["baseline_scan_run_id"] = b_same_id
                             changes.append(change_dict)
+                            handled_by_same_issuer = True
+                        elif _certs_are_identical(b_same_cert, n_cert):
+                            handled_by_same_issuer = True
+
+                    if not handled_by_same_issuer:
+                        clean_base = _find_latest_clean_cert(inspect_history_indexed, host)
+                        if clean_base is not None:
+                            b_clean_id, _b_h, b_clean_cert = clean_base
+                            if (
+                                b_clean_cert.get("issuer")
+                                and n_cert.get("issuer")
+                                and b_clean_cert.get("issuer") != n_cert.get("issuer")
+                            ):
+                                change_dict = {
+                                    "change_type": "CERTIFICATE_CHANGED",
+                                    "category": "exposure",
+                                    "severity": "INFO",
+                                    "asset": host,
+                                    "detail": "issuer",
+                                    "evidence": "inspect",
+                                    "previous_state": {"issuer": b_clean_cert.get("issuer")},
+                                    "new_state": {"issuer": n_cert.get("issuer")},
+                                    "observed_at": observed_at,
+                                }
+                                if b_clean_id is not None:
+                                    change_dict["baseline_scan_run_id"] = b_clean_id
+                                changes.append(change_dict)
+                            elif (
+                                b_clean_cert.get("not_after")
+                                and n_cert.get("not_after")
+                                and b_clean_cert.get("not_after") != n_cert.get("not_after")
+                            ):
+                                change_dict = {
+                                    "change_type": "CERTIFICATE_CHANGED",
+                                    "category": "exposure",
+                                    "severity": "INFO",
+                                    "asset": host,
+                                    "detail": "not_after",
+                                    "evidence": "inspect",
+                                    "previous_state": {"not_after": b_clean_cert.get("not_after")},
+                                    "new_state": {"not_after": n_cert.get("not_after")},
+                                    "observed_at": observed_at,
+                                }
+                                if b_clean_id is not None:
+                                    change_dict["baseline_scan_run_id"] = b_clean_id
+                                changes.append(change_dict)
 
         # 2. Security Header Evaluation
         if n_probed and _is_valid_header_data(n_host.get("headers")):
@@ -1186,26 +1324,317 @@ def detect_changes(
     # -------------------------------------------------------------------------
     # 4. Score Stage Changes (Summary: Host and Domain Risk Bands)
     # -------------------------------------------------------------------------
+    # Note on reconstructed vs. persisted ScoreReport values:
+    # Persisted ScoreReport (`new_reports["score"]`) always records the raw point-in-time
+    # findings of a scan run. Section 4 computes stabilized comparison postures so that
+    # single-scan stage incompleteness (unresolved discovery glitches, filtered scored ports,
+    # unconfirmed 1-scan HTTP_NO_HTTPS probe failures, or partial TLS/header inspection
+    # timeouts) does not trigger false HOST_RISK_BAND_* or DOMAIN_RISK_BAND_* transitions,
+    # while preserving fresh defects and canonical scoring rules (`derive_host_band`,
+    # `derive_domain_band`, and `LARGE_ATTACK_SURFACE`).
     base_score = baseline_reports.get("score") or {}
     new_score = new_reports.get("score") or {}
+    domain_name = new_disc.get("domain") or new_score.get("domain", "")
 
-    base_hosts = {
-        h["subdomain"]: h for h in base_score.get("hosts", []) if "subdomain" in h
-    }
-    new_hosts = {
-        h["subdomain"]: h for h in new_score.get("hosts", []) if "subdomain" in h
-    }
+    # Build bounded scan sequence [S0 (new), S1, S2, S3] and pre-index all stage observations
+    score_scans: list[tuple[int | None, dict[str, Any]]] = [(None, new_reports)]
+    for entry in disc_history_entries:
+        s_id = entry.get("scan_run_id") or entry.get("id")
+        rep = entry.get("reports") if "reports" in entry else entry
+        score_scans.append((s_id, rep))
 
-    for host, n_host_score in new_hosts.items():
-        if host in base_hosts:
-            b_host_score = base_hosts[host]
+    has_stage_reports_by_scan: list[bool] = []
+    raw_score_hosts_by_scan: list[dict[str, dict[str, Any]]] = []
+    disc_by_scan: list[dict[str, dict[str, Any]] | None] = []
+    disc_meta_by_scan: list[tuple[str, bool, bool, dict[str, dict[str, Any]]]] = []
+    probe_by_scan: list[dict[str, dict[str, Any]] | None] = []
+    portscan_by_scan: list[dict[str, dict[str, Any]] | None] = []
+    inspect_by_scan: list[dict[str, dict[str, Any]] | None] = []
+    probe_findings_by_scan: list[dict[str, list[Finding]]] = []
+    portscan_findings_by_scan: list[dict[str, list[Finding]]] = []
+    inspect_findings_by_scan: list[dict[str, list[Finding]]] = []
+    scored_port_findings: dict[tuple[int, str, int], Finding] = {}
+    ever_scored_ports: dict[str, set[int]] = {}
+
+    for s_idx, (_s_id, rep) in enumerate(score_scans):
+        has_stage_reports_by_scan.append(
+            any(k in rep for k in ("discover", "probe", "portscan", "inspect"))
+        )
+        raw_score_hosts_by_scan.append(
+            {
+                h["subdomain"]: h
+                for h in (rep.get("score") or {}).get("hosts", [])
+                if isinstance(h, dict) and "subdomain" in h
+            }
+        )
+
+        d_rep = rep.get("discover") or {}
+        d_src = str(d_rep.get("source", "crt.sh"))
+        d_trunc = bool(d_rep.get("truncated", False))
+        d_res = d_rep.get("results")
+        d_subs = (
+            {r["subdomain"]: r for r in d_res if isinstance(r, dict) and "subdomain" in r}
+            if isinstance(d_res, list)
+            else {}
+        )
+        d_empty = len(d_subs) == 0
+        disc_meta_by_scan.append((d_src, d_trunc, d_empty, d_subs))
+        disc_by_scan.append(d_subs if d_subs else None)
+
+        pr_res = (rep.get("probe") or {}).get("results")
+        if isinstance(pr_res, list) and len(pr_res) > 0:
+            probe_by_scan.append(
+                {r["subdomain"]: r for r in pr_res if isinstance(r, dict) and "subdomain" in r}
+            )
+            probe_findings_by_scan.append(evaluate_probe_findings(pr_res))
+        else:
+            probe_by_scan.append(None)
+            probe_findings_by_scan.append({})
+
+        ps_res = (rep.get("portscan") or {}).get("results")
+        if isinstance(ps_res, list) and len(ps_res) > 0:
+            portscan_by_scan.append(
+                {r["subdomain"]: r for r in ps_res if isinstance(r, dict) and "subdomain" in r}
+            )
+            ps_f_map = evaluate_portscan_findings(ps_res)
+            portscan_findings_by_scan.append(ps_f_map)
+            for h_name, f_list in ps_f_map.items():
+                for f in f_list:
+                    if isinstance(f.port, int):
+                        scored_port_findings[(s_idx, h_name, f.port)] = f
+                        ever_scored_ports.setdefault(h_name, set()).add(f.port)
+        else:
+            portscan_by_scan.append(None)
+            portscan_findings_by_scan.append({})
+
+        in_res = (rep.get("inspect") or {}).get("results")
+        if isinstance(in_res, list) and len(in_res) > 0:
+            inspect_by_scan.append(
+                {r["subdomain"]: r for r in in_res if isinstance(r, dict) and "subdomain" in r}
+            )
+            inspect_findings_by_scan.append(evaluate_inspect_findings(in_res))
+        else:
+            inspect_by_scan.append(None)
+            inspect_findings_by_scan.append({})
+
+    effective_host_cache: dict[tuple[int, str], dict[str, Any] | None] = {}
+
+    def _effective_host_score(scan_idx: int, host: str) -> dict[str, Any] | None:
+        """Return a host score dict backed by confirmed stage findings, or None if unresolved."""
+        cache_key = (scan_idx, host)
+        if cache_key in effective_host_cache:
+            return effective_host_cache[cache_key]
+
+        raw_host_score = raw_score_hosts_by_scan[scan_idx].get(host)
+        if not has_stage_reports_by_scan[scan_idx]:
+            effective_host_cache[cache_key] = raw_host_score
+            return raw_host_score
+
+        # 1. Discovery: unresolved or absent hosts were not scanned in downstream stages
+        d_map = disc_by_scan[scan_idx]
+        if d_map is not None:
+            d_entry = d_map.get(host)
+            if d_entry is None:
+                effective_host_cache[cache_key] = None
+                return None
+            if d_entry.get("resolved") is not True or d_entry.get("status") in (
+                "TIMEOUT",
+                "ERROR",
+                "NXDOMAIN",
+            ):
+                effective_host_cache[cache_key] = None
+                return None
+
+        # 2. Portscan: evaluate fresh open ports; filtered scored ports or unprobed
+        # portscan fall back
+        ps_map = portscan_by_scan[scan_idx]
+        ps_entry = ps_map.get(host) if ps_map is not None else None
+        ps_probed = ps_entry is not None and str(ps_entry.get("status", "")).upper() == "PROBED"
+        filtered_scored_ports: list[int] = []
+        if ps_probed:
+            filt = ps_entry.get("filtered_ports") or []
+            if isinstance(filt, list):
+                filtered_scored_ports = [
+                    p
+                    for p in filt
+                    if isinstance(p, int) and p in ever_scored_ports.get(host, set())
+                ]
+
+        # 3. Inspect: evaluate certificate and header sub-observations independently
+        in_map = inspect_by_scan[scan_idx]
+        in_entry = in_map.get(host) if in_map is not None else None
+        in_probed = in_entry is not None and str(in_entry.get("status", "")).upper() == "PROBED"
+        cert_valid_now = in_probed and _is_valid_cert_data(in_entry.get("cert"))
+        hdr_valid_now = in_probed and _is_valid_header_data(in_entry.get("headers"))
+
+        # 4. Probe: check for unconfirmed 1-scan QUALIFYING_FAILURE (HTTP_NO_HTTPS)
+        pr_map = probe_by_scan[scan_idx]
+        pr_entry = pr_map.get(host) if pr_map is not None else None
+        unconfirmed_probe_fail = False
+        if (
+            pr_map is not None
+            and _classify_https_probe_observation(pr_entry) == "QUALIFYING_FAILURE"
+        ):
+            confirmed_fail = False
+            if scan_idx + 1 < len(score_scans):
+                prev_pr_map = probe_by_scan[scan_idx + 1]
+                prev_pr = prev_pr_map.get(host) if prev_pr_map is not None else None
+                if _classify_https_probe_observation(prev_pr) == "QUALIFYING_FAILURE":
+                    confirmed_fail = True
+            if not confirmed_fail:
+                raw_f_list = (raw_host_score or {}).get("findings") or []
+                has_http_no_https_in_raw = any(
+                    isinstance(f, dict) and f.get("id") == "HTTP_NO_HTTPS" for f in raw_f_list
+                )
+                if has_http_no_https_in_raw or not (cert_valid_now and hdr_valid_now):
+                    unconfirmed_probe_fail = True
+
+        cert_needs_fallback = (
+            in_map is not None and not cert_valid_now and (in_probed or unconfirmed_probe_fail)
+        )
+        hdr_needs_fallback = (
+            in_map is not None and not hdr_valid_now and (in_probed or unconfirmed_probe_fail)
+        )
+        ps_needs_fallback = not ps_probed or bool(filtered_scored_ports)
+
+        if (
+            not ps_needs_fallback
+            and not unconfirmed_probe_fail
+            and not cert_needs_fallback
+            and not hdr_needs_fallback
+        ):
+            effective_host_cache[cache_key] = raw_host_score
+            return raw_host_score
+
+        # Reconstruct stabilized host score by combining fresh stage observations with
+        # per-substage fallback for only the incomplete/unconfirmed observation(s).
+        combined_findings: list[Finding] = []
+
+        # Probe findings
+        if pr_map is not None and pr_entry is not None and not unconfirmed_probe_fail:
+            combined_findings.extend(probe_findings_by_scan[scan_idx].get(host, []))
+
+        # Portscan findings (fresh open ports + per-port fallback for filtered scored ports,
+        # or stage fallback if portscan is unprobed so unknown observations are not treated
+        # as remediation)
+        if ps_probed:
+            ps_findings = list(portscan_findings_by_scan[scan_idx].get(host, []))
+            present_ports = {f.port for f in ps_findings if isinstance(f.port, int)}
+            for p in filtered_scored_ports:
+                if p in present_ports:
+                    continue
+                for older_idx in range(scan_idx + 1, len(score_scans)):
+                    older_ps_map = portscan_by_scan[older_idx]
+                    older_ps = older_ps_map.get(host) if older_ps_map is not None else None
+                    if older_ps is None or str(older_ps.get("status", "")).upper() != "PROBED":
+                        continue
+                    open_p = {
+                        op.get("port")
+                        for op in (older_ps.get("open_ports") or [])
+                        if isinstance(op, dict) and op.get("state") == "OPEN"
+                    }
+                    closed_p = set(older_ps.get("closed_ports") or [])
+                    if p in open_p:
+                        older_f = scored_port_findings.get((older_idx, host, p))
+                        if older_f is not None:
+                            ps_findings.append(older_f)
+                        break
+                    if p in closed_p:
+                        break
+            combined_findings.extend(ps_findings)
+        else:
+            # Unprobed/unavailable portscan: fall back to latest valid prior portscan observation
+            for older_idx in range(scan_idx + 1, len(score_scans)):
+                older_ps_map = portscan_by_scan[older_idx]
+                older_ps = older_ps_map.get(host) if older_ps_map is not None else None
+                if older_ps is not None and str(older_ps.get("status", "")).upper() == "PROBED":
+                    combined_findings.extend(portscan_findings_by_scan[older_idx].get(host, []))
+                    break
+
+        # Inspect findings: certificate (TLS_*) and headers (HEADER_*) separated
+        if in_map is not None:
+            if cert_valid_now:
+                combined_findings.extend(
+                    f
+                    for f in inspect_findings_by_scan[scan_idx].get(host, [])
+                    if f.id.startswith("TLS_")
+                )
+            elif cert_needs_fallback:
+                for older_idx in range(scan_idx + 1, len(score_scans)):
+                    older_in_map = inspect_by_scan[older_idx]
+                    older_in = older_in_map.get(host) if older_in_map is not None else None
+                    if (
+                        older_in is not None
+                        and str(older_in.get("status", "")).upper() == "PROBED"
+                        and _is_valid_cert_data(older_in.get("cert"))
+                    ):
+                        combined_findings.extend(
+                            f
+                            for f in inspect_findings_by_scan[older_idx].get(host, [])
+                            if f.id.startswith("TLS_")
+                        )
+                        break
+
+            if hdr_valid_now:
+                combined_findings.extend(
+                    f
+                    for f in inspect_findings_by_scan[scan_idx].get(host, [])
+                    if f.id.startswith("HEADER_")
+                )
+            elif hdr_needs_fallback:
+                for older_idx in range(scan_idx + 1, len(score_scans)):
+                    older_in_map = inspect_by_scan[older_idx]
+                    older_in = older_in_map.get(host) if older_in_map is not None else None
+                    if (
+                        older_in is not None
+                        and str(older_in.get("status", "")).upper() == "PROBED"
+                        and _is_valid_header_data(older_in.get("headers"))
+                    ):
+                        combined_findings.extend(
+                            f
+                            for f in inspect_findings_by_scan[older_idx].get(host, [])
+                            if f.id.startswith("HEADER_")
+                        )
+                        break
+
+        band = derive_host_band(combined_findings)
+        score_val = sum(f.points for f in combined_findings)
+        reconstructed = {
+            "subdomain": host,
+            "band": band,
+            "score": score_val,
+            "findings": [f.to_dict() for f in combined_findings],
+            "reconstructed": True,
+        }
+        effective_host_cache[cache_key] = reconstructed
+        return reconstructed
+
+    new_hosts = raw_score_hosts_by_scan[0]
+
+    for host in new_hosts:
+        n_host_score = _effective_host_score(0, host)
+        if n_host_score is None:
+            continue
+
+        b_host_score = None
+        b_score_scan_id: int | None = None
+        for idx in range(1, len(score_scans)):
+            s_id, _rep = score_scans[idx]
+            if host in raw_score_hosts_by_scan[idx]:
+                eff_b = _effective_host_score(idx, host)
+                if eff_b is not None:
+                    b_host_score = eff_b
+                    b_score_scan_id = s_id
+                    break
+
+        if b_host_score is not None:
             b_band = b_host_score.get("band", "INFO")
             n_band = n_host_score.get("band", "INFO")
             b_rank = TIER_RANK.get(b_band, 0)
             n_rank = TIER_RANK.get(n_band, 0)
 
             if n_rank > b_rank:
-                changes.append({
+                change_dict = {
                     "change_type": "HOST_RISK_BAND_INCREASED",
                     "category": "summary",
                     "severity": n_band,
@@ -1215,9 +1644,12 @@ def detect_changes(
                     "previous_state": {"band": b_band, "score": b_host_score.get("score")},
                     "new_state": {"band": n_band, "score": n_host_score.get("score")},
                     "observed_at": observed_at,
-                })
+                }
+                if b_score_scan_id is not None:
+                    change_dict["baseline_scan_run_id"] = b_score_scan_id
+                changes.append(change_dict)
             elif n_rank < b_rank:
-                changes.append({
+                change_dict = {
                     "change_type": "HOST_RISK_BAND_DECREASED",
                     "category": "summary",
                     "severity": "INFO",
@@ -1227,12 +1659,140 @@ def detect_changes(
                     "previous_state": {"band": b_band, "score": b_host_score.get("score")},
                     "new_state": {"band": n_band, "score": n_host_score.get("score")},
                     "observed_at": observed_at,
-                })
+                }
+                if b_score_scan_id is not None:
+                    change_dict["baseline_scan_run_id"] = b_score_scan_id
+                changes.append(change_dict)
 
-    # Domain risk band
-    b_domain_band = base_score.get("domain_band")
-    n_domain_band = new_score.get("domain_band")
-    domain_name = new_disc.get("domain") or new_score.get("domain", "")
+    # Domain risk band (reusing canonical derive_domain_band and domain_findings semantics)
+    removed_assets = {
+        c["asset"] for c in changes if c["change_type"] == "REMOVED_SUBDOMAIN"
+    }
+
+    def _effective_domain_band_and_score(target_idx: int) -> tuple[str | None, Any, bool]:
+        rep = score_scans[target_idx][1]
+        sc = rep.get("score") or {}
+        curr_map = raw_score_hosts_by_scan[target_idx]
+        if not has_stage_reports_by_scan[target_idx]:
+            raw_esc = bool((sc.get("counts") or {}).get("high_escalation"))
+            return sc.get("domain_band"), sc.get("domain_score"), raw_esc
+
+        candidate_hosts = set(curr_map.keys())
+        # Inspect older scans within the history window (target_idx + 1 .. len(score_scans) - 1)
+        # to determine which historical hosts should be retained in domain inventory.
+        # A historical host is retained unless it underwent confirmed removal (2 consecutive
+        # qualifying absences under discovery observation-validity rules) before or at target_idx.
+        for idx in range(target_idx + 1, len(score_scans)):
+            for h_name in raw_score_hosts_by_scan[idx]:
+                if h_name in candidate_hosts:
+                    continue
+                if target_idx == 0 and h_name in removed_assets:
+                    continue
+
+                # Find the most recent historical scan where h_name was PRESENT
+                # (which is the earliest p_idx in target_idx + 1 .. len(score_scans) - 1)
+                pres_idx = None
+                for p_idx in range(target_idx + 1, len(score_scans)):
+                    if h_name in disc_meta_by_scan[p_idx][3]:
+                        pres_idx = p_idx
+                        break
+                if pres_idx is None:
+                    pres_idx = idx
+
+                anchor_src = disc_meta_by_scan[pres_idx][0]
+
+                # Check intervening scans from pres_idx - 1 down to target_idx
+                # (in chronological order) for 2 consecutive qualifying absences
+                consecutive_qa = 0
+                confirmed_removed = False
+                for k in range(pres_idx - 1, target_idx - 1, -1):
+                    k_src, k_trunc, k_empty, k_subs = disc_meta_by_scan[k]
+                    obs = classify_discovery_observation(
+                        h_name, k_src, k_trunc, k_empty, k_subs, anchor_src
+                    )
+                    if obs == "PRESENT":
+                        consecutive_qa = 0
+                    elif obs == "QUALIFYING_ABSENCE":
+                        consecutive_qa += 1
+                        if consecutive_qa >= 2:
+                            confirmed_removed = True
+                            break
+                    else:
+                        # UNKNOWN (truncated, empty, provider switch) resets QA streak
+                        consecutive_qa = 0
+
+                if not confirmed_removed:
+                    candidate_hosts.add(h_name)
+
+        effective_hosts: dict[str, dict[str, Any]] = {}
+        any_substituted = False
+        for h_name in candidate_hosts:
+            eff_curr = _effective_host_score(target_idx, h_name) if h_name in curr_map else None
+            if eff_curr is not None:
+                effective_hosts[h_name] = eff_curr
+                if eff_curr is not curr_map.get(h_name):
+                    any_substituted = True
+            else:
+                substituted = None
+                for idx in range(target_idx + 1, len(score_scans)):
+                    if h_name in raw_score_hosts_by_scan[idx]:
+                        eff_older = _effective_host_score(idx, h_name)
+                        if eff_older is not None:
+                            substituted = eff_older
+                            break
+                if substituted is not None:
+                    effective_hosts[h_name] = substituted
+                    any_substituted = True
+                elif h_name in curr_map:
+                    effective_hosts[h_name] = curr_map[h_name]
+                else:
+                    for idx in range(target_idx + 1, len(score_scans)):
+                        if h_name in raw_score_hosts_by_scan[idx]:
+                            effective_hosts[h_name] = raw_score_hosts_by_scan[idx][h_name]
+                            any_substituted = True
+                            break
+
+        host_score_objs = [
+            HostScore(
+                subdomain=h_name,
+                score=int(h_obj.get("score", 0) or 0),
+                band=str(h_obj.get("band", "INFO")),
+            )
+            for h_name, h_obj in sorted(effective_hosts.items())
+        ]
+        canonical_band, is_escalated = derive_domain_band(host_score_objs)
+
+        if not any_substituted:
+            return sc.get("domain_band") or canonical_band, sc.get("domain_score"), is_escalated
+
+        # Preserve existing non-scale domain findings and evaluate LARGE_ATTACK_SURFACE
+        # consistently against the stabilized host inventory.
+        raw_dom_findings = [
+            f
+            for f in (sc.get("domain_findings") or [])
+            if isinstance(f, dict) and f.get("id") != "LARGE_ATTACK_SURFACE"
+        ]
+        dom_pts = sum(int(f.get("points", 0) or 0) for f in raw_dom_findings)
+        if len(effective_hosts) >= LARGE_ATTACK_SURFACE_THRESHOLD:
+            las_f = create_finding(
+                "LARGE_ATTACK_SURFACE",
+                domain_name or sc.get("domain", ""),
+                "discover",
+                f"Domain has {len(effective_hosts)} discovered host assets.",
+            )
+            dom_pts += las_f.points
+
+        eff_score = sum(h.score for h in host_score_objs) + dom_pts
+        return canonical_band, eff_score, is_escalated
+
+    if len(score_scans) >= 2:
+        b_domain_band, b_domain_score, _b_esc = _effective_domain_band_and_score(1)
+        n_domain_band, n_domain_score, _n_esc = _effective_domain_band_and_score(0)
+    else:
+        b_domain_band = base_score.get("domain_band")
+        b_domain_score = base_score.get("domain_score")
+        n_domain_band = new_score.get("domain_band")
+        n_domain_score = new_score.get("domain_score")
 
     if b_domain_band and n_domain_band and domain_name:
         b_d_rank = TIER_RANK.get(b_domain_band, 0)
@@ -1248,11 +1808,11 @@ def detect_changes(
                 "evidence": "score",
                 "previous_state": {
                     "band": b_domain_band,
-                    "score": base_score.get("domain_score"),
+                    "score": b_domain_score,
                 },
                 "new_state": {
                     "band": n_domain_band,
-                    "score": new_score.get("domain_score"),
+                    "score": n_domain_score,
                 },
                 "observed_at": observed_at,
             })
@@ -1266,11 +1826,11 @@ def detect_changes(
                 "evidence": "score",
                 "previous_state": {
                     "band": b_domain_band,
-                    "score": base_score.get("domain_score"),
+                    "score": b_domain_score,
                 },
                 "new_state": {
                     "band": n_domain_band,
-                    "score": new_score.get("domain_score"),
+                    "score": n_domain_score,
                 },
                 "observed_at": observed_at,
             })
