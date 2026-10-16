@@ -1,0 +1,67 @@
+# ==============================================================================
+# Exposight Staging Compose Override (compose.staging.override.yml)
+#
+# Applied alongside compose.prod.yml for staging environments:
+#   docker compose -p exposight-staging -f compose.prod.yml -f compose.staging.override.yml config
+#   docker compose -p exposight-staging -f compose.prod.yml -f compose.staging.override.yml up -d --build
+#
+# PURPOSE & SCOPE:
+# 1. Enforce explicit staging Compose project name (exposight-staging).
+# 2. Tag application container images with an explicit, required commit tag (${IMAGE_TAG}).
+#    NOTE: Image tags provide commit traceability for operators and builds, but do not
+#    prove source identity without a clean git status check, and are NOT immutable
+#    manifest digests (@sha256:...). Use `docker inspect` for image configuration IDs.
+# 3. Forward discovery resource limits (DISCOVERY_MAX_RESPONSE_BYTES and DISCOVERY_MAX_HOSTS)
+#    into the worker container environment.
+#    NOTE: compose.prod.yml does not currently forward these variables (a configurability
+#    gap tracked as follow-up work). Built-in defaults in src/asm/discovery.py (10 MiB / 1,000 hosts)
+#    already enforce deterministic bounds in production.
+# 4. Define an explicit staging mail-sink pattern (mailsink) sharing the worker egress
+#    network namespace via loopback (network_mode: "service:egress").
+#    Controlled via Compose profile: --profile mailsink.
+#    Activating the profile alone does NOT change worker configuration; the worker's
+#    environment variables (SMTP_HOST=127.0.0.1, SMTP_PORT=1025) must be set in .env.
+# ==============================================================================
+
+name: exposight-staging
+
+services:
+  migrate:
+    image: exposight-app:${IMAGE_TAG:?IMAGE_TAG must be set to the target commit SHA}
+
+  api:
+    image: exposight-app:${IMAGE_TAG:?IMAGE_TAG must be set to the target commit SHA}
+
+  egress:
+    image: exposight-egress:${IMAGE_TAG:?IMAGE_TAG must be set to the target commit SHA}
+
+  worker:
+    image: exposight-app:${IMAGE_TAG:?IMAGE_TAG must be set to the target commit SHA}
+    environment:
+      # Forward discovery resource limits in staging.
+      DISCOVERY_MAX_RESPONSE_BYTES: ${DISCOVERY_MAX_RESPONSE_BYTES:-10485760}
+      DISCOVERY_MAX_HOSTS: ${DISCOVERY_MAX_HOSTS:-1000}
+
+  # Controlled staging mail-sink service pattern.
+  # Activated only when explicitly requesting the profile: --profile mailsink
+  #
+  # FIREWALL CONSTRAINTS & ROUTING ARCHITECTURE:
+  # - deploy/egress/rules.sh rejects all RFC1918 private subnets (including 10.0.0.0/8).
+  # - A standard container attached to app-tier (10.89.0.0/24) cannot receive SMTP from the worker.
+  # - Joining the egress container's network namespace (network_mode: "service:egress") places
+  #   the mail-sink on the same loopback interface, where `iptables -A OUTPUT -o lo -j ACCEPT`
+  #   permits worker -> sink communication on 127.0.0.1:1025.
+  # - Note on network egress: Sharing the egress namespace grants the sink the same network egress
+  #   as worker/egress (public internet and db:5432). Mailpit itself does not forward or relay
+  #   captured mail outbound unless an upstream SMTP relay option is explicitly configured.
+  #   No relay options are configured here, ensuring all captured emails remain in-container.
+  # - The sink publishes no host ports; inspect messages programmatically via internal API inside the namespace.
+  mailsink:
+    profiles: ["mailsink"]
+    image: axllent/mailpit:v1.24
+    restart: unless-stopped
+    network_mode: "service:egress"
+    environment:
+      MP_SMTP_BIND_ADDR: 127.0.0.1:1025
+      MP_UI_BIND_ADDR: 127.0.0.1:8025
+      MP_MAX_MESSAGES: 500
