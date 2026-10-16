@@ -70,7 +70,14 @@ class DomainRead(BaseModel):
     scan_interval_hours: int | None = None
     next_scan_at: datetime | None = None
     alerts_enabled: bool = False
-    alert_emails: list[str] = Field(default_factory=list)
+    alert_emails: list[str] | None = Field(
+        default=None,
+        description="Configured recipient email addresses for alerts. Redacted (None) for viewers.",
+    )
+    alert_recipient_count: int = Field(
+        default=0,
+        description="Total number of configured alert recipient emails.",
+    )
     alert_min_severity: str = "MEDIUM"
     created_at: datetime
     verification_record_name: str
@@ -132,14 +139,20 @@ class AlertNotificationRead(BaseModel):
     id: int
     domain_id: int
     scan_run_id: int | None = None
-    recipient: str
+    recipient: str | None = Field(
+        default=None,
+        description="Delivery email address for the notification. Redacted (None) for viewers.",
+    )
     subject: str
     body: str
     status: str
     attempts: int
     max_attempts: int
     next_attempt_at: datetime
-    last_error: str | None = None
+    last_error: str | None = Field(
+        default=None,
+        description="Raw delivery error details. Redacted (None) for viewers.",
+    )
     sent_at: datetime | None = None
     created_at: datetime
 

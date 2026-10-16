@@ -80,10 +80,11 @@ class DiscoveryReport:
     truncated: bool = False
     counts: dict[str, int] = field(default_factory=dict)
     results: list[SubdomainResult] = field(default_factory=list)
+    truncation_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the full report to a dictionary suitable for JSON export."""
-        return {
+        data: dict[str, Any] = {
             "domain": self.domain,
             "scan_started_utc": self.scan_started_utc,
             "scan_finished_utc": self.scan_finished_utc,
@@ -93,6 +94,9 @@ class DiscoveryReport:
             "counts": self.counts,
             "results": [result.to_dict() for result in self.results],
         }
+        if self.truncation_reason is not None:
+            data["truncation_reason"] = self.truncation_reason
+        return data
 
 
 @dataclass

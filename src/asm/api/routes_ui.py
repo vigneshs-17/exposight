@@ -22,6 +22,7 @@ from asm.api.deps import (
     get_scan_for_org,
     require_org_role,
 )
+from asm.api.routes import _domain_to_read, _notification_to_read
 from asm.audit import AUDIT_ACTIONS, build_audit_query
 from asm.auth.config import AuthSettings
 from asm.db.models import (
@@ -233,7 +234,8 @@ def get_domain_detail_ui(
     apply_security_headers(response, auth_settings, is_fragment=True)
     org, membership = auth_context
 
-    domain = get_domain_for_org(db, org_id, domain_id)
+    raw_domain = get_domain_for_org(db, org_id, domain_id)
+    domain = _domain_to_read(raw_domain, membership.role)
 
     template = templates_env.get_template("partials/domain_detail.html")
     return template.render(
@@ -314,15 +316,47 @@ def get_org_scan_detail_ui(
     # Chokepoint: get_scan_for_org returns 404 if not found or cross-tenant.
     scan_run = get_scan_for_org(db, org_id, scan_id)
 
-    # Security rule: Load the score ScanResult and the ScanChange rows ONLY via the scan object
+    # Security rule: Load score/discover ScanResult and ScanChange rows ONLY via scan object
     # returned by get_scan_for_org (filter by scan_run.id). Never use any other id from request.
-    score_stmt = select(ScanResult).where(
+    results_stmt = select(ScanResult).where(
         ScanResult.scan_run_id == scan_run.id,
-        ScanResult.stage == "score",
+        ScanResult.stage.in_(["discover", "score"]),
     )
-    score_result = db.scalars(score_stmt).first()
+    scan_results = list(db.scalars(results_stmt).all())
+    result_map = {r.stage: r for r in scan_results}
+
+    score_result = result_map.get("score")
     score_report = score_result.report if score_result else None
     fix_first = extract_fix_first_findings(score_report)
+
+    discover_result = result_map.get("discover")
+    discover_report = discover_result.report if discover_result else None
+    truncation_notice: str | None = None
+    if discover_report and discover_report.get("truncated"):
+        reason = discover_report.get("truncation_reason")
+        counts = discover_report.get("counts", {})
+        selected_count = counts.get("selected_hosts", counts.get("total_discovered", 0))
+        observed_count = counts.get("observed_hosts", selected_count)
+        source = discover_report.get("source", "CT logs")
+
+        if reason == "hostname_cap_exceeded":
+            truncation_notice = (
+                f"Discovery capped at {selected_count} hostnames ({observed_count} observed). "
+                "Remaining hostnames were excluded from scanning."
+            )
+        elif reason == "provider_entry_limit":
+            truncation_notice = (
+                f"Provider ({source}) entry or page limit reached. Discovery may be incomplete."
+            )
+        elif reason == "provider_and_hostname_cap_exceeded":
+            truncation_notice = (
+                f"Provider ({source}) limit reached and host cap applied "
+                f"({selected_count} selected from {observed_count} observed)."
+            )
+        else:
+            truncation_notice = (
+                "Discovery results were truncated due to resource or provider limits."
+            )
 
     changes_stmt = (
         select(ScanChange)
@@ -339,6 +373,7 @@ def get_org_scan_detail_ui(
     pipeline_stages = []
     for st_name in ["discover", "probe", "portscan", "inspect", "score"]:
         st_obj = stage_map.get(st_name)
+        notice = truncation_notice if st_name == "discover" else None
         if st_obj:
             dur_str = f"{st_obj.duration_ms}ms" if st_obj.duration_ms is not None else "--"
             pipeline_stages.append(
@@ -348,6 +383,7 @@ def get_org_scan_detail_ui(
                     "status_display": st_obj.status.capitalize(),
                     "duration": dur_str,
                     "error": st_obj.error,
+                    "truncation_notice": notice,
                 }
             )
         else:
@@ -358,6 +394,7 @@ def get_org_scan_detail_ui(
                     "status_display": "Pending",
                     "duration": "--",
                     "error": None,
+                    "truncation_notice": notice,
                 }
             )
 
@@ -412,7 +449,8 @@ def get_org_domain_alert_notifications_ui(
         .offset(offset)
         .limit(limit)
     )
-    notifications = list(db.scalars(query).all())
+    raw_notifications = list(db.scalars(query).all())
+    notifications = [_notification_to_read(n, membership.role) for n in raw_notifications]
 
     template = templates_env.get_template("partials/alert_notifications.html")
     return template.render(

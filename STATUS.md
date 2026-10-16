@@ -3,6 +3,58 @@
 ## Test Suite
 - Test counts: see the CI run on the latest commit
 
+## Current Status Checklist
+
+### Implemented and locally verified
+- **Scanner observation validity & history traversal (E-1a)**:
+  - Port observations: `OPEN` and `CLOSED` are definite; `FILTERED`, `TIMEOUT`, and missing observations are treated as unknown. Traverses up to 3 earlier scans for latest definite state with accurate per-change `baseline_scan_run_id` attribution.
+  - HTTPS inspection observations: Decoupled certificate and header validity. Per-field header evidence tracking (HSTS strength transitions: added, weakened, removed requiring prior presence/strength).
+  - Certificate defect completeness & remediation: Affirmative proof requirement (`_is_defect_remediated`) before resolving defect findings; identity-only certificates cannot resolve defects; issuer-before-not_after rotation ordering preserved.
+  - CT discovery consistency: Bounded 3-scan history window; scan-level non-truncation/source gate vs. per-host non-empty qualification; anchor-source comparability; 2 consecutive qualifying absences before `REMOVED_SUBDOMAIN`; single emission on entry into absence; rediscovery as `NEW_SUBDOMAIN` referencing confirmed absent scan; transient noise recovery; immediate `NEW_SUBDOMAIN` on first observed asset; clean separation between discovery membership and DNS resolution transitions (`NEWLY_RESOLVING`, `STOPPED_RESOLVING`).
+  - Worker first-scan baseline contract: First successful scan for a domain establishes a baseline (`status="baseline"`, `changes=[]`, `removal_detection="skipped"`); bypasses alert generation completely with zero change-based notifications and zero `scan_changes` rows.
+  - Bounded HTTPS-loss confirmation: Requires 2 consecutive qualifying failures (`CONNECT_ERROR` or `TLS_ERROR` while HTTP answers, matching `HTTP_NO_HTTPS` prerequisite) and prior successful reachability within the 3-prior-scan window; single emission on entry; unknown/inconclusive observations reset failure streak.
+- **Database integration & schema migrations**:
+  - Full migration cycle verified against PostgreSQL 18.6: `alembic upgrade head` (14 migrations) -> `alembic check` (0 drift) -> `alembic downgrade -1` -> `alembic upgrade head` (all exit 0).
+  - Multi-baseline queries and domain isolation verified with real PostgreSQL queries (`tests/test_change_detection_db.py`, `tests/test_alerts_db.py`, `tests/test_b3_change_type_compat_db.py`, `tests/test_b5_deletion_retention_db.py`).
+  - Full non-browser test suite with PostgreSQL and coverage gate: 940 passed, 27 deselected (25 browser tests + 2 live network integration tests), 0 failed; line+branch coverage 90.57% (exceeds pyproject 90.0% gate).
+- **Browser regression suite (Playwright)**:
+  - 26 browser tests passed across Chromium against isolated PostgreSQL container with synthetic auth, CSP violation capture, and route abortion guards.
+  - Includes focused regression `test_browser_scan_detail_changes_and_baseline_rendering` testing baseline scan (0 changes), subsequent scan changes (`REMOVED_SUBDOMAIN`, `NEW_SUBDOMAIN`, `HTTPS_LOST`, `CERTIFICATE_CHANGED`, `SECURITY_HEADER_WEAKENED`, `PORT_NEWLY_OPEN`), and viewer role restrictions.
+- **Current working tree regression & hygiene checks**:
+  - DNS pinning regression suite in `tests/test_d1_dns_pinning.py` passes as part of the test suite.
+  - Security headers (H-Hdr-1) verified via `tests/test_hdr1_security_headers.py`.
+  - UI themes C-UI-1 through C-UI-4 verified via `tests/test_cui4_error_pages.py`, `tests/test_cui4_theme.py`, and `tests/test_dashboard_css.py`.
+  - Code hygiene: `ruff check .` clean (0 errors), `git diff --check` clean (0 warnings).
+- **Historical checkpoint verification (prior commits)**:
+  - Phase D-1 (`4346252`): DNS pinning negative controls with local HTTPS test server.
+  - Phase D-2 (`2c53a3e`): Worker egress firewall container rules verified via `scripts/egress_check.py` on Azure VM and in local compose.
+
+### Implemented but awaiting verification
+- **Remote CI pipeline execution**:
+  - GitHub Actions CI workflows (`.github/workflows/ci.yml` and `.github/workflows/security.yml`) have not yet executed against this local working tree. Local execution of tests and linters does not establish or substitute for remote CI pass.
+
+### User-reported deployed behavior
+- **Azure VM deployment (`2e886e2`)**:
+  - User reports Exposight is live on Azure VM (`exposight.indiasouthcentral.cloudapp.azure.com`).
+  - Caddy automatic TLS certificate provisioning via Let's Encrypt.
+  - Worker egress firewall check (`scripts/egress_check.py`) reported passing in VM container environment (IMDS and WireServer blocked).
+  - Database backup and restore drill (`scripts/backup_db.sh`) reported passing into temporary test database.
+  - *Note*: Deployment status is recorded as user-reported; the current local working tree (including H-Hdr-1, C-UI-4, and E-1a consistency changes) has not been deployed to Azure, and live configuration has not been independently verified in this session.
+
+### Planned product work & unconfirmed deployment status
+- **C-UI-5 dashboard layout redesign**:
+  - Redesign plan specifying new Overview layout, org-level scans/alerts views, and scan detail presentation is parked in `STATUS.md` awaiting approval before implementation.
+- **Unconfirmed production deployment items (need live confirmation)**:
+  - Custom domain wiring (`exposight.dev`): noted as pending in earlier deployment logs; current live DNS/TLS status requires confirmation.
+  - External SMTP transport and alert dispatch: earlier notes record live SMTP delivery as pending; current live configuration requires confirmation.
+  - Off-VM automated backup replication: backup creation and local restore drills verified; replication off-host noted as pending in earlier logs and requires confirmation.
+
+### Unresolved release criteria
+- **Replay benchmark stop-rule criteria (seeds 1-20, 7,080 asset-scans)**:
+  - Combined false changes per 1,000 asset-scans: **89.83** (target threshold: $\le 1.0$) — **FAILS** (driven primarily by CDN certificate rotation at 41.24/1k and synthetic port flap at 19.92/1k).
+  - Alert-eligible false changes per 1,000 asset-scans: **0.85** (target threshold: $\le 0.1$) — **FAILS** (driven by 6 synthetic `PORT_NEWLY_OPEN` events from `port_flap_closed`; port policy retained as deliberate unresolved tradeoff).
+  - Missed real events: **1** (target threshold: $\le 0$) — **FAILS** (Seed 12 `cert_rotated` under `cdn_edge`).
+
 ## Done
 - v1 CLI: 5-stage reconnaissance scanner core (`discover`, `probe`, `portscan`, `inspect`, `score`).
 - v2.0.0 Service: FastAPI REST API, PostgreSQL persistence, PostgreSQL-backed background job queue (FOR UPDATE SKIP LOCKED), CT Cert Spotter fallback.
@@ -359,3 +411,157 @@ Visual change only. Scope: `static/css/app.css`, the header markup in `templates
 - VERIFIED: eight negative controls in an isolated scratch copy each failed on the intended assertion: first probe request, redirect request, TLS retry, inspection primary request, inspection retry, certificate fallback pin, port connection, and mixed public/private DNS answers. Original repository code was never mutated for these controls.
 - Remaining known warning: Starlette TestClient deprecation for httpx (pre-existing, outside D-1).
 - PLANNED next approved increment: D-2 worker egress firewall, following the reviewed D-1 checkpoint. D-2 is not implemented by this checkpoint. No claim of VM, deployment, CI, Python 3.12 or complete EXPO gate verification is made by this local run.
+
+### E-1a Port, Inspection & Discovery Consistency Consolidation (2026-10-15)
+- IMPLEMENTED:
+  - Port observation validity: OPEN and CLOSED are definite observations; FILTERED, timeout, missing results, and unprobed hosts are unknown. Traverses up to 3 successful prior scans for latest definite state. Accurate per-change `baseline_scan_run_id` attribution.
+  - HTTPS inspection observation validity: Decoupled certificate and header validity. Per-field header evidence tracking (`_find_latest_header_observation`, `_find_latest_hsts_strength` requiring prior presence before `SECURITY_HEADER_REMOVED`, prior strong before `SECURITY_HEADER_WEAKENED`, prior missing before `SECURITY_HEADER_ADDED`).
+  - Certificate defect completeness & remediation: Affirmative proof requirement (`_is_defect_remediated`) before defect resolution. Identity-only partial certificates cannot resolve defects. Restored established `if ... elif ...` rotation policy (issuer before not_after; no event multiplication).
+  - CT discovery consistency: Transition-based change detection across a bounded history window (up to 3 prior scans).
+    - Scan-level gate vs per-host qualification: `evaluate_removal_eligibility` checks only source matching and non-truncation (it does not itself check for non-empty results). Non-empty results are evaluated per-host in `_is_qualifying_absence`.
+    - Per-host anchor-source comparability: absences qualify only in non-empty, non-truncated reports matching the source of the host's most recent observed presence (`anchor_source`).
+    - Consecutive absence confirmation: requires 2 consecutive qualifying absences before emitting `REMOVED_SUBDOMAIN`.
+    - Single emission on entry into confirmed absence; continued absence does not re-emit.
+    - Rediscovery after confirmed absence emits `NEW_SUBDOMAIN` referencing the confirmed absent scan.
+    - Transient noise recovery (1-scan omission or interrupted by unknown/fallback) suppresses duplicate `NEW_SUBDOMAIN`.
+    - First observed hostname within available history emits `NEW_SUBDOMAIN` immediately.
+    - Clean separation between discovery membership and DNS resolution transitions (`NEWLY_RESOLVING`, `STOPPED_RESOLVING`).
+  - Worker first-scan vs. pure detector contract:
+    - Pure detector (`detect_changes`) emits `NEW_SUBDOMAIN` for all assets against empty input bundles.
+    - End-to-end worker contract (`ASMWorker._perform_change_detection` and `_mark_run_final`) explicitly treats the first successful domain scan as a baseline (`status="baseline"`, `baseline_scan_run_id=None`, `changes=[]`, `removal_detection="skipped"`); bypasses alert generation completely, queues zero change-based notifications, and writes zero rows to `scan_changes`.
+  - Synthetic alert eligibility clarification: Replay benchmark "alert eligibility" indicates that a change meets the policy filter (`category == "exposure"` and severity >= MEDIUM), but does not establish that an actual email was delivered to an external recipient (which depends on worker dispatch rules, domain subscription settings, and live SMTP transport).
+
+### E-1a Bounded HTTPS-Loss Confirmation Checkpoint (2026-10-15)
+- IMPLEMENTED:
+  - Bounded confirmation policy for HTTPS reachability loss (`HTTPS_LOST`):
+    - Contract-based classification (`_classify_https_probe_observation`):
+      - `SUCCESS`: Host affirmatively `PROBED` and HTTPS endpoint reachable.
+      - `QUALIFYING_FAILURE`: Host affirmatively `PROBED`, HTTP answers (`http.reachable is True`, matching `HTTP_NO_HTTPS` finding contract), and HTTPS failed with a definite error (`CONNECT_ERROR` or `TLS_ERROR`).
+      - `UNKNOWN`: Any missing host entry, non-`PROBED` status (`SKIPPED_UNTRUSTED`, `SKIPPED_PRIVATE_IP`, `SKIPPED_UNRESOLVED`, `SKIPPED_NOT_HTTPS`, `SKIPPED_IPV6_ONLY`), transient network timeout (`TIMEOUT`), redirect loop (`TOO_MANY_REDIRECTS`), unclassified error (`OTHER`), or general host outage (`http.reachable is not True`).
+    - Confirmation conditions:
+      - Requires two consecutive qualifying failures ($S_0$ and $S_1$).
+      - Requires previously observed successful HTTPS reachability within the bounded 3-prior-scan window ($S_2$ or $S_3$). If never observed or expired from history, no confirmed transition is fabricated.
+      - Single emission on entry into confirmation; subsequent failures ($S_0=F, S_1=F, S_2=F, S_3=\text{SUCCESS}$) are suppressed as already confirmed.
+      - Successful HTTPS reachability resets the loss sequence.
+      - Inconclusive or unknown observations reset the failure streak.
+      - References actual prior successful scan in `baseline_scan_run_id`.
+      - Describes transition as repeated observed reachability failure while HTTP remains responsive, not proof that the owner disabled HTTPS.
+- VERIFIED (Offline):
+  - 95/95 offline tests passed across `tests/test_change_detection.py` (79 passed) and `tests/test_change_replay.py` (16 passed).
+  - Regressions cover: success -> fail -> success (0 loss events); success -> fail -> fail (1 loss event with baseline to success); success -> fail -> fail -> fail (0 duplicates); success -> unknown -> fail -> fail (confirms with baseline to success); success -> fail -> unknown -> fail (0 loss events); missing/skipped/blocked observations (treated as unknown); never-observed and expired success; recovery followed by new sustained loss; HTTP_NO_HTTPS prerequisites and TLS_ERROR; worker first-scan baseline contract; and distinguishing supported 1-unknown sequences from expired 2-unknown sequences.
+  - Supplemental replay test `test_candidate_sustained_https_loss_detected_with_deliberate_delay` proves genuine sustained failure is detected at scan $T+1$ (1-scan delay), emits 1 event with historical baseline, and suppresses duplicates on subsequent scans.
+  - Linter: `ruff check src/ tests/ experiments/` passed with 0 errors.
+  - `git diff --check`: clean (0 whitespace/CRLF issues).
+  - Seeded benchmark candidate replay (20 seeds, 7,080 asset-scans):
+    - Archived candidate artifacts in distinct directory `experiments/change_replay/results_port_inspect_discover_probe/` (also preserved in `results_candidate/`).
+    - `probe_https_fail`: false changes dropped from 69 (9.75/1k) down to 41 (5.79/1k). Spurious `HTTPS_LOST` dropped from 28 to **0**. Alert-eligible false changes dropped from 28 (3.95/1k) to **0 (0.00/1k)**.
+    - `combined`: false changes dropped from 660 (93.22/1k) down to 636 (89.83/1k). Spurious `HTTPS_LOST` dropped from 24 (3.39/1k) to **0**. Alert-eligible false changes dropped from 30 (4.24/1k) down to **6 (0.85/1k)** (all 6 remaining alert-eligible false changes are from `port_flap_closed`).
+    - Missed events: 1 in `combined` (Seed 12 `cert_rotated` under `cdn_edge`, unchanged).
+    - Detection delays: mean delay 0.14 scans, max delay 1 scan.
+- BOUNDED-HISTORY LIMITATIONS, DELIBERATE DELAY & BLIND SPOTS:
+  - Deliberate confirmation delay: Requiring 2 consecutive qualifying failures introduces an intentional 1-scan delay for genuine sustained HTTPS failures (detected at the 2nd failed scan rather than the 1st).
+  - Bounded 3-scan window expiration:
+    - Supported: `SUCCESS(t) -> UNKNOWN(t+1) -> FAILURE(t+2) -> FAILURE(t+3)`. At $t+3$, history is $[F(t+2), U(t+1), S(t)]$; $S(t)$ is within the 3-prior-scan window, confirming loss with baseline pointing to $S(t)$.
+    - Expired: `SUCCESS(t) -> UNKNOWN(t+1) -> UNKNOWN(t+2) -> FAILURE(t+3) -> FAILURE(t+4)`. At $t+3$ (1st failure), streak=1 so no confirmation. At $t+4$ (2nd failure), history is $[F(t+3), U(t+2), U(t+1)]$; $S(t)$ occurred 4 scans ago and has expired from the 3-prior-scan window, so no `HTTPS_LOST` transition is emitted.
+  - Inconclusive observation blind spot: If a host experiences timeouts (`TIMEOUT`), redirect loops (`TOO_MANY_REDIRECTS`), unclassified errors (`OTHER`), or full host outages (`http.reachable is False`), the observation is classified as `UNKNOWN` and resets the failure streak rather than confirming an HTTPS loss.
+- REMAINING FAILED STOP-RULE CRITERIA:
+  - False changes per 1,000 <= 1.0: FAIL (current 89.83/1k, driven by 41.24/1k CDN cert changes and 19.92/1k port flap changes).
+  - Alert-eligible false per 1,000 <= 0.1: FAIL (current 0.85/1k, driven entirely by 6 `PORT_NEWLY_OPEN` from `port_flap_closed`).
+  - Missed real events <= 0: FAIL (1 missed event: Seed 12 `cert_rotated` under `cdn_edge`).
+- PENDING & PARKED WORK:
+  - Database Integration & Migration Verification (Verified on isolated disposable PostgreSQL 18.6 container):
+    - Full migration sequence verified: `alembic upgrade head` (14 migrations) -> `alembic check` (0 drift) -> `alembic downgrade -1` -> `alembic upgrade head` all exited 0.
+    - Targeted database suites (32 passed, 0 failed in 5.77s):
+      - `tests/test_change_detection_db.py`: 10 passed, including multi-scan history window & domain isolation, per-change distinct baseline persistence, subdomain removal lifecycle ($P \to A \to A \to A$), and HTTPS loss lifecycle ($S \to F \to F \to F$).
+      - `tests/test_alerts_db.py`: 8 passed, including atomic outbox writes in fenced transaction and alert min_severity filtering.
+      - `tests/test_b3_change_type_compat_db.py`: 3 passed.
+      - `tests/test_b5_deletion_retention_db.py`: 11 passed, including multi-baseline retention protection.
+    - Full non-browser test suite with database and coverage gate: **940 passed, 27 deselected, 0 failed** in 85.50s.
+    - Coverage gate passed: **90.57% total coverage** (exceeds pyproject.toml `fail_under = 90.0%`).
+    - Linter and formatting: `ruff check .` (0 errors), `git diff --check` (clean).
+    - Narrow cleanup: disposable PostgreSQL container cleanly stopped and removed with zero residual volumes or state.
+  - Overall release acceptance remains pending: 6 alert-eligible `PORT_NEWLY_OPEN` false alerts from synthetic port flap noise remain an unresolved tradeoff; stop-rule bounds are not met.
+  - Preserved distinct archives: `results/` (original P0 benchmark), `results_port/`, `results_port_inspect/`, `results_port_inspect_discover/`, and `results_port_inspect_discover_probe/`.
+  - Parked product work preserved: C-UI-5 dashboard redesign plan (parked in STATUS.md awaiting approval).
+
+### Viewer-Privacy Consistency Fix Checkpoint (Completed 2026-10-15)
+- **Policy:**
+  - Viewers may inspect domain configuration and alert outbox history, but must not receive configured alert-recipient email addresses (`alert_emails`, `recipient`) or raw delivery errors (`last_error`).
+  - Admins and owners retain full unredacted access.
+- **Contract & Schemas (`src/asm/api/schemas.py`, `src/asm/db/models.py`):**
+  - `DomainRead`: `alert_emails: list[str] | None = None` distinguishes unconfigured (`[]` for admin) from redacted (`None` for viewer). Added `alert_recipient_count: int` (backed by `@property alert_recipient_count` on `Domain` ORM model) so viewers know recipient counts without disclosing addresses.
+  - `AlertNotificationRead`: `recipient: str | None = None` and `last_error: str | None = None` (redacted to `None` for viewers).
+- **Server-Side Serialization (`src/asm/api/routes.py`, `src/asm/api/routes_ui.py`):**
+  - Explicit role-aware helpers `_domain_to_read(domain, role)` and `_notification_to_read(notification, role)` enforce redaction during response model instantiation based on authenticated `Membership.role`. Never trusts client-supplied roles.
+  - SQLAlchemy model instances are never mutated (zero dirty-session writes or cross-request pollution).
+  - Routes updated:
+    - `GET /orgs/{org_id}/domains`: returns `list[DomainRead]` (redacted for viewers).
+    - `GET /orgs/{org_id}/domains/{domain_id}`: returns `DomainRead` (redacted for viewers).
+    - `POST /orgs/{org_id}/domains`: returns `DomainRead`.
+    - `PUT /orgs/{org_id}/domains/{domain_id}/schedule`: returns `DomainRead`.
+    - `PUT /orgs/{org_id}/domains/{domain_id}/alerts`: returns `DomainRead`.
+    - `GET /orgs/{org_id}/domains/{domain_id}/alert-notifications`: returns `list[AlertNotificationRead]` (redacted for viewers across all pagination offsets/limits and status filters).
+    - UI routes: `GET /ui/orgs/{org_id}/domains/{domain_id}` and `GET /ui/orgs/{org_id}/domains/{domain_id}/alert-notifications` pass role-aware serialized representations to Jinja templates for defense-in-depth.
+- **Verification on Isolated Disposable PostgreSQL 18.6 Container:**
+  - Created disposable container `exposight-privacytest-c7e1f9a2b4d8` using `postgres:18.6-alpine` on loopback `127.0.0.1:50873`, with tmpfs on `/var/lib/postgresql`, zero persistent mounts or volume leaks.
+  - Migrated from scratch: all 14 Alembic migrations applied to head cleanly.
+  - Dedicated test suite `tests/test_viewer_privacy_db.py` (5 passed in 0.77s):
+    - Viewer vs admin vs outsider (404) on lists, details, and notification history.
+    - Pagination (`limit`, `offset`) and status filters (`?status=failed`) maintain strict redaction.
+    - Zero synthetic email addresses or raw SMTP errors leaked in viewer payloads.
+    - Database verification: viewer reads do NOT persist `None` back into PostgreSQL or pollute subsequent admin reads.
+    - UI verification: viewer sees `"2 recipients configured"` with recipient forms and columns hidden.
+  - Regression verification against database:
+    - `tests/test_alerts_api.py`: 4 passed (0.70s).
+    - `tests/test_tenant_isolation.py`: 9 passed (1.13s).
+    - `tests/test_dashboard_ui.py`: 37 passed (1.54s).
+    - `tests/test_route_isolation_db.py`: 84 passed (8.94s).
+    - `tests/test_alerts_db.py`: 8 passed (1.60s).
+    - `tests/browser/test_dashboard_browser.py`: 24 passed (62.20s).
+  - Clean container destruction: stopped and removed with `docker rm -f`.
+- **Preservations & Remaining Stop-Rules:**
+  - Preserved all scanner fixes, benchmark archives, and parked C-UI-5 work.
+  - No deployment, push, or production access.
+  - Release stop-rules remain pending: 6 residual alert-eligible port flap false alerts remain an unresolved tradeoff; remote CI and Azure live deployment remain user-reported and unverified.
+
+### Discovery Resource-Limit Checkpoint (Completed 2026-10-16)
+- **Ingestion & Response Body Bounds (`src/asm/discovery.py`):**
+  - Response body streaming byte budget (`DISCOVERY_MAX_RESPONSE_BYTES`, default provisional 10 MiB) enforced chunk-by-chunk before JSON parsing on both crt.sh and Cert Spotter. Content-Length header checked before streaming when present.
+  - Rejection of non-identity `Content-Encoding` before body consumption across all HTTP statuses (success and error paths), closing responses immediately and following provider fallback/error semantics.
+  - Cert Spotter cumulative budget (`CumulativeBudget`): charges consumed response-body chunks inside reading loop across pages, retries, and error bodies. Preserves accounting if socket iteration raises `ReadTimeout` or transport errors; retries never reset the budget.
+  - Error preview bounding: `_read_error_text_bounded` retains and decodes only up to its configured preview allowance (e.g. 8,192 bytes) even when the underlying transport yields a single chunk larger than the allowance (e.g. 64 KiB), while charging total consumed bytes to the cumulative budget and closing the response.
+  - Transport chunk distinction: documented that with `chunk_size=None`, transport chunk size is governed by socket/framing buffers and is not an application-defined numeric constant.
+  - Resource claim correction: removed unsupported fixed 3–5× JSON memory multiplier; parsing overhead depends on JSON structure (object vs string density) and has not been empirically measured.
+- **Hostname Selection & Downstream Protection (`src/asm/discovery.py`):**
+  - Hostname cap (`DISCOVERY_MAX_HOSTS`, provisional default 1,000) applied deterministically in `select_bounded_subdomains` (prioritizing discovered apex, then sorted alphabetically) after normalization and scope filtering, before DNS resolution or downstream scanning.
+  - Truncation metadata: `truncation_reason` ("hostname_cap_exceeded", "provider_entry_limit", "provider_and_hostname_cap_exceeded") recorded in discovery report counts (`selected_hosts`, `observed_hosts`). Prevents downstream false subdomain removal events.
+  - UI disclosure: scan-detail UI displays partial-coverage notices in pipeline stages for active and historical reports.
+  - Configuration validation: `_validate_positive_int` strictly rejects non-integers (strings, floats, booleans) and non-positives with `DiscoveryConfigurationError`. CLI discovery remains self-contained without requiring database or auth configuration.
+- **Scan Detail Route Optimization & Contract Fidelity (`src/asm/api/routes_ui.py`, `tests/test_scan_detail_route_db.py`):**
+  - `get_org_scan_detail_ui` queries `ScanResult` filtering `stage.in_(["discover", "score"])`, excluding heavy `portscan` rows from DB transfer.
+  - Test suite uses real terminal lifecycle status `"succeeded"` (no invented `"completed"` statuses).
+  - Uses representative production `ScoreReport` schema (`domain_score`, `domain_band`, `hosts` with `findings`, `domain_findings`).
+  - Observed executed SQL via SQLAlchemy `before_cursor_execute` cursor listener, asserting stage restriction and parameter binding (`discover`, `score` present, `portscan` excluded).
+  - Verified ORM identity map exclusion (`port_res not in db_session`), HTML finding rendering, and multi-tenant 404 anti-enumeration boundaries.
+- **Targeted Verification Scope (Disposable PostgreSQL 18.6 Instance):**
+  - Note: Verification was targeted to affected discovery and scan-detail route tests; does not represent full repository test suite (940+ tests) or live production/Azure verification.
+  - Created disposable cluster via `initdb` on temp directory (`pg_asm_disp_8921`), started daemon on loopback `127.0.0.1:5433`, migrated with `scripts/reset_test_db.py` (14 migrations to head, 0 drift).
+  - Test execution: **86 passed, 0 failed in 0.70s**:
+    - `tests/test_discovery.py`: 80 passed (streaming budget accounting, large single-chunk preview retention, non-identity encoding rejection across 200/400/404/429/500/502, argument validation, hostname selection).
+    - `tests/test_scan_detail_route_db.py`: 6 passed (SQL cursor interception, ORM loading exclusion, truncation notices, tenant isolation).
+  - Hygiene: `uv run ruff check .` clean (0 errors), `git diff --check` clean (0 warnings).
+  - Isolation & cleanup: postgres daemon terminated via task kill, port 5433 freed (0 connections), temp data directory removed (`Test-Path` returned False).
+- **Preservations:**
+  - Preserved all previous scanner changes, viewer privacy protections, frozen replay benchmark archives (`experiments/change_replay/`), and parked C-UI-5 work.
+  - No deployment, push, live provider requests, dependency changes, or production access.
+
+### Combined Local Verification Milestone (Completed 2026-10-16)
+- **Status:** Accumulated changes passed the reported local verification suite; working tree remains uncommitted. Remote CI, production verification and replay acceptance remain unresolved.
+- **Verification Scope:**
+  - Migration sequence: `alembic upgrade head` (14 migrations) -> `alembic check` (0 drift) -> `alembic downgrade -1` -> `alembic upgrade head` -> `alembic check` (all exit 0).
+  - Full non-browser test suite with coverage: **1,008 passed, 0 failed, 28 deselected** in 68.96s.
+  - Branch & line coverage: **90.82%** (exceeds pyproject.toml 90.0% requirement).
+  - Full Playwright browser regression suite: **26 passed, 0 failed** in 76.49s.
+  - Linter & git diff: `ruff check .` (0 errors), `git diff --check` (0 warnings).
+  - Attributable defect fixed: removed CSP-violating inline `style` attribute from `scan_detail.html` truncation notice and defined `.stage-card-notice` in `app.css`.
+  - Disposable environment: executed against ephemeral Docker PostgreSQL 18.6 container (`exposight-verify-c8491d9e7a2b`) on loopback 127.0.0.1:5433 with tmpfs mount, verified via unique database identity marker `exposight_verify_marker_f92b71d4c82e`. Cleanly destroyed after run.

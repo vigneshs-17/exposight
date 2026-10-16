@@ -12,7 +12,7 @@ from collections import Counter
 import pytest
 
 import asm.changes
-from experiments.change_replay import harness
+from experiments.change_replay import harness, p0_reference
 from experiments.change_replay.run import main
 
 NOISY_SCAN = 3
@@ -30,23 +30,40 @@ def _assert_no_missed(r: harness.RunResult) -> None:
 def test_runner_calls_production_functions_not_copies(monkeypatch):
     assert harness.detect_changes is asm.changes.detect_changes
     assert harness.evaluate_removal_eligibility is asm.changes.evaluate_removal_eligibility
+    assert harness.detect_changes_p0 is p0_reference.detect_changes
+    assert (
+        harness.evaluate_removal_eligibility_p0
+        is p0_reference.evaluate_removal_eligibility
+    )
     src = inspect.getsource(harness)
-    assert "def detect_changes" not in src and "def evaluate_removal_eligibility" not in src
+    assert "def detect_changes(" not in src and "def evaluate_removal_eligibility(" not in src
 
-    calls = []
+    p0_calls = []
+    orig_p0 = harness.detect_changes_p0
 
-    def spy_detect(baseline, new, allow_removal=True):
-        calls.append(allow_removal)
-        return asm.changes.detect_changes(baseline, new, allow_removal=allow_removal)
+    def spy_p0(baseline, new, allow_removal=True):
+        p0_calls.append(allow_removal)
+        return orig_p0(baseline, new, allow_removal=allow_removal)
 
-    monkeypatch.setattr(harness, "detect_changes", spy_detect)
+    monkeypatch.setattr(harness, "detect_changes_p0", spy_p0)
     clean = harness.Noise({}, 1)
     base = harness.observe(harness.truth_at(0), 0, clean)
     truncated = harness.observe(harness.truth_at(1), 1, harness.Noise({"ct_truncated": 1.0}, 1))
     harness.p0_compare(base, harness.observe(harness.truth_at(1), 1, clean))
     harness.p0_compare(base, truncated)
-    # allow_removal comes from evaluate_removal_eligibility, as in the worker
-    assert calls == [True, False]
+    assert p0_calls == [True, False]
+
+    cand_calls = []
+    orig_cand = harness.detect_changes
+
+    def spy_cand(baseline, new, allow_removal=True, **kwargs):
+        cand_calls.append(allow_removal)
+        return orig_cand(baseline, new, allow_removal=allow_removal, **kwargs)
+
+    monkeypatch.setattr(harness, "detect_changes", spy_cand)
+    harness.candidate_compare([base], harness.observe(harness.truth_at(1), 1, clean))
+    harness.candidate_compare([base], truncated)
+    assert cand_calls == [True, False]
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -170,3 +187,46 @@ def test_cli_output_is_byte_identical(tmp_path):
     assert names == ["detections.csv", "false_changes.csv", "runs.csv", "summary.md"]
     for n in names:
         assert (a / n).read_bytes() == (b / n).read_bytes()
+
+
+def test_candidate_sustained_https_loss_detected_with_deliberate_delay():
+    """Supplemental replay test: genuine sustained HTTPS loss is detected with 1-scan delay.
+
+    Verifies that:
+    1. Scan T (first failure after SUCCESS): 0 HTTPS_LOST emitted (suppresses transient noise).
+    2. Scan T+1 (second consecutive failure): 1 HTTPS_LOST emitted with baseline pointing to T-1.
+    3. Scan T+2 (third consecutive failure): 0 duplicate HTTPS_LOST emitted (emits once on entry).
+    """
+    import copy
+
+    clean_noise = harness.Noise({}, seed=1)
+    base_truth = harness.truth_at(0)
+    s0 = harness.observe(base_truth, 0, clean_noise)
+
+    def _make_fail_scan(t: int) -> dict:
+        obs = harness.observe(base_truth, t, clean_noise)
+        obs_copy = copy.deepcopy(obs)
+        for h in obs_copy["probe"]["results"]:
+            if h["subdomain"] == "api.example.com":
+                h["https"] = {"reachable": False, "error_type": "CONNECT_ERROR"}
+        return obs_copy
+
+    s1 = _make_fail_scan(1)
+    s2 = _make_fail_scan(2)
+    s3 = _make_fail_scan(3)
+
+    # Scan 1 (first failure): history is [s0] -> 0 HTTPS_LOST
+    c1 = harness.candidate_compare([s0], s1)
+    assert not any(c["change_type"] == "HTTPS_LOST" for c in c1)
+
+    # Scan 2 (second consecutive failure): history is [s1, s0] -> 1 HTTPS_LOST
+    c2 = harness.candidate_compare([s1, s0], s2)
+    lost2 = [c for c in c2 if c["change_type"] == "HTTPS_LOST"]
+    assert len(lost2) == 1
+    assert lost2[0]["asset"] == "api.example.com"
+    assert lost2[0]["baseline_scan_run_id"] == -2  # points to s0 (prior success)
+
+    # Scan 3 (third consecutive failure): history is [s2, s1, s0] -> 0 repeated events
+    c3 = harness.candidate_compare([s2, s1, s0], s3)
+    lost3 = [c for c in c3 if c["change_type"] == "HTTPS_LOST"]
+    assert len(lost3) == 0

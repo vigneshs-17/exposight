@@ -65,6 +65,11 @@
         {{ stage.error }}
       </div>
       {% endif %}
+      {% if stage.truncation_notice %}
+      <div class="stage-card-notice alert-box alert-info">
+        {{ stage.truncation_notice }}
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
   </div>

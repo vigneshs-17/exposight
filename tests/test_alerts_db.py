@@ -199,7 +199,18 @@ def test_no_alert_for_summary_only_or_below_threshold(
         },
         "probe": {"results": []},
         "portscan": {"results": []},
-        "inspect": {"results": []},
+        "inspect": {
+            "results": [
+                {
+                    "subdomain": "alert-filter.com",
+                    "status": "PROBED",
+                    "headers": {
+                        "present_headers": {"X-Content-Type-Options": "nosniff"},
+                        "missing_headers": [],
+                    },
+                }
+            ]
+        },
         "score": {"domain_score": 0, "domain_band": "INFO", "hosts": []},
     }
     w1 = ASMWorker(engine=db_engine, runner=MockScannerRunner(base_reports))
@@ -221,9 +232,12 @@ def test_no_alert_for_summary_only_or_below_threshold(
         "inspect": {
             "results": [
                 {
-                    "host": "alert-filter.com",
-                    "http_status": 200,
-                    "missing_headers": ["X-Content-Type-Options"],
+                    "subdomain": "alert-filter.com",
+                    "status": "PROBED",
+                    "headers": {
+                        "present_headers": {},
+                        "missing_headers": ["X-Content-Type-Options"],
+                    },
                 }
             ]
         },

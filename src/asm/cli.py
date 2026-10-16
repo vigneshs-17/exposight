@@ -318,15 +318,24 @@ def handle_discover(domain_arg: str, output_dir_arg: str) -> int:
 
     # 2. Query Certificate Transparency logs with fallback
     try:
-        subdomains, source, fallback_reason, truncated = discover_subdomains(
+        outcome = discover_subdomains(
             domain,
             crtsh_fetcher=fetch_crtsh_data,
         )
+        subdomains, source, fallback_reason, truncated = outcome
     except DiscoveryError as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 2
 
     total_found = len(subdomains)
+    observed_count = getattr(outcome, "observed_count", total_found)
+    truncation_reason = getattr(outcome, "truncation_reason", None)
+
+    if truncated:
+        print(
+            f"[*] Discovery capped ({truncation_reason or 'limit reached'}): "
+            f"{total_found} selected from {observed_count} observed unique hostnames."
+        )
 
     results: list[SubdomainResult] = []
     if total_found == 0:
@@ -347,6 +356,8 @@ def handle_discover(domain_arg: str, output_dir_arg: str) -> int:
     # 4. Build report
     counts = {
         "total_discovered": total_found,
+        "selected_hosts": total_found,
+        "observed_hosts": observed_count,
         "resolved": resolved_count,
         "unresolved": unresolved_count,
     }
@@ -357,6 +368,7 @@ def handle_discover(domain_arg: str, output_dir_arg: str) -> int:
         source=source,
         fallback_reason=fallback_reason,
         truncated=truncated,
+        truncation_reason=truncation_reason,
         counts=counts,
         results=results,
     )

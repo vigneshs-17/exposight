@@ -1100,18 +1100,18 @@ class ASMWorker:
         from asm.changes import detect_changes, evaluate_removal_eligibility
 
         with self.session_factory() as session:
-            baseline_row = session.execute(
+            baseline_rows = session.execute(
                 text(
                     """
                     SELECT id FROM scan_runs
                     WHERE domain_id = :domain_id AND status = 'succeeded' AND id < :current_id
-                    ORDER BY id DESC LIMIT 1
+                    ORDER BY id DESC LIMIT 3
                     """
                 ),
                 {"domain_id": domain_id, "current_id": scan_run_id},
-            ).fetchone()
+            ).fetchall()
 
-            if not baseline_row:
+            if not baseline_rows:
                 summary = {
                     "status": "baseline",
                     "baseline_scan_run_id": None,
@@ -1122,30 +1122,49 @@ class ASMWorker:
                 }
                 return summary, [], None
 
-            baseline_id = baseline_row[0]
+            baseline_ids = [r[0] for r in baseline_rows]
+            baseline_id = baseline_ids[0]
             results = session.execute(
                 text(
                     """
-                    SELECT stage, report FROM scan_results
-                    WHERE scan_run_id = :baseline_id
+                    SELECT scan_run_id, stage, report FROM scan_results
+                    WHERE scan_run_id = ANY(:baseline_ids)
+                    ORDER BY scan_run_id DESC
                     """
                 ),
-                {"baseline_id": baseline_id},
+                {"baseline_ids": baseline_ids},
             ).fetchall()
-            baseline_reports = {r[0]: r[1] for r in results}
+            reports_by_id: dict[int, dict[str, Any]] = {bid: {} for bid in baseline_ids}
+            for row in results:
+                reports_by_id[row[0]][row[1]] = row[2]
+
+            baseline_reports = reports_by_id[baseline_id]
+            historical_baselines = [
+                {"scan_run_id": bid, "reports": reports_by_id[bid]}
+                for bid in baseline_ids
+            ]
 
         base_disc = baseline_reports.get("discover") or {}
         new_disc = new_reports.get("discover") or {}
         allow_removal, skip_reason = evaluate_removal_eligibility(base_disc, new_disc)
 
         try:
-            changes = detect_changes(baseline_reports, new_reports, allow_removal=allow_removal)
+            changes = detect_changes(
+                baseline_reports,
+                new_reports,
+                allow_removal=allow_removal,
+                historical_baselines=historical_baselines,
+                baseline_scan_run_id=baseline_id,
+            )
             counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
             for ch in changes:
                 sev = ch.get("severity", "INFO").lower()
                 if sev in counts:
                     counts[sev] += 1
 
+            # removal_detection records scan-level gate evaluation (performed vs skipped).
+            # Individual host removals require two consecutive qualifying absences
+            # in detect_changes.
             summary = {
                 "status": "computed",
                 "baseline_scan_run_id": baseline_id,
@@ -1232,7 +1251,9 @@ class ASMWorker:
                         {
                             "domain_id": domain_id,
                             "scan_run_id": scan_run_id,
-                            "baseline_scan_run_id": baseline_scan_run_id,
+                            "baseline_scan_run_id": (
+                                ch.get("baseline_scan_run_id") or baseline_scan_run_id
+                            ),
                             "change_type": ch["change_type"],
                             "category": ch["category"],
                             "severity": ch["severity"],

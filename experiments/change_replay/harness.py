@@ -5,8 +5,16 @@ in the order and shape asm/worker/runner.py::DirectScannerRunner produces them:
 probe and portscan only receive hosts that resolved in discover, inspect walks the probe
 results, and the score report is score_domain_payloads(...).to_dict().
 
-P0 is production change detection, called exactly as
-asm/worker/worker.py::Worker._perform_change_detection does (see p0_compare).
+P0 is frozen pre-change detection (git revision ec52e8e), isolated from modified production
+detection logic via p0_reference.
+
+Shared dependencies with production:
+- asm.models: Dataclasses for reports (DiscoveryReport, ProbeReport, PortScanReport, InspectReport).
+- asm.scoring: score_domain_payloads and tier rank definitions used to synthesize score reports.
+- asm.portscan: DEFAULT_PORTS, PORT_SERVICES, and compute_risk_flags used to build synthetic scans.
+- asm.headers_inspect: extract_header_info used to build inspect headers.
+Any change to these modules will affect the synthetic observation generation; the change detectors
+themselves are isolated (p0_reference for P0, asm.changes for candidates).
 """
 
 from __future__ import annotations
@@ -37,6 +45,12 @@ from asm.models import (
 )
 from asm.portscan import DEFAULT_PORTS, PORT_SERVICES, compute_risk_flags
 from asm.scoring import TIER_RANK, score_domain_payloads
+from experiments.change_replay.p0_reference import (
+    detect_changes as detect_changes_p0,
+)
+from experiments.change_replay.p0_reference import (
+    evaluate_removal_eligibility as evaluate_removal_eligibility_p0,
+)
 
 DOMAIN = "example.com"
 N_SCANS = 30
@@ -327,13 +341,35 @@ def observe(truth: dict[str, Host], t: int, noise: Noise) -> dict[str, dict[str,
 def p0_compare(
     baseline_reports: dict[str, dict[str, Any]], new_reports: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """P0: asm/worker/worker.py Worker._perform_change_detection, lines 1135-1142."""
+    """P0: Frozen pre-change change detection reference (git revision ec52e8e)."""
     # The worker reads the baseline back from scan_results (JSONB); new_reports is in memory.
     baseline_reports = json.loads(json.dumps(baseline_reports))
     base_disc = baseline_reports.get("discover") or {}
     new_disc = new_reports.get("discover") or {}
+    allow_removal, _skip_reason = evaluate_removal_eligibility_p0(base_disc, new_disc)
+    return detect_changes_p0(baseline_reports, new_reports, allow_removal=allow_removal)
+
+
+def candidate_compare(
+    history_reports: list[dict[str, dict[str, Any]]], new_reports: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Port candidate: passes up to 3 prior scans as historical_baselines."""
+    history_reports = json.loads(json.dumps(history_reports))
+    baseline_reports = history_reports[0]
+    base_disc = baseline_reports.get("discover") or {}
+    new_disc = new_reports.get("discover") or {}
     allow_removal, _skip_reason = evaluate_removal_eligibility(base_disc, new_disc)
-    return detect_changes(baseline_reports, new_reports, allow_removal=allow_removal)
+    hist = [
+        {"scan_run_id": -(idx + 1), "reports": rep}
+        for idx, rep in enumerate(history_reports[:3])
+    ]
+    return detect_changes(
+        baseline_reports,
+        new_reports,
+        allow_removal=allow_removal,
+        historical_baselines=hist,
+        baseline_scan_run_id=-1,
+    )
 
 
 def change_key(c: dict[str, Any]) -> tuple[str, str, str]:
@@ -392,5 +428,41 @@ def replay(
                                       "alert_eligible": alert_eligible(c)})
     # detect_changes walks a set of host names (changes.py:304), so its output order varies
     # with PYTHONHASHSEED; sort to keep results byte-identical across processes.
+    false_changes.sort(key=lambda c: (c["scan"], c["change_type"], c["asset"], c["detail"]))
+    return RunResult(seed, asset_scans, false_changes, detected, noise.fired)
+
+
+def replay_candidate(
+    probs: dict[str, float],
+    seed: int,
+    n_scans: int = N_SCANS,
+    noise_scans: set[int] | None = None,
+) -> RunResult:
+    """Replay n_scans consecutive scans; classify changes using candidate multi-scan lookback."""
+    noise = Noise(probs, seed)
+    truths = [truth_at(t) for t in range(n_scans)]
+    clean = [observe(truths[t], t, Noise({}, seed)) for t in range(n_scans)]
+    quiet = Noise({}, seed)
+    noisy = [observe(truths[t], t, noise if noise_scans is None or t in noise_scans else quiet)
+             for t in range(n_scans)]
+    detected: dict[str, int | None] = {ev.name: None for ev in EVENTS if ev.scan < n_scans}
+    false_changes: list[dict[str, Any]] = []
+    asset_scans = 0
+    for t in range(1, n_scans):
+        asset_scans += sum(h.in_ct for h in truths[t].values())
+        clean_history = [clean[i] for i in range(t - 1, max(-1, t - 4), -1)]
+        noisy_history = [noisy[i] for i in range(t - 1, max(-1, t - 4), -1)]
+        clean_keys = {change_key(c) for c in candidate_compare(clean_history, clean[t])}
+        for c in candidate_compare(noisy_history, noisy[t]):
+            k = change_key(c)
+            ev = next((e for e in EVENTS if e.key == k and e.scan <= t
+                       and e.name in detected and detected[e.name] is None), None)
+            if ev is not None:
+                detected[ev.name] = t
+            elif k not in clean_keys:
+                false_changes.append({"scan": t, "change_type": c["change_type"],
+                                      "asset": c["asset"], "detail": c["detail"],
+                                      "severity": c["severity"], "category": c["category"],
+                                      "alert_eligible": alert_eligible(c)})
     false_changes.sort(key=lambda c: (c["scan"], c["change_type"], c["asset"], c["detail"]))
     return RunResult(seed, asset_scans, false_changes, detected, noise.fired)
