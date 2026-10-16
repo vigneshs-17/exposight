@@ -13,9 +13,17 @@ import csv
 from collections import Counter
 from pathlib import Path
 
-from experiments.change_replay.harness import EVENTS, NOISE_CLASSES, REALISTIC, RunResult, replay
+from experiments.change_replay.harness import (
+    EVENTS,
+    NOISE_CLASSES,
+    REALISTIC,
+    RunResult,
+    replay,
+    replay_candidate,
+)
 
 RESULTS = Path(__file__).parent / "results"
+RESULTS_CANDIDATE = Path(__file__).parent / "results_candidate"
 
 # Stop rule, fixed in STATUS.md (E-1a plan) before any result existed.
 MAX_FALSE_PER_1000 = 1.0
@@ -45,13 +53,18 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seed", type=int, default=1, help="first seed")
     ap.add_argument("--seeds", type=int, default=20, help="number of consecutive seeds")
-    ap.add_argument("--out", type=Path, default=RESULTS)
+    ap.add_argument(
+        "--candidate", action="store_true", help="run candidate detector instead of frozen P0"
+    )
+    ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args(argv)
     seeds = range(args.seed, args.seed + args.seeds)
-    args.out.mkdir(parents=True, exist_ok=True)
+    out_dir = args.out or (RESULTS_CANDIDATE if args.candidate else RESULTS)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    replay_fn = replay_candidate if args.candidate else replay
 
     runs: dict[str, list[RunResult]] = {
-        name: [replay(probs, s) for s in seeds] for name, probs in profiles().items()
+        name: [replay_fn(probs, s) for s in seeds] for name, probs in profiles().items()
     }
 
     run_rows, false_rows, det_rows = [], [], []
@@ -68,23 +81,25 @@ def main(argv: list[str] | None = None) -> None:
             det_rows += [[name, r.seed, ev, event_scan[ev], "" if d is None else d,
                           "" if d is None else d - event_scan[ev]]
                          for ev, d in r.detected.items()]
-    _write_csv(args.out / "runs.csv",
+    _write_csv(out_dir / "runs.csv",
                ["profile", "seed", "asset_scans", "false_changes", "alert_eligible_false",
                 "missed_events", *(f"fired_{c}" for c in NOISE_CLASSES)], run_rows)
-    _write_csv(args.out / "false_changes.csv",
+    _write_csv(out_dir / "false_changes.csv",
                ["profile", "seed", "scan", "change_type", "asset", "detail", "severity",
                 "category", "alert_eligible"], false_rows)
-    _write_csv(args.out / "detections.csv",
+    _write_csv(out_dir / "detections.csv",
                ["profile", "seed", "event", "event_scan", "detected_scan", "delay_scans"],
                det_rows)
 
+    title_label = "Port-Inspection-Discovery-Probe Candidate" if args.candidate else "P0"
+    cmd_flag = " --candidate" if args.candidate else ""
     lines = [
-        "# E-1a: P0 false changes under seeded scan noise",
+        f"# E-1a: {title_label} false changes under seeded scan noise",
         "",
         f"Seeds {seeds.start}-{seeds.stop - 1}; {len(EVENTS)} labelled real events per seed; "
         "each noise class alone at its realistic probability, then all combined.",
         "Regenerate: `python -m experiments.change_replay.run "
-        f"--seed {args.seed} --seeds {args.seeds}`.",
+        f"--seed {args.seed} --seeds {args.seeds}{cmd_flag}`.",
         "",
         "| profile | p | asset-scans | false changes | per 1,000 | alert-eligible per 1,000 "
         "| missed events | mean delay | max delay |",
@@ -131,7 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     lines += ["", "## Stop rule (combined profile)", ""]
     lines += [f"- {label}: {'pass' if ok else 'FAIL'}" for label, ok in checks]
     lines += ["", f"**Verdict: {verdict}.**", ""]
-    (args.out / "summary.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
+    (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":

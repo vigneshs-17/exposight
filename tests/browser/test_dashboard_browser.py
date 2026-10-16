@@ -35,6 +35,7 @@ from asm.db.models import (
     Domain,
     Membership,
     Organization,
+    ScanChange,
     ScanRun,
     ScanStage,
     User,
@@ -975,3 +976,226 @@ def test_browser_suspended_account_sees_notice_without_reason(
         page.locator("#signout-button").click()
         expect(page.locator("#auth-section")).to_be_visible()
         expect(panel).to_be_hidden()
+
+
+def test_browser_scan_detail_changes_and_baseline_rendering(
+    page: Page,
+    live_server: str,
+    browser_session_factory: sessionmaker[Session],
+) -> None:
+    """Verifies baseline scan detail (no changes) vs subsequent scan detail with
+    production-consistent change fixtures (category='exposure', real severities,
+    real details/evidence) referencing two distinct historical baseline scans.
+
+    UI exposure scope:
+    - partials/scan_detail.html displays run-level baseline context and columns for
+      Severity, Category, Change type, Asset, Detail, Evidence.
+    - Per-change baseline_scan_run_id attribution is persisted in the database and
+      returned via REST API, but the existing UI does not render a per-row baseline link.
+    - Viewer UI behavior: #btn-run-scan is omitted from DOM for viewers (server-side
+      RBAC enforcement is tested in tests/test_route_isolation_db.py).
+    """
+    with browser_session_factory() as session:
+        viewer = User(
+            id=UUID("00000000-0000-0000-0000-000000000020"),
+            email="viewer20@example.com",
+        )
+        org = Organization(name="Changes Verification Org")
+        session.add_all([viewer, org])
+        session.flush()
+        membership = Membership(org_id=org.id, user_id=viewer.id, role="viewer")
+        domain = Domain(
+            org_id=org.id,
+            name="changes.example.com",
+            verification_status="verified",
+        )
+        session.add_all([membership, domain])
+        session.flush()
+
+        # 1. Historical baseline scan 1 (earlier scan)
+        baseline_scan_1 = ScanRun(
+            domain_id=domain.id,
+            status="succeeded",
+            trigger="manual",
+            created_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        session.add(baseline_scan_1)
+        session.flush()
+
+        # 2. Historical baseline scan 2 (intermediate scan)
+        baseline_scan_2 = ScanRun(
+            domain_id=domain.id,
+            status="succeeded",
+            trigger="manual",
+            created_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        session.add(baseline_scan_2)
+        session.flush()
+
+        # 3. Subsequent scan with accumulated scanner changes
+        subsequent_scan = ScanRun(
+            domain_id=domain.id,
+            status="succeeded",
+            trigger="manual",
+            created_at=datetime.now(UTC),
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        session.add(subsequent_scan)
+        session.flush()
+
+        now = datetime.now(UTC)
+        changes = [
+            # Discovery removal: severity='INFO', detail='', evidence='discover'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_1.id,
+                change_type="REMOVED_SUBDOMAIN",
+                category="exposure",
+                severity="INFO",
+                asset="stale.changes.example.com",
+                detail="",
+                evidence="discover",
+                previous_state={"status": "RESOLVED", "resolved": True},
+                new_state=None,
+                observed_at=now,
+            ),
+            # Discovery addition: severity='INFO', detail='', evidence='discover'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_1.id,
+                change_type="NEW_SUBDOMAIN",
+                category="exposure",
+                severity="INFO",
+                asset="new.changes.example.com",
+                detail="",
+                evidence="discover",
+                previous_state=None,
+                new_state={"status": "RESOLVED", "resolved": True},
+                observed_at=now,
+            ),
+            # HTTPS lost: severity='MEDIUM', detail='', evidence='probe'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_1.id,
+                change_type="HTTPS_LOST",
+                category="exposure",
+                severity="MEDIUM",
+                asset="secure.changes.example.com",
+                detail="",
+                evidence="probe",
+                previous_state={"https_reachable": True},
+                new_state={"https_reachable": False, "error_type": "CONNECT_ERROR"},
+                observed_at=now,
+            ),
+            # Port newly open: severity='HIGH' (RDP 3389), detail='3389', evidence='portscan'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_2.id,
+                change_type="PORT_NEWLY_OPEN",
+                category="exposure",
+                severity="HIGH",
+                asset="vpn.changes.example.com",
+                detail="3389",
+                evidence="portscan",
+                previous_state={"port": 3389, "state": "CLOSED"},
+                new_state={"port": 3389, "state": "OPEN", "service": "ms-wbt-server"},
+                observed_at=now,
+            ),
+            # Certificate changed: severity='INFO', detail='issuer', evidence='inspect'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_2.id,
+                change_type="CERTIFICATE_CHANGED",
+                category="exposure",
+                severity="INFO",
+                asset="api.changes.example.com",
+                detail="issuer",
+                evidence="inspect",
+                previous_state={"issuer": "CN=Old CA"},
+                new_state={"issuer": "CN=New CA"},
+                observed_at=now,
+            ),
+            # Header weakened: severity='LOW', detail='HSTS', evidence='inspect'
+            ScanChange(
+                domain_id=domain.id,
+                scan_run_id=subsequent_scan.id,
+                baseline_scan_run_id=baseline_scan_2.id,
+                change_type="SECURITY_HEADER_WEAKENED",
+                category="exposure",
+                severity="LOW",
+                asset="api.changes.example.com",
+                detail="Strict-Transport-Security",
+                evidence="inspect",
+                previous_state={"header": "Strict-Transport-Security", "status": "strong"},
+                new_state={"finding_id": "HEADER_WEAK_HSTS", "evidence": "max-age=300"},
+                observed_at=now,
+            ),
+        ]
+        session.add_all(changes)
+        session.commit()
+
+        b1_id = baseline_scan_1.id
+        s_id = subsequent_scan.id
+
+    # Sign in as viewer
+    sign_in(page, "viewer20@example.com", live_server)
+    page.locator(".btn-view-domain").click()
+    page.locator("#btn-view-scans").click()
+
+    # Viewer UI behavior: viewer cannot run scans (Run scan button omitted from DOM)
+    expect(page.locator("#btn-run-scan")).to_have_count(0)
+
+    # 1. View baseline scan (which has zero changes)
+    page.locator(f"button.btn-view-scan[data-scan-id='{b1_id}']").click()
+    scan_detail = page.locator("#scan-detail-container")
+    expect(scan_detail).to_be_visible()
+    expect(scan_detail).to_contain_text("No changes detected in this scan.")
+
+    # 2. Navigate back to scans list and view subsequent scan
+    page.locator("#btn-back-scans").click()
+    page.locator(f"button.btn-view-scan[data-scan-id='{s_id}']").click()
+
+    # 3. Subsequent scan shows changes table
+    expect(scan_detail).to_be_visible()
+    expect(scan_detail).not_to_contain_text("No changes detected in this scan.")
+
+    # Check each change type rendered in code elements
+    expect(page.locator("code:has-text('REMOVED_SUBDOMAIN')")).to_be_visible()
+    expect(page.locator("code:has-text('NEW_SUBDOMAIN')")).to_be_visible()
+    expect(page.locator("code:has-text('HTTPS_LOST')")).to_be_visible()
+    expect(page.locator("code:has-text('PORT_NEWLY_OPEN')")).to_be_visible()
+    expect(page.locator("code:has-text('CERTIFICATE_CHANGED')")).to_be_visible()
+    expect(page.locator("code:has-text('SECURITY_HEADER_WEAKENED')")).to_be_visible()
+
+    # Check assets
+    expect(page.locator("code:has-text('stale.changes.example.com')")).to_be_visible()
+    expect(page.locator("code:has-text('new.changes.example.com')")).to_be_visible()
+    expect(page.locator("code:has-text('secure.changes.example.com')")).to_be_visible()
+    expect(page.locator("code:has-text('vpn.changes.example.com')")).to_be_visible()
+
+    # Check details matching production detector output
+    expect(page.locator("td:has-text('3389')")).to_be_visible()
+    expect(page.locator("td:has-text('Strict-Transport-Security')")).to_be_visible()
+    expect(page.locator("td:has-text('issuer')")).to_be_visible()
+
+    # Check evidence codes
+    expect(page.locator("code:has-text('discover')")).to_have_count(2)
+    expect(page.locator("code:has-text('probe')")).to_be_visible()
+    expect(page.locator("code:has-text('portscan')")).to_be_visible()
+    expect(page.locator("code:has-text('inspect')")).to_have_count(2)
+
+    # Check real production severities
+    expect(page.locator(".tier-badge.tier-high:has-text('High')")).to_be_visible()
+    expect(page.locator(".tier-badge.tier-medium:has-text('Medium')")).to_be_visible()
+    expect(page.locator(".tier-badge.tier-low:has-text('Low')")).to_be_visible()
+    expect(page.locator(".tier-badge.tier-info:has-text('Info')")).to_have_count(3)

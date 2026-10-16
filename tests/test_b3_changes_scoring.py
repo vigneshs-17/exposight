@@ -36,9 +36,11 @@ def _types(changes: list[dict]) -> list[str]:
 # --- bug c: HTTPS_LOST only after a real loss -----------------------------------------
 
 def test_https_lost_when_baseline_reached_https():
-    base = _scan("2026-10-01T08:00:00Z", probe=[_probe(HOST, True)])
+    s2 = _scan("2026-10-01T07:00:00Z", probe=[_probe(HOST, True)])
+    s1 = _scan("2026-10-01T08:00:00Z", probe=[_probe(HOST, False, "CONNECT_ERROR")])
     new = _scan("2026-10-01T09:00:00Z", probe=[_probe(HOST, False, "CONNECT_ERROR")])
-    assert _types(detect_changes(base, new)) == ["HTTPS_LOST"]
+    hist = [s1, s2]
+    assert _types(detect_changes(s1, new, historical_baselines=hist)) == ["HTTPS_LOST"]
 
 
 def test_no_https_lost_for_a_host_new_in_this_scan():

@@ -85,6 +85,56 @@ def health_check(db: DbSession) -> HealthResponse:
         ) from None
 
 
+def _domain_to_read(domain: Domain, role: str) -> DomainRead:
+    is_privileged = role in ("admin", "owner")
+    emails = domain.alert_emails or []
+    return DomainRead(
+        id=domain.id,
+        org_id=domain.org_id,
+        name=domain.name,
+        verification_status=domain.verification_status,
+        verification_token=domain.verification_token,
+        verification_method=domain.verification_method,
+        verified_at=domain.verified_at,
+        last_checked_at=domain.last_checked_at,
+        consecutive_misses=domain.consecutive_misses,
+        verification_reason=domain.verification_reason,
+        verification_expires_at=domain.verification_expires_at,
+        scan_interval_hours=domain.scan_interval_hours,
+        next_scan_at=domain.next_scan_at,
+        alerts_enabled=domain.alerts_enabled,
+        alert_emails=list(emails) if is_privileged else None,
+        alert_recipient_count=len(emails),
+        alert_min_severity=domain.alert_min_severity,
+        created_at=domain.created_at,
+        verification_record_name=domain.verification_record_name,
+        verification_record_type="TXT",
+        verification_record_value=domain.verification_record_value,
+        is_verified=domain.is_verified,
+    )
+
+
+def _notification_to_read(
+    notification: AlertNotification, role: str
+) -> AlertNotificationRead:
+    is_privileged = role in ("admin", "owner")
+    return AlertNotificationRead(
+        id=notification.id,
+        domain_id=notification.domain_id,
+        scan_run_id=notification.scan_run_id,
+        recipient=notification.recipient if is_privileged else None,
+        subject=notification.subject,
+        body=notification.body,
+        status=notification.status,
+        attempts=notification.attempts,
+        max_attempts=notification.max_attempts,
+        next_attempt_at=notification.next_attempt_at,
+        last_error=notification.last_error if is_privileged else None,
+        sent_at=notification.sent_at,
+        created_at=notification.created_at,
+    )
+
+
 @router.post(
     "/domains",
     response_model=DomainRead,
@@ -103,7 +153,7 @@ def create_domain(
     payload: DomainCreate,
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
     db: DbSession,
-) -> Domain:
+) -> DomainRead:
     """Register a new domain within an organization in pending verification status."""
     try:
         validated_name = validate_domain(payload.name)
@@ -177,7 +227,7 @@ def create_domain(
         domain.id,
         org_id,
     )
-    return domain
+    return _domain_to_read(domain, caller_membership.role)
 
 
 @router.get(
@@ -193,11 +243,13 @@ def list_domains(
     org_id: int,
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("viewer"))],
     db: DbSession,
-) -> Sequence[Domain]:
+) -> list[DomainRead]:
     """Retrieve all monitored domains for this organization ordered by ID."""
-    return db.scalars(
+    domains = db.scalars(
         select(Domain).where(Domain.org_id == org_id).order_by(Domain.id.asc())
     ).all()
+    _, caller_membership = auth_context
+    return [_domain_to_read(d, caller_membership.role) for d in domains]
 
 
 @router.get(
@@ -214,9 +266,11 @@ def get_domain(
     domain_id: int,
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("viewer"))],
     db: DbSession,
-) -> Domain:
+) -> DomainRead:
     """Retrieve details for a single domain by ID scoped to organization."""
-    return get_domain_for_org(db, org_id, domain_id)
+    domain = get_domain_for_org(db, org_id, domain_id)
+    _, caller_membership = auth_context
+    return _domain_to_read(domain, caller_membership.role)
 
 
 def _domain_to_verification_read(
@@ -780,7 +834,7 @@ def update_domain_schedule(
 
     db.commit()
     db.refresh(domain)
-    return domain
+    return _domain_to_read(domain, caller_membership.role)
 
 
 @router.put(
@@ -800,7 +854,7 @@ def update_domain_alerts(
     payload: DomainAlertsUpdate,
     auth_context: Annotated[tuple[Organization, Membership], Depends(require_org_role("admin"))],
     db: DbSession,
-) -> Domain:
+) -> DomainRead:
     """Configure or disable automated email alerts for detected attack surface exposures."""
     domain = get_domain_for_org(db, org_id, domain_id)
 
@@ -842,7 +896,7 @@ def update_domain_alerts(
 
     db.commit()
     db.refresh(domain)
-    return domain
+    return _domain_to_read(domain, caller_membership.role)
 
 
 @router.get(
@@ -862,7 +916,7 @@ def list_domain_alert_notifications(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-) -> Sequence[AlertNotification]:
+) -> list[AlertNotificationRead]:
     """Retrieve historical alert notifications for a domain with optional status filtering."""
     domain = get_domain_for_org(db, org_id, domain_id)
 
@@ -874,7 +928,9 @@ def list_domain_alert_notifications(
         .offset(offset)
         .limit(limit)
     )
-    return db.scalars(query).all()
+    notifications = db.scalars(query).all()
+    _, caller_membership = auth_context
+    return [_notification_to_read(n, caller_membership.role) for n in notifications]
 
 
 @router.get(

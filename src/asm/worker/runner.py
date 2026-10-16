@@ -69,8 +69,11 @@ class DirectScannerRunner:
         scan_start_dt = datetime.now(UTC)
         scan_started_utc = scan_start_dt.isoformat()
 
-        subdomains, source, fallback_reason, truncated = discover_subdomains(validated_domain)
+        outcome = discover_subdomains(validated_domain)
+        subdomains, source, fallback_reason, truncated = outcome
         total_found = len(subdomains)
+        observed_count = getattr(outcome, "observed_count", total_found)
+        truncation_reason = getattr(outcome, "truncation_reason", None)
 
         results: list[SubdomainResult] = []
         if total_found == 0:
@@ -86,6 +89,8 @@ class DirectScannerRunner:
 
         counts = {
             "total_discovered": total_found,
+            "selected_hosts": total_found,
+            "observed_hosts": observed_count,
             "resolved": resolved_count,
             "unresolved": unresolved_count,
         }
@@ -96,6 +101,7 @@ class DirectScannerRunner:
             source=source,
             fallback_reason=fallback_reason,
             truncated=truncated,
+            truncation_reason=truncation_reason,
             counts=counts,
             results=results,
         )

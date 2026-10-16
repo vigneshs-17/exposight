@@ -581,6 +581,12 @@ input[type="checkbox"] {
   margin-top: 0.25rem;
 }
 
+.stage-card-notice {
+  font-size: 0.75rem;
+  margin-top: 0.5rem;
+  padding: 0.25rem 0.5rem;
+}
+
 .finding-why {
   margin-top: 0.25rem;
 }

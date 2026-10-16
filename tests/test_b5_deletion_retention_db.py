@@ -443,3 +443,68 @@ def test_admin_purge_dry_run_reports_counts(db_session, aged_data, capsys):
     out = capsys.readouterr().out
     assert "Would delete 3 scan(s), 2 alert notification(s) and 2 invite(s)" in out
     assert _ids(db_session, ScanRun, scans.values()) == set(scans.values())
+
+
+def test_retention_purge_protects_multi_baseline_references(db_session, test_org):
+    """Retention purge keeps historical scans referenced by ScanChange records across
+    multi-baseline history, while unreferenced intermediate scans older than SCAN_RETENTION
+    are purged."""
+    db = db_session
+    d = Domain(org_id=test_org.id, name="multi-retention.example.com")
+    db.add(d)
+    db.flush()
+
+    # 1. Historical presence baseline (older than 180 days)
+    s1 = _scan(db, d, "succeeded", OLD - timedelta(days=15))
+    # 2. Historical intermediate unreferenced scan (older than 180 days)
+    s2 = _scan(db, d, "succeeded", OLD - timedelta(days=10))
+    # 3. Historical port baseline (older than 180 days)
+    s3 = _scan(db, d, "succeeded", OLD - timedelta(days=5))
+    # 4. Recent scan holding multi-baseline changes (within 180 days)
+    s4 = _scan(db, d, "succeeded", NOW - timedelta(days=10))
+
+    # Add changes on s4 anchoring to s1 (removal) and s3 (port opened)
+    c_removal = ScanChange(
+        domain_id=d.id,
+        scan_run_id=s4.id,
+        baseline_scan_run_id=s1.id,
+        change_type="REMOVED_SUBDOMAIN",
+        category="exposure",
+        severity="INFO",
+        asset="legacy.example.com",
+        evidence="discover",
+        observed_at=s4.created_at,
+    )
+    c_port = ScanChange(
+        domain_id=d.id,
+        scan_run_id=s4.id,
+        baseline_scan_run_id=s3.id,
+        change_type="PORT_NEWLY_OPEN",
+        category="exposure",
+        severity="HIGH",
+        asset="api.example.com",
+        detail="8443",
+        evidence="portscan",
+        observed_at=s4.created_at,
+    )
+    db.add_all([c_removal, c_port])
+    db.flush()
+
+    # 5. Latest succeeded scan for the domain (now)
+    s5 = _scan(db, d, "succeeded", NOW)
+
+    s1_id = s1.id
+    s2_id = s2.id
+    s3_id = s3.id
+    s4_id = s4.id
+    s5_id = s5.id
+
+    # Execute purge
+    purge_expired(db, dry_run=False)
+
+    # s2 (unreferenced, >180d) must be purged
+    assert _ids(db, ScanRun, [s2_id]) == set()
+
+    # s1 and s3 (referenced by s4's changes) must be kept despite age >180d
+    # s4 (age 10d) and s5 (latest) must be kept
+    assert _ids(db, ScanRun, [s1_id, s3_id, s4_id, s5_id]) == {s1_id, s3_id, s4_id, s5_id}

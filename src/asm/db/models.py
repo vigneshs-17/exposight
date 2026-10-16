@@ -144,6 +144,11 @@ class Domain(Base):
         return self.verification_status == "verified"
 
     @property
+    def alert_recipient_count(self) -> int:
+        """Return the number of configured alert recipient emails."""
+        return len(self.alert_emails) if self.alert_emails else 0
+
+    @property
     def verification_record_name(self) -> str:
         """Return the designated DNS TXT record label for domain verification."""
         return get_verification_record_name(self.name)
