@@ -2846,3 +2846,1530 @@ def test_https_lost_http_no_https_prerequisites_and_tls_error():
     assert not any(c["change_type"] == "HTTPS_LOST" for c in changes_down)
 
 
+def test_cert_rotation_across_intervening_alternate_issuer_and_return_leg_suppression():
+    """Same-issuer lookback detects rotation, suppresses identical return, flags distinct certs."""
+    host = "www.example.com"
+    cert_r11_old = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2027-03-01",
+        "serial_hex": "aaa111",
+        "subject_cn": host,
+        "sans": [host],
+        "is_trusted": True,
+        "expired": False,
+        "self_signed": False,
+        "hostname_mismatch": False,
+    }
+    cert_we1 = {
+        "issuer": "Google Trust Services WE1",
+        "not_after": "2027-02-15",
+        "serial_hex": "bbb222",
+        "subject_cn": host,
+        "sans": [host],
+        "is_trusted": True,
+        "expired": False,
+        "self_signed": False,
+        "hostname_mismatch": False,
+    }
+    cert_r11_rotated = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2027-06-01",
+        "serial_hex": "ccc333",
+        "subject_cn": host,
+        "sans": [host],
+        "is_trusted": True,
+        "expired": False,
+        "self_signed": False,
+        "hostname_mismatch": False,
+    }
+    cert_r11_rekeyed_same_expiry = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2027-03-01",
+        "serial_hex": "ddd444",
+        "subject_cn": host,
+        "sans": [host],
+        "is_trusted": True,
+        "expired": False,
+        "self_signed": False,
+        "hostname_mismatch": False,
+    }
+
+    s1 = _make_inspect_scan(host, cert=cert_r11_old)
+    s2 = _make_inspect_scan(host, cert=cert_we1)
+    s3_rotated = _make_inspect_scan(host, cert=cert_r11_rotated)
+    s3_unchanged = _make_inspect_scan(host, cert=cert_r11_old)
+    s3_rekeyed = _make_inspect_scan(host, cert=cert_r11_rekeyed_same_expiry)
+
+    hist = [{"scan_run_id": 702, "reports": s2}, {"scan_run_id": 701, "reports": s1}]
+
+    # Case 1: Return to R11 with rotated not_after emits detail="not_after" attributed to scan 701
+    changes_rot = detect_changes(
+        s2, s3_rotated, historical_baselines=hist, baseline_scan_run_id=702
+    )
+    cert_rot = [c for c in changes_rot if c["change_type"] == "CERTIFICATE_CHANGED"]
+    assert len(cert_rot) == 1
+    assert cert_rot[0]["detail"] == "not_after"
+    assert cert_rot[0]["previous_state"] == {"not_after": "2027-03-01"}
+    assert cert_rot[0]["new_state"] == {"not_after": "2027-06-01"}
+    assert cert_rot[0]["baseline_scan_run_id"] == 701
+
+    # Case 2: Return to identical R11 cert within bounded window emits no false issuer change
+    changes_ret = detect_changes(
+        s2, s3_unchanged, historical_baselines=hist, baseline_scan_run_id=702
+    )
+    assert not any(c["change_type"] == "CERTIFICATE_CHANGED" for c in changes_ret)
+
+    # Case 3: Matching issuer name + matching not_after with different serial_hex is NOT identical
+    changes_rekey = detect_changes(
+        s2, s3_rekeyed, historical_baselines=hist, baseline_scan_run_id=702
+    )
+    cert_rekey = [c for c in changes_rekey if c["change_type"] == "CERTIFICATE_CHANGED"]
+    assert len(cert_rekey) == 1
+    assert cert_rekey[0]["detail"] == "issuer"
+    assert cert_rekey[0]["previous_state"] == {"issuer": "Google Trust Services WE1"}
+    assert cert_rekey[0]["new_state"] == {"issuer": "Let's Encrypt R11"}
+    assert cert_rekey[0]["baseline_scan_run_id"] == 702
+
+    # Case 4: Genuine issuer rollback after sustained switch (A -> B -> B -> B -> A)
+    hist_sustained_b = [
+        {"scan_run_id": 704, "reports": s2},
+        {"scan_run_id": 703, "reports": s2},
+        {"scan_run_id": 702, "reports": s2},
+    ]
+    changes_rollback = detect_changes(
+        s2, s3_unchanged, historical_baselines=hist_sustained_b, baseline_scan_run_id=704
+    )
+    cert_rb = [c for c in changes_rollback if c["change_type"] == "CERTIFICATE_CHANGED"]
+    assert len(cert_rb) == 1
+    assert cert_rb[0]["detail"] == "issuer"
+    assert cert_rb[0]["previous_state"] == {"issuer": "Google Trust Services WE1"}
+    assert cert_rb[0]["new_state"] == {"issuer": "Let's Encrypt R11"}
+    assert cert_rb[0]["baseline_scan_run_id"] == 704
+
+
+def test_dns_resolution_change_across_intermediate_timeout():
+    """Definite DNS lookback detects resolution transitions across intermediate TIMEOUT."""
+    host = "dev.example.com"
+
+    def _disc_scan(resolved: bool, status: str, ips: list[str]) -> dict:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "scan_time": "2026-10-01T12:00:00Z",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "resolved": resolved,
+                        "status": status,
+                        "ips": ips,
+                    }
+                ],
+            }
+        }
+
+    s_resolved = _disc_scan(True, "RESOLVED", ["203.0.113.10"])
+    s_timeout = _disc_scan(False, "TIMEOUT", [])
+    s_nxdomain = _disc_scan(False, "NXDOMAIN", [])
+
+    # 1. RESOLVED (801) -> TIMEOUT (802) -> NXDOMAIN (803) => STOPPED_RESOLVING (baseline 801)
+    changes_stop = detect_changes(
+        s_timeout,
+        s_nxdomain,
+        historical_baselines=[
+            {"scan_run_id": 802, "reports": s_timeout},
+            {"scan_run_id": 801, "reports": s_resolved},
+        ],
+        baseline_scan_run_id=802,
+    )
+    stopped = [c for c in changes_stop if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    assert stopped[0]["asset"] == host
+    assert stopped[0]["baseline_scan_run_id"] == 801
+
+    # 2. NXDOMAIN (801) -> TIMEOUT (802) -> RESOLVED (803) => NEWLY_RESOLVING (baseline 801)
+    changes_new = detect_changes(
+        s_timeout,
+        s_resolved,
+        historical_baselines=[
+            {"scan_run_id": 802, "reports": s_timeout},
+            {"scan_run_id": 801, "reports": s_nxdomain},
+        ],
+        baseline_scan_run_id=802,
+    )
+    newly = [c for c in changes_new if c["change_type"] == "NEWLY_RESOLVING"]
+    assert len(newly) == 1
+    assert newly[0]["asset"] == host
+    assert newly[0]["baseline_scan_run_id"] == 801
+
+
+def test_score_stage_stabilized_against_single_scan_noise_and_concurrent_exposure():
+    """Score stage ignores 1-scan unconfirmed noise while detecting concurrent port exposures."""
+    from asm.scoring import score_domain_payloads
+
+    host = "portal.example.com"
+
+    def _full_scan(
+        *,
+        https_ok: bool = True,
+        open_ports: list[int] | None = None,
+        filtered_ports: list[int] | None = None,
+        inspect_ok: bool = True,
+    ) -> dict:
+        if open_ports is None:
+            open_ports = [80, 443]
+        if filtered_ports is None:
+            filtered_ports = []
+        disc = [
+            {
+                "subdomain": host,
+                "resolved": True,
+                "status": "RESOLVED",
+                "ips": ["203.0.113.20"],
+            }
+        ]
+        probe = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "reachable": True,
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {
+                    "reachable": https_ok,
+                    "status_code": 200 if https_ok else None,
+                    "error_type": None if https_ok else "CONNECT_ERROR",
+                },
+            }
+        ]
+        ps = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "ip": "203.0.113.20",
+                "open_ports": [{"port": p, "state": "OPEN", "service": "tcp"} for p in open_ports],
+                "closed_ports": [],
+                "filtered_ports": filtered_ports,
+            }
+        ]
+        insp = [
+            {
+                "subdomain": host,
+                "status": "PROBED" if https_ok else "SKIPPED",
+                "cert": (
+                    {
+                        "issuer": "Let's Encrypt R11",
+                        "not_after": "2027-03-01",
+                        "is_trusted": True,
+                        "expired": False,
+                        "self_signed": False,
+                        "hostname_mismatch": False,
+                    }
+                    if (https_ok and inspect_ok)
+                    else None
+                ),
+                "headers": (
+                    {
+                        "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                        "missing_headers": ["Content-Security-Policy"],
+                        "error": None,
+                    }
+                    if (https_ok and inspect_ok)
+                    else None
+                ),
+            }
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        ts = "2026-10-01T12:00:00Z"
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    s_clean = _full_scan()
+    s_probe_glitch = _full_scan(https_ok=False)
+
+    # 1. Single-scan unconfirmed probe failure does not trigger false RISK_BAND_INCREASED
+    ch_glitch = detect_changes(
+        s_clean,
+        s_probe_glitch,
+        historical_baselines=[{"scan_run_id": 901, "reports": s_clean}],
+        baseline_scan_run_id=901,
+    )
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_glitch)
+
+    # Recovery scan after 1-scan probe glitch does not trigger false RISK_BAND_DECREASED
+    ch_rec = detect_changes(
+        s_probe_glitch,
+        s_clean,
+        historical_baselines=[
+            {"scan_run_id": 902, "reports": s_probe_glitch},
+            {"scan_run_id": 901, "reports": s_clean},
+        ],
+        baseline_scan_run_id=902,
+    )
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_rec)
+
+    # 2. Concurrent genuine RDP exposure (3389) on the same scan as a 1-scan probe glitch
+    s_rdp_with_probe_glitch = _full_scan(https_ok=False, open_ports=[80, 443, 3389])
+    ch_concurrent = detect_changes(
+        s_clean,
+        s_rdp_with_probe_glitch,
+        historical_baselines=[{"scan_run_id": 901, "reports": s_clean}],
+        baseline_scan_run_id=901,
+    )
+    host_inc = [c for c in ch_concurrent if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc) == 1
+    assert host_inc[0]["previous_state"]["band"] == "LOW"
+    assert host_inc[0]["new_state"]["band"] == "HIGH"
+
+
+def test_partial_inspection_preserves_fresh_cert_or_header_evidence_independently():
+    """Fresh cert defect survives header timeout and fresh header finding survives cert timeout."""
+    from asm.scoring import score_domain_payloads
+
+    host = "api.example.com"
+    ts = "2026-10-01T12:00:00Z"
+
+    def _build_scan(
+        cert_dict: dict | None,
+        headers_dict: dict | None,
+        ports: list[int] | None = None,
+    ) -> dict:
+        if ports is None:
+            ports = [80, 443]
+        disc = [
+            {
+                "subdomain": host,
+                "resolved": True,
+                "status": "RESOLVED",
+                "ips": ["203.0.113.5"],
+            }
+        ]
+        probe = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+        ]
+        ps = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "open_ports": [{"port": p, "state": "OPEN"} for p in ports],
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+        ]
+        insp = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "cert": cert_dict,
+                "headers": headers_dict,
+            }
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    clean_cert = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2027-03-01",
+        "is_trusted": True,
+        "expired": False,
+    }
+    expired_cert = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2025-01-01",
+        "is_trusted": False,
+        "expired": True,
+        "days_until_expiry": -10.0,
+    }
+    all_headers_present = {
+        "present_headers": {
+            "Strict-Transport-Security": "max-age=31536000",
+            "Content-Security-Policy": "default-src 'self'",
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff",
+        },
+        "missing_headers": [],
+        "error": None,
+    }
+    missing_csp_headers = {
+        "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+        "missing_headers": ["Content-Security-Policy"],
+        "error": None,
+    }
+    error_headers = {
+        "present_headers": {},
+        "missing_headers": [],
+        "error": "Read timeout",
+    }
+
+    # Direction A: Fresh certificate defect (TLS_CERT_EXPIRED -> HIGH) with header timeout
+    s_base_low = _build_scan(clean_cert, missing_csp_headers)
+    s_cert_exp_hdr_err = _build_scan(expired_cert, error_headers)
+    ch_dir_a = detect_changes(
+        s_base_low,
+        s_cert_exp_hdr_err,
+        historical_baselines=[{"scan_run_id": 1001, "reports": s_base_low}],
+        baseline_scan_run_id=1001,
+    )
+    host_inc_a = [c for c in ch_dir_a if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_a) == 1
+    assert host_inc_a[0]["previous_state"] == {"band": "LOW", "score": 1}
+    # Fresh TLS_CERT_EXPIRED (7) + fallback HEADER_MISSING_CSP (1) = 8 (HIGH)
+    assert host_inc_a[0]["new_state"] == {"band": "HIGH", "score": 8}
+
+    # Direction B: Fresh header finding (HEADER_MISSING_CSP -> LOW) with cert timeout (cert=None)
+    s_base_info = _build_scan(clean_cert, all_headers_present)
+    s_cert_none_hdr_missing = _build_scan(None, missing_csp_headers)
+    ch_dir_b = detect_changes(
+        s_base_info,
+        s_cert_none_hdr_missing,
+        historical_baselines=[{"scan_run_id": 1002, "reports": s_base_info}],
+        baseline_scan_run_id=1002,
+    )
+    host_inc_b = [c for c in ch_dir_b if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_b) == 1
+    assert host_inc_b[0]["previous_state"] == {"band": "INFO", "score": 0}
+    assert host_inc_b[0]["new_state"] == {"band": "LOW", "score": 1}
+
+    # Direction C: Concurrent RDP port exposure (3389 -> +7 pts) during partial inspection
+    s_rdp_hdr_err = _build_scan(clean_cert, error_headers, ports=[80, 443, 3389])
+    ch_dir_c1 = detect_changes(
+        s_base_low,
+        s_rdp_hdr_err,
+        historical_baselines=[{"scan_run_id": 1003, "reports": s_base_low}],
+        baseline_scan_run_id=1003,
+    )
+    host_inc_c1 = [c for c in ch_dir_c1 if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_c1) == 1
+    assert host_inc_c1[0]["new_state"] == {"band": "HIGH", "score": 8}
+
+    s_rdp_cert_none = _build_scan(None, missing_csp_headers, ports=[80, 443, 3389])
+    ch_dir_c2 = detect_changes(
+        s_base_low,
+        s_rdp_cert_none,
+        historical_baselines=[{"scan_run_id": 1004, "reports": s_base_low}],
+        baseline_scan_run_id=1004,
+    )
+    host_inc_c2 = [c for c in ch_dir_c2 if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_c2) == 1
+    assert host_inc_c2[0]["new_state"] == {"band": "HIGH", "score": 8}
+
+
+def test_canonical_domain_scoring_multi_high_hosts_and_fallback():
+    """Domain scoring reuses derive_domain_band across HIGH hosts and preserves domain findings."""
+    from asm.scoring import derive_domain_band, score_domain_payloads
+
+    ts = "2026-10-01T12:00:00Z"
+    hosts = ["h1.example.com", "h2.example.com", "h3.example.com"]
+
+    def _multi_host_scan(*, h3_resolved: bool, h3_rdp: bool, all_rdp: bool = True) -> dict:
+        disc = []
+        probe = []
+        ps = []
+        insp = []
+        for h in hosts:
+            resolved = h3_resolved if h == "h3.example.com" else True
+            disc.append(
+                {
+                    "subdomain": h,
+                    "resolved": resolved,
+                    "status": "RESOLVED" if resolved else "TIMEOUT",
+                    "ips": ["203.0.113.10"] if resolved else [],
+                }
+            )
+            if not resolved:
+                continue
+            probe.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "http": {"reachable": True, "status_code": 200, "error_type": None},
+                    "https": {"reachable": True, "status_code": 200, "error_type": None},
+                }
+            )
+            has_rdp = all_rdp and (
+                (h in ("h1.example.com", "h2.example.com"))
+                or (h == "h3.example.com" and h3_rdp)
+            )
+            ports = [80, 443, 3389] if has_rdp else [80, 443]
+            ps.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "open_ports": [{"port": p, "state": "OPEN"} for p in ports],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            )
+            insp.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "cert": {
+                        "issuer": "Let's Encrypt R11",
+                        "not_after": "2027-03-01",
+                        "is_trusted": True,
+                        "expired": False,
+                    },
+                    "headers": {
+                        "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                        "missing_headers": ["Content-Security-Policy"],
+                        "error": None,
+                    },
+                }
+            )
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    # Scan 1: all 3 hosts resolved with RDP (3389) open -> 3 HIGH hosts (high_escalation=1, 24 pts)
+    s1 = _multi_host_scan(h3_resolved=True, h3_rdp=True)
+    assert s1["score"]["counts"]["high_escalation"] == 1
+    assert s1["score"]["domain_band"] == "HIGH"
+    assert s1["score"]["domain_score"] == 24
+
+    # Scan 2: h3 has a 1-scan DNS timeout; fallback preserves h3's HIGH (8 pts) -> stays HIGH (24)
+    s2_timeout = _multi_host_scan(h3_resolved=False, h3_rdp=True)
+    ch = detect_changes(
+        s1,
+        s2_timeout,
+        historical_baselines=[{"scan_run_id": 1101, "reports": s1}],
+        baseline_scan_run_id=1101,
+    )
+    assert not any("RISK_BAND" in c["change_type"] for c in ch)
+
+    # Scenario B: 10 hosts initially LOW (10 * 1 + LARGE_ATTACK_SURFACE 1 = 11, LOW).
+    # Next scan: h1..h3 open RDP (3389 -> HIGH 8 pts), h3 has a header timeout (needs header
+    # fallback from baseline), and h10 has a 1-scan DNS timeout (raw host count drops to 9,
+    # but stabilized effective_hosts stays 10 so LARGE_ATTACK_SURFACE is preserved).
+    ten_hosts = [f"h{i}.example.com" for i in range(1, 11)]
+
+    def _ten_host_scan(*, rdp_hosts: set[str], h3_hdr_err: bool, h10_timeout: bool) -> dict:
+        disc = []
+        probe = []
+        ps = []
+        insp = []
+        for h in ten_hosts:
+            resolved = not (h == "h10.example.com" and h10_timeout)
+            disc.append(
+                {
+                    "subdomain": h,
+                    "resolved": resolved,
+                    "status": "RESOLVED" if resolved else "TIMEOUT",
+                    "ips": ["203.0.113.10"] if resolved else [],
+                }
+            )
+            if not resolved:
+                continue
+            probe.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "http": {"reachable": True, "status_code": 200, "error_type": None},
+                    "https": {"reachable": True, "status_code": 200, "error_type": None},
+                }
+            )
+            ports = [80, 443, 3389] if h in rdp_hosts else [80, 443]
+            ps.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "open_ports": [{"port": p, "state": "OPEN"} for p in ports],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            )
+            hdrs = (
+                {"present_headers": {}, "missing_headers": [], "error": "Read timeout"}
+                if (h == "h3.example.com" and h3_hdr_err)
+                else {
+                    "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                    "missing_headers": ["Content-Security-Policy"],
+                    "error": None,
+                }
+            )
+            insp.append(
+                {
+                    "subdomain": h,
+                    "status": "PROBED",
+                    "cert": {
+                        "issuer": "Let's Encrypt R11",
+                        "not_after": "2027-03-01",
+                        "is_trusted": True,
+                        "expired": False,
+                    },
+                    "headers": hdrs,
+                }
+            )
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    s10_low = _ten_host_scan(rdp_hosts=set(), h3_hdr_err=False, h10_timeout=False)
+    assert s10_low["score"]["domain_band"] == "LOW"
+    assert s10_low["score"]["domain_score"] == 10
+    assert any(f["id"] == "LARGE_ATTACK_SURFACE" for f in s10_low["score"]["domain_findings"])
+
+    s10_escalated = _ten_host_scan(
+        rdp_hosts={"h1.example.com", "h2.example.com", "h3.example.com"},
+        h3_hdr_err=True,
+        h10_timeout=True,
+    )
+    s10_escalated["score"]["domain_findings"].append(
+        {"id": "DOMAIN_CUSTOM_POSTURE", "points": 2}
+    )
+    ch_esc = detect_changes(
+        s10_low,
+        s10_escalated,
+        historical_baselines=[{"scan_run_id": 1102, "reports": s10_low}],
+        baseline_scan_run_id=1102,
+    )
+    dom_inc = [c for c in ch_esc if c["change_type"] == "DOMAIN_RISK_BAND_INCREASED"]
+    assert len(dom_inc) == 1
+    assert dom_inc[0]["previous_state"] == {"band": "LOW", "score": 10}
+    # 3 HIGH hosts (3 * 8 = 24) + 7 LOW hosts (7 * 1 = 7) + preserved domain_findings (2) = 33
+    assert dom_inc[0]["new_state"] == {"band": "HIGH", "score": 33}
+
+
+    band, is_esc = derive_domain_band(
+        score_domain_payloads(
+            "example.com",
+            s1["discover"]["results"],
+            s1["probe"]["results"],
+            s1["portscan"]["results"],
+            s1["inspect"]["results"],
+        ).hosts
+    )
+    assert band == "HIGH" and is_esc is True
+
+
+def test_unavailable_portscan_does_not_suppress_fresh_inspection_findings_and_risk_bands():
+    """Unprobed portscan falls back stage-specifically without suppressing fresh inspect defects."""
+    from asm.scoring import score_domain_payloads
+
+    host = "portal.example.com"
+    ts = "2026-10-01T12:00:00Z"
+
+    def _make_scan(
+        *,
+        ps_probed: bool = True,
+        open_ports: list[int] | None = None,
+        cert_dict: dict | None = None,
+        headers_dict: dict | None = None,
+    ) -> dict:
+        if open_ports is None:
+            open_ports = [80, 443]
+        disc = [
+            {"subdomain": host, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+        ]
+        probe = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+        ]
+        if ps_probed:
+            ps = [
+                {
+                    "subdomain": host,
+                    "status": "PROBED",
+                    "open_ports": [{"port": p, "state": "OPEN"} for p in open_ports],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            ]
+        else:
+            ps = [{"subdomain": host, "status": "TIMEOUT", "open_ports": [], "closed_ports": []}]
+        insp = [
+            {"subdomain": host, "status": "PROBED", "cert": cert_dict, "headers": headers_dict}
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    clean_cert = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2027-03-01",
+        "is_trusted": True,
+        "expired": False,
+    }
+    expired_cert = {
+        "issuer": "Let's Encrypt R11",
+        "not_after": "2025-01-01",
+        "is_trusted": False,
+        "expired": True,
+        "days_until_expiry": -10.0,
+    }
+    present_headers = {
+        "present_headers": {
+            "Strict-Transport-Security": "max-age=31536000",
+            "Content-Security-Policy": "default-src 'self'",
+        },
+        "missing_headers": [],
+        "error": None,
+    }
+    missing_hsts_headers = {
+        "present_headers": {"Content-Security-Policy": "default-src 'self'"},
+        "missing_headers": ["Strict-Transport-Security"],
+        "error": None,
+    }
+
+    # Case A: Baseline has clean cert and missing CSP (LOW, 1 pt).
+    # New scan has portscan TIMEOUT, but inspect finds expired cert (HIGH, 7 pts).
+    s1_base = _make_scan(
+        ps_probed=True,
+        open_ports=[80, 443],
+        cert_dict=clean_cert,
+        headers_dict={
+            "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+            "missing_headers": ["Content-Security-Policy"],
+            "error": None,
+        },
+    )
+    s2_cert_exp_ps_timeout = _make_scan(
+        ps_probed=False,
+        cert_dict=expired_cert,
+        headers_dict={
+            "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+            "missing_headers": ["Content-Security-Policy"],
+            "error": None,
+        },
+    )
+    changes_a = detect_changes(
+        s1_base,
+        s2_cert_exp_ps_timeout,
+        historical_baselines=[{"scan_run_id": 1201, "reports": s1_base}],
+        baseline_scan_run_id=1201,
+    )
+    # 1. Finding-level event CERTIFICATE_BECAME_EXPIRED emitted
+    cert_ch = [c for c in changes_a if c["change_type"] == "CERTIFICATE_BECAME_EXPIRED"]
+    assert len(cert_ch) == 1
+    assert cert_ch[0]["asset"] == host
+    # 2. Summary HOST_RISK_BAND_INCREASED emitted (LOW -> HIGH)
+    host_inc_a = [c for c in changes_a if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_a) == 1
+    assert host_inc_a[0]["previous_state"] == {"band": "LOW", "score": 1}
+    assert host_inc_a[0]["new_state"] == {"band": "HIGH", "score": 8}
+    # 3. Summary DOMAIN_RISK_BAND_INCREASED emitted (LOW -> HIGH)
+    dom_inc_a = [c for c in changes_a if c["change_type"] == "DOMAIN_RISK_BAND_INCREASED"]
+    assert len(dom_inc_a) == 1
+    assert dom_inc_a[0]["previous_state"] == {"band": "LOW", "score": 1}
+    assert dom_inc_a[0]["new_state"] == {"band": "HIGH", "score": 8}
+
+    # Case B: Baseline has INFO (score: 0).
+    # New scan has portscan TIMEOUT, but inspect finds HSTS removed (LOW, 1 pt).
+    s1_info = _make_scan(
+        ps_probed=True,
+        open_ports=[80, 443],
+        cert_dict=clean_cert,
+        headers_dict=present_headers,
+    )
+    s2_hsts_missing_ps_timeout = _make_scan(
+        ps_probed=False,
+        cert_dict=clean_cert,
+        headers_dict=missing_hsts_headers,
+    )
+    changes_b = detect_changes(
+        s1_info,
+        s2_hsts_missing_ps_timeout,
+        historical_baselines=[{"scan_run_id": 1202, "reports": s1_info}],
+        baseline_scan_run_id=1202,
+    )
+    # Finding-level event SECURITY_HEADER_REMOVED emitted
+    hdr_ch = [c for c in changes_b if c["change_type"] == "SECURITY_HEADER_REMOVED"]
+    assert len(hdr_ch) == 1
+    assert hdr_ch[0]["detail"] == "Strict-Transport-Security"
+    # Summary HOST_RISK_BAND_INCREASED emitted (INFO -> LOW)
+    host_inc_b = [c for c in changes_b if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc_b) == 1
+    assert host_inc_b[0]["previous_state"] == {"band": "INFO", "score": 0}
+    assert host_inc_b[0]["new_state"] == {"band": "LOW", "score": 1}
+
+
+def test_domain_inventory_lifecycle_across_confirmation_boundaries_and_large_attack_surface():
+    """Exercise host presence -> 1st absence -> confirmed removal -> continued absence -> return."""
+    from asm.scoring import score_domain_payloads
+
+    ts = "2026-10-01T12:00:00Z"
+    high_host = "high.example.com"
+    other_hosts = [f"h{i}.example.com" for i in range(2, 11)]  # 9 other hosts -> total 10 hosts
+
+    def _build_inventory_scan(high_present: bool) -> dict:
+        active_hosts = ([high_host] if high_present else []) + other_hosts
+        disc = [
+            {"subdomain": h, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+            for h in active_hosts
+        ]
+        probe = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+            for h in active_hosts
+        ]
+        ps = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "open_ports": (
+                    [
+                        {"port": 80, "state": "OPEN"},
+                        {"port": 443, "state": "OPEN"},
+                        {"port": 3389, "state": "OPEN"},
+                    ]
+                    if h == high_host
+                    else [{"port": 80, "state": "OPEN"}, {"port": 443, "state": "OPEN"}]
+                ),
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+            for h in active_hosts
+        ]
+        insp = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "cert": {
+                    "issuer": "Let's Encrypt R11",
+                    "not_after": "2027-03-01",
+                    "is_trusted": True,
+                    "expired": False,
+                },
+                "headers": {
+                    "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                    "missing_headers": ["Content-Security-Policy"],
+                    "error": None,
+                },
+            }
+            for h in active_hosts
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crtsh",
+                "scan_time": ts,
+                "results": disc,
+                "truncated": False,
+            },
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    s1_present = _build_inventory_scan(high_present=True)
+    # 10 hosts: high_host is HIGH (7 for 3389 + 1 for CSP = 8 pts), 9 hosts are LOW (1 pt each).
+    # 10 hosts >= LARGE_ATTACK_SURFACE_THRESHOLD -> LARGE_ATTACK_SURFACE (0 pts)
+    # Total score = 8 + 9 * 1 = 17 pts, domain_band = HIGH
+    assert s1_present["score"]["domain_band"] == "HIGH"
+    assert s1_present["score"]["domain_score"] == 17
+    assert any(f["id"] == "LARGE_ATTACK_SURFACE" for f in s1_present["score"]["domain_findings"])
+
+    s2_absent_1 = _build_inventory_scan(high_present=False)
+    s3_absent_2 = _build_inventory_scan(high_present=False)
+    s4_absent_3 = _build_inventory_scan(high_present=False)
+    s5_reappeared = _build_inventory_scan(high_present=True)
+
+    # Step 1: Scan 1 -> Scan 2 (First absence).
+    # 1st absence is unconfirmed; effective domain score lookback stabilizes domain to stay HIGH.
+    # Neither REMOVED_SUBDOMAIN nor DOMAIN_RISK_BAND_DECREASED is emitted.
+    changes_step1 = detect_changes(
+        s1_present,
+        s2_absent_1,
+        historical_baselines=[{"scan_run_id": 1301, "reports": s1_present}],
+        baseline_scan_run_id=1301,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in changes_step1)
+    assert not any("RISK_BAND" in c["change_type"] for c in changes_step1)
+
+    # Step 2: Scan 2 -> Scan 3 (Confirmed removal = Second consecutive absence).
+    # REMOVED_SUBDOMAIN emitted for high_host. Domain inventory drops to 9 hosts.
+    # LARGE_ATTACK_SURFACE disappears. Domain band drops from HIGH to LOW (score 9).
+    changes_step2 = detect_changes(
+        s2_absent_1,
+        s3_absent_2,
+        historical_baselines=[
+            {"scan_run_id": 1302, "reports": s2_absent_1},
+            {"scan_run_id": 1301, "reports": s1_present},
+        ],
+        baseline_scan_run_id=1302,
+    )
+    rem_sub = [c for c in changes_step2 if c["change_type"] == "REMOVED_SUBDOMAIN"]
+    assert len(rem_sub) == 1
+    assert rem_sub[0]["asset"] == high_host
+    dom_dec = [c for c in changes_step2 if c["change_type"] == "DOMAIN_RISK_BAND_DECREASED"]
+    assert len(dom_dec) == 1
+    assert dom_dec[0]["previous_state"] == {"band": "HIGH", "score": 17}
+    assert dom_dec[0]["new_state"] == {"band": "LOW", "score": 9}
+
+    # Step 3: Scan 3 -> Scan 4 (Continued absence = Third consecutive absence).
+    # high_host was already confirmed removed on Scan 3.
+    # Crucial assertion: high_host is NOT resurrected from Scan 1!
+    # No duplicate REMOVED_SUBDOMAIN and no DOMAIN_RISK_BAND_INCREASED emitted!
+    changes_step3 = detect_changes(
+        s3_absent_2,
+        s4_absent_3,
+        historical_baselines=[
+            {"scan_run_id": 1303, "reports": s3_absent_2},
+            {"scan_run_id": 1302, "reports": s2_absent_1},
+            {"scan_run_id": 1301, "reports": s1_present},
+        ],
+        baseline_scan_run_id=1303,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in changes_step3)
+    assert not any("RISK_BAND" in c["change_type"] for c in changes_step3)
+
+    # Step 4: Scan 4 -> Scan 5 (Reappearance).
+    # high_host reappears in discovery. Genuine NEW_SUBDOMAIN emitted.
+    # Domain inventory returns to 10 hosts (LARGE_ATTACK_SURFACE re-evaluated).
+    # DOMAIN_RISK_BAND_INCREASED emitted (LOW 9 -> HIGH 17).
+    changes_step4 = detect_changes(
+        s4_absent_3,
+        s5_reappeared,
+        historical_baselines=[
+            {"scan_run_id": 1304, "reports": s4_absent_3},
+            {"scan_run_id": 1303, "reports": s3_absent_2},
+            {"scan_run_id": 1302, "reports": s2_absent_1},
+        ],
+        baseline_scan_run_id=1304,
+    )
+    new_sub = [c for c in changes_step4 if c["change_type"] == "NEW_SUBDOMAIN"]
+    assert len(new_sub) == 1
+    assert new_sub[0]["asset"] == high_host
+    dom_inc = [c for c in changes_step4 if c["change_type"] == "DOMAIN_RISK_BAND_INCREASED"]
+    assert len(dom_inc) == 1
+    assert dom_inc[0]["previous_state"] == {"band": "LOW", "score": 9}
+    assert dom_inc[0]["new_state"] == {"band": "HIGH", "score": 17}
+
+
+def test_score_provenance_reconstructed_effective_scores_vs_persisted_score_report():
+    """Verify previous_state/new_state reflect effective posture while ScoreReport is raw."""
+    from asm.scoring import score_domain_payloads
+
+    host = "provenance.example.com"
+    ts = "2026-10-01T12:00:00Z"
+
+    def _make_scan_provenance(*, open_ports: list[int], header_err: bool) -> dict:
+        disc = [
+            {"subdomain": host, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+        ]
+        probe = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+        ]
+        ps = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "open_ports": [{"port": p, "state": "OPEN"} for p in open_ports],
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+        ]
+        hdrs = (
+            {"present_headers": {}, "missing_headers": [], "error": "Read timeout"}
+            if header_err
+            else {
+                "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                "missing_headers": ["Content-Security-Policy"],
+                "error": None,
+            }
+        )
+        insp = [
+            {
+                "subdomain": host,
+                "status": "PROBED",
+                "cert": {
+                    "issuer": "Let's Encrypt R11",
+                    "not_after": "2027-03-01",
+                    "is_trusted": True,
+                    "expired": False,
+                },
+                "headers": hdrs,
+            }
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    s1_clean = _make_scan_provenance(open_ports=[80, 443], header_err=False)
+    # Raw persisted ScoreReport has score=1 (missing CSP), band=LOW
+    assert s1_clean["score"]["domain_score"] == 1
+    assert s1_clean["score"]["domain_band"] == "LOW"
+
+    # Scan 2: Genuine RDP exposure (3389) opens, but headers encounter a 1-scan Read timeout.
+    # Raw persisted ScoreReport only evaluates portscan (3389 -> 7 pts), omitting header finding.
+    s2_rdp_with_header_err = _make_scan_provenance(open_ports=[80, 443, 3389], header_err=True)
+    assert s2_rdp_with_header_err["score"]["domain_score"] == 7  # Raw persisted ScoreReport value
+
+    # Change detection reconstructs effective score: 7 (port 3389) + 1 (fallback missing CSP) = 8
+    ch = detect_changes(
+        s1_clean,
+        s2_rdp_with_header_err,
+        historical_baselines=[{"scan_run_id": 1401, "reports": s1_clean}],
+        baseline_scan_run_id=1401,
+    )
+    host_inc = [c for c in ch if c["change_type"] == "HOST_RISK_BAND_INCREASED"]
+    assert len(host_inc) == 1
+    # Demonstrating difference: raw ScoreReport has score=7, but emitted new_state has score=8
+    assert host_inc[0]["previous_state"] == {"band": "LOW", "score": 1}
+    assert host_inc[0]["new_state"] == {"band": "HIGH", "score": 8}
+    assert host_inc[0]["new_state"]["score"] != s2_rdp_with_header_err["score"]["domain_score"]
+
+
+def test_domain_inventory_counterexample_truncated_absences_preserve_high_risk_host():
+    """Reproduce counterexample: 2 truncated absences do not drop domain risk band.
+
+    Scenario:
+    - High-risk host is present in Scan 1.
+    - Two subsequent discovery reports (Scan 2 and Scan 3) omit it because they are truncated.
+    - The original presence remains within the 3-prior-scan history window.
+    Assert:
+    - NO REMOVED_SUBDOMAIN is emitted.
+    - NO false DOMAIN_RISK_BAND_DECREASED is emitted.
+    """
+    from asm.scoring import score_domain_payloads
+
+    ts = "2026-10-01T12:00:00Z"
+    high_host = "high.example.com"
+    other_hosts = [f"h{i}.example.com" for i in range(2, 11)]
+
+    def _build_scan(*, high_present: bool, truncated: bool) -> dict:
+        active = ([high_host] if high_present else []) + other_hosts
+        disc = [
+            {"subdomain": h, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+            for h in active
+        ]
+        probe = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+            for h in active
+        ]
+        ps = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "open_ports": (
+                    [
+                        {"port": 80, "state": "OPEN"},
+                        {"port": 443, "state": "OPEN"},
+                        {"port": 3389, "state": "OPEN"},
+                    ]
+                    if h == high_host
+                    else [{"port": 80, "state": "OPEN"}, {"port": 443, "state": "OPEN"}]
+                ),
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+            for h in active
+        ]
+        insp = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "cert": {
+                    "issuer": "Let's Encrypt R11",
+                    "not_after": "2027-03-01",
+                    "is_trusted": True,
+                    "expired": False,
+                },
+                "headers": {
+                    "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                    "missing_headers": ["Content-Security-Policy"],
+                    "error": None,
+                },
+            }
+            for h in active
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crtsh",
+                "scan_time": ts,
+                "results": disc,
+                "truncated": truncated,
+            },
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    s1_present = _build_scan(high_present=True, truncated=False)
+    assert s1_present["score"]["domain_band"] == "HIGH"
+    assert s1_present["score"]["domain_score"] == 17
+
+    # Scan 2: high_host omitted because discovery is truncated (1st unknown absence)
+    s2_truncated_1 = _build_scan(high_present=False, truncated=True)
+
+    # Scan 3: high_host omitted because discovery is truncated (2nd unknown absence)
+    s3_truncated_2 = _build_scan(high_present=False, truncated=True)
+
+    # Transition 1: Scan 1 -> Scan 2
+    changes_1_2 = detect_changes(
+        s1_present,
+        s2_truncated_1,
+        historical_baselines=[{"scan_run_id": 2001, "reports": s1_present}],
+        baseline_scan_run_id=2001,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in changes_1_2)
+    assert not any("RISK_BAND" in c["change_type"] for c in changes_1_2)
+
+    # Transition 2: Scan 2 -> Scan 3 (The core counterexample)
+    # The original presence (Scan 1) remains within the 3-prior-scan history window.
+    changes_2_3 = detect_changes(
+        s2_truncated_1,
+        s3_truncated_2,
+        historical_baselines=[
+            {"scan_run_id": 2002, "reports": s2_truncated_1},
+            {"scan_run_id": 2001, "reports": s1_present},
+        ],
+        baseline_scan_run_id=2002,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in changes_2_3)
+    assert not any(c["change_type"] == "DOMAIN_RISK_BAND_DECREASED" for c in changes_2_3)
+    assert not any("RISK_BAND" in c["change_type"] for c in changes_2_3)
+
+
+def test_domain_inventory_extended_lifecycle_matrix():
+    """Exercise complete lifecycle regression matrix for domain inventory and removals:
+
+    1. Present -> truncated absence -> truncated absence -> present
+    2. Present -> provider-switch absence -> absence
+    3. Present -> qualifying absence -> unknown -> qualifying absence
+    4. Complete history-window exhaustion (documenting uncertainty at retention boundary)
+    """
+    from asm.scoring import score_domain_payloads
+
+    ts = "2026-10-01T12:00:00Z"
+    high_host = "high.example.com"
+    other_hosts = [f"h{i}.example.com" for i in range(2, 11)]  # 9 other hosts -> 10 total
+
+    def _make_scan(
+        *,
+        high_present: bool,
+        source: str = "crtsh",
+        truncated: bool = False,
+        empty: bool = False,
+    ) -> dict:
+        active = ([high_host] if high_present else []) + other_hosts
+        disc = (
+            []
+            if empty
+            else [
+                {"subdomain": h, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+                for h in active
+            ]
+        )
+        probe = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+            for h in active
+        ]
+        ps = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "open_ports": (
+                    [
+                        {"port": 80, "state": "OPEN"},
+                        {"port": 443, "state": "OPEN"},
+                        {"port": 3389, "state": "OPEN"},
+                    ]
+                    if h == high_host
+                    else [{"port": 80, "state": "OPEN"}, {"port": 443, "state": "OPEN"}]
+                ),
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+            for h in active
+        ]
+        insp = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "cert": {
+                    "issuer": "Let's Encrypt R11",
+                    "not_after": "2027-03-01",
+                    "is_trusted": True,
+                    "expired": False,
+                },
+                "headers": {
+                    "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                    "missing_headers": ["Content-Security-Policy"],
+                    "error": None,
+                },
+            }
+            for h in active
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": source,
+                "scan_time": ts,
+                "results": disc,
+                "truncated": truncated,
+            },
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    # 1. Present -> truncated absence -> truncated absence -> present
+    s_p1 = _make_scan(high_present=True, source="crtsh", truncated=False)
+    s_t1 = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_t2 = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_p2 = _make_scan(high_present=True, source="crtsh", truncated=False)
+
+    # Step A1: Present -> Truncated absence 1
+    ch_a1 = detect_changes(
+        s_p1,
+        s_t1,
+        historical_baselines=[{"scan_run_id": 3001, "reports": s_p1}],
+        baseline_scan_run_id=3001,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_a1)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_a1)
+
+    # Step A2: Truncated absence 1 -> Truncated absence 2
+    ch_a2 = detect_changes(
+        s_t1,
+        s_t2,
+        historical_baselines=[
+            {"scan_run_id": 3002, "reports": s_t1},
+            {"scan_run_id": 3001, "reports": s_p1},
+        ],
+        baseline_scan_run_id=3002,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_a2)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_a2)
+
+    # Step A3: Truncated absence 2 -> Present again
+    ch_a3 = detect_changes(
+        s_t2,
+        s_p2,
+        historical_baselines=[
+            {"scan_run_id": 3003, "reports": s_t2},
+            {"scan_run_id": 3002, "reports": s_t1},
+            {"scan_run_id": 3001, "reports": s_p1},
+        ],
+        baseline_scan_run_id=3003,
+    )
+    assert not any(c["change_type"] == "NEW_SUBDOMAIN" for c in ch_a3)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_a3)
+
+    # 2. Present -> provider-switch absence -> absence
+    s_crt = _make_scan(high_present=True, source="crtsh", truncated=False)
+    s_censys_abs = _make_scan(high_present=False, source="censys", truncated=False)
+    s_crt_abs = _make_scan(high_present=False, source="crtsh", truncated=False)
+
+    # Step B1: crt.sh present -> Censys absence (provider switch = UNKNOWN)
+    ch_b1 = detect_changes(
+        s_crt,
+        s_censys_abs,
+        historical_baselines=[{"scan_run_id": 3101, "reports": s_crt}],
+        baseline_scan_run_id=3101,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_b1)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_b1)
+
+    # Step B2: Censys absence -> crt.sh absence (1st qualifying absence for crt.sh anchor)
+    ch_b2 = detect_changes(
+        s_censys_abs,
+        s_crt_abs,
+        historical_baselines=[
+            {"scan_run_id": 3102, "reports": s_censys_abs},
+            {"scan_run_id": 3101, "reports": s_crt},
+        ],
+        baseline_scan_run_id=3102,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_b2)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_b2)
+
+    # 3. Present -> qualifying absence -> unknown -> qualifying absence
+    s_c1_pres = _make_scan(high_present=True, source="crtsh", truncated=False)
+    s_c2_qa = _make_scan(high_present=False, source="crtsh", truncated=False)
+    s_c3_unk = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_c4_qa = _make_scan(high_present=False, source="crtsh", truncated=False)
+
+    # Step C1: Present -> 1st QA (unconfirmed)
+    ch_c1 = detect_changes(
+        s_c1_pres,
+        s_c2_qa,
+        historical_baselines=[{"scan_run_id": 3201, "reports": s_c1_pres}],
+        baseline_scan_run_id=3201,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_c1)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_c1)
+
+    # Step C2: 1st QA -> Unknown (truncated resets qualifying absence streak)
+    ch_c2 = detect_changes(
+        s_c2_qa,
+        s_c3_unk,
+        historical_baselines=[
+            {"scan_run_id": 3202, "reports": s_c2_qa},
+            {"scan_run_id": 3201, "reports": s_c1_pres},
+        ],
+        baseline_scan_run_id=3202,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_c2)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_c2)
+
+    # Step C3: Unknown -> QA (non-consecutive: this is only the 1st consecutive QA)
+    ch_c3 = detect_changes(
+        s_c3_unk,
+        s_c4_qa,
+        historical_baselines=[
+            {"scan_run_id": 3203, "reports": s_c3_unk},
+            {"scan_run_id": 3202, "reports": s_c2_qa},
+            {"scan_run_id": 3201, "reports": s_c1_pres},
+        ],
+        baseline_scan_run_id=3203,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_c3)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_c3)
+
+    # 4. Complete history-window exhaustion
+    # Verify that when presence ages out beyond the bounded 3-prior-scan window,
+    # the inventory reflects bounded window evidence exhaustion, NOT verified remediation.
+    s_hist_pres = _make_scan(high_present=True, source="crtsh", truncated=False)
+    s_unk_1 = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_unk_2 = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_unk_3 = _make_scan(high_present=False, source="crtsh", truncated=True)
+    s_unk_4 = _make_scan(high_present=False, source="crtsh", truncated=True)
+
+    # At Scan 3304 (retains [3303, 3302, 3301]), Scan 3301 is still within window:
+    ch_win_active = detect_changes(
+        s_unk_2,
+        s_unk_3,
+        historical_baselines=[
+            {"scan_run_id": 3303, "reports": s_unk_2},
+            {"scan_run_id": 3302, "reports": s_unk_1},
+            {"scan_run_id": 3301, "reports": s_hist_pres},
+        ],
+        baseline_scan_run_id=3303,
+    )
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_win_active)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_win_active)
+
+    # At Scan 3305 (retains [3304, 3303, 3302]), Scan 3301 has aged out of the 3-prior-scan window:
+    # All scans in the available window omit high_host and have 9 hosts.
+    # Therefore, effective domain inventory drops to 9 hosts, LARGE_ATTACK_SURFACE is absent,
+    # and domain band drops to LOW.
+    ch_exhausted = detect_changes(
+        s_unk_3,
+        s_unk_4,
+        historical_baselines=[
+            {"scan_run_id": 3304, "reports": s_unk_3},
+            {"scan_run_id": 3303, "reports": s_unk_2},
+            {"scan_run_id": 3302, "reports": s_unk_1},
+        ],
+        baseline_scan_run_id=3304,
+    )
+    # No REMOVED_SUBDOMAIN was ever confirmed (since all absences were truncated/unknown).
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_exhausted)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_exhausted)
+
+
+def test_domain_inventory_empty_discovery_distinguishes_empty_missing_and_confirmed():
+    """Verify empty-inventory distinguishes empty reports, missing stages, and removals.
+
+    1. Empty discovery report (classified UNKNOWN):
+       - Previously observed HIGH domain with high-risk host (Score 17, Band HIGH).
+       - Current scan has empty discovery results (results: []), classified UNKNOWN.
+       - Production ScoreReport has empty hosts list (hosts: [], domain_score: 0, band: 'LOW').
+       Assert: NO REMOVED_SUBDOMAIN and NO false DOMAIN_RISK_BAND_DECREASED.
+    2. Missing stages (raw score only):
+       - Baseline has HIGH domain. Current scan has ONLY score report (no stage reports).
+       Assert: Bypasses reconstruction and consumes raw score report.
+    3. Genuinely confirmed removal:
+       - Baseline was present; 2 consecutive non-empty qualifying absences follow.
+       Assert: Emits REMOVED_SUBDOMAIN and DOMAIN_RISK_BAND_DECREASED.
+    """
+    from asm.scoring import score_domain_payloads
+
+    ts = "2026-10-01T12:00:00Z"
+    high_host = "high.example.com"
+    other_hosts = [f"h{i}.example.com" for i in range(2, 11)]
+
+    def _make_full_scan(*, high_present: bool, empty_discovery: bool = False) -> dict:
+        active = [] if empty_discovery else (([high_host] if high_present else []) + other_hosts)
+        disc = [
+            {"subdomain": h, "resolved": True, "status": "RESOLVED", "ips": ["203.0.113.10"]}
+            for h in active
+        ]
+        probe = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "http": {"reachable": True, "status_code": 200, "error_type": None},
+                "https": {"reachable": True, "status_code": 200, "error_type": None},
+            }
+            for h in active
+        ]
+        ps = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "open_ports": (
+                    [
+                        {"port": 80, "state": "OPEN"},
+                        {"port": 443, "state": "OPEN"},
+                        {"port": 3389, "state": "OPEN"},
+                    ]
+                    if h == high_host
+                    else [{"port": 80, "state": "OPEN"}, {"port": 443, "state": "OPEN"}]
+                ),
+                "closed_ports": [],
+                "filtered_ports": [],
+            }
+            for h in active
+        ]
+        insp = [
+            {
+                "subdomain": h,
+                "status": "PROBED",
+                "cert": {
+                    "issuer": "Let's Encrypt R11",
+                    "not_after": "2027-03-01",
+                    "is_trusted": True,
+                    "expired": False,
+                },
+                "headers": {
+                    "present_headers": {"Strict-Transport-Security": "max-age=31536000"},
+                    "missing_headers": ["Content-Security-Policy"],
+                    "error": None,
+                },
+            }
+            for h in active
+        ]
+        sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crtsh",
+                "scan_time": ts,
+                "results": disc,
+                "truncated": False,
+            },
+            "probe": {"domain": "example.com", "scan_time": ts, "results": probe},
+            "portscan": {"domain": "example.com", "scan_time": ts, "results": ps},
+            "inspect": {"domain": "example.com", "scan_time": ts, "results": insp},
+            "score": sc,
+        }
+
+    # Case 1: Previously observed HIGH domain -> Current scan has EMPTY discovery (UNKNOWN)
+    s1_high = _make_full_scan(high_present=True)
+    assert s1_high["score"]["domain_band"] == "HIGH"
+    assert s1_high["score"]["domain_score"] == 17
+
+    s2_empty_disc = _make_full_scan(high_present=False, empty_discovery=True)
+    # Production ScoreReport on empty discovery has 0 hosts and INFO band
+    assert s2_empty_disc["score"]["hosts"] == []
+    assert s2_empty_disc["score"]["domain_band"] == "INFO"
+    assert s2_empty_disc["score"]["domain_score"] == 0
+
+    ch_empty = detect_changes(
+        s1_high,
+        s2_empty_disc,
+        historical_baselines=[{"scan_run_id": 4001, "reports": s1_high}],
+        baseline_scan_run_id=4001,
+    )
+    # An empty discovery scan is UNKNOWN; it must NOT confirm removals or drop risk band!
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in ch_empty)
+    assert not any(c["change_type"] == "DOMAIN_RISK_BAND_DECREASED" for c in ch_empty)
+    assert not any("RISK_BAND" in c["change_type"] for c in ch_empty)
+
+    # Case 2: Missing stages (bare ScoreReport without stage reports)
+    # When stage reports are completely absent, change detection consumes raw values.
+    s2_missing_stages = {
+        "score": {
+            "domain": "example.com",
+            "domain_score": 0,
+            "domain_band": "LOW",
+            "hosts": [],
+            "counts": {"high_escalation": False},
+        }
+    }
+    ch_missing = detect_changes(
+        s1_high,
+        s2_missing_stages,
+        historical_baselines=[{"scan_run_id": 4001, "reports": s1_high}],
+        baseline_scan_run_id=4001,
+    )
+    assert any(c["change_type"] == "DOMAIN_RISK_BAND_DECREASED" for c in ch_missing)
+
+    # Case 3: Genuinely confirmed removal (2 consecutive non-empty qualifying absences)
+    s2_absent_qa1 = _make_full_scan(high_present=False, empty_discovery=False)
+    s3_absent_qa2 = _make_full_scan(high_present=False, empty_discovery=False)
+
+    ch_confirmed = detect_changes(
+        s2_absent_qa1,
+        s3_absent_qa2,
+        historical_baselines=[
+            {"scan_run_id": 4002, "reports": s2_absent_qa1},
+            {"scan_run_id": 4001, "reports": s1_high},
+        ],
+        baseline_scan_run_id=4002,
+    )
+    rem_events = [c for c in ch_confirmed if c["change_type"] == "REMOVED_SUBDOMAIN"]
+    assert len(rem_events) == 1
+    assert rem_events[0]["asset"] == high_host
+    dom_dec = [c for c in ch_confirmed if c["change_type"] == "DOMAIN_RISK_BAND_DECREASED"]
+    assert len(dom_dec) == 1
+    assert dom_dec[0]["previous_state"] == {"band": "HIGH", "score": 17}
+    assert dom_dec[0]["new_state"] == {"band": "LOW", "score": 9}
+
