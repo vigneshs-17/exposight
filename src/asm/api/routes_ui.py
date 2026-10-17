@@ -353,6 +353,12 @@ def get_org_scan_detail_ui(
                 f"Provider ({source}) limit reached and host cap applied "
                 f"({selected_count} selected from {observed_count} observed)."
             )
+        elif reason == "inventory_capacity_exceeded":
+            untracked = discover_report.get("untracked_subdomains_count", 0)
+            truncation_notice = (
+                f"Active inventory cap reached. {untracked} observed subdomain(s) "
+                "could not be retained in discovery inventory."
+            )
         else:
             truncation_notice = (
                 "Discovery results were truncated due to resource or provider limits."

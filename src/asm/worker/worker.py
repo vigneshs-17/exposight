@@ -153,9 +153,7 @@ class ASMWorker:
         else:
             self.smtp_host = os.getenv("SMTP_HOST", "").strip() or None
 
-        self.smtp_port = (
-            smtp_port if smtp_port is not None else int(os.getenv("SMTP_PORT", "1025"))
-        )
+        self.smtp_port = smtp_port if smtp_port is not None else int(os.getenv("SMTP_PORT", "1025"))
         self.smtp_from = (
             smtp_from if smtp_from is not None else os.getenv("SMTP_FROM", "alerts@asm.local")
         )
@@ -175,9 +173,7 @@ class ASMWorker:
             else (os.getenv("SMTP_STARTTLS", "false").lower() in ("true", "1", "yes"))
         )
         self.smtp_timeout = (
-            smtp_timeout
-            if smtp_timeout is not None
-            else float(os.getenv("SMTP_TIMEOUT", "10.0"))
+            smtp_timeout if smtp_timeout is not None else float(os.getenv("SMTP_TIMEOUT", "10.0"))
         )
         self.smtp_ssl = (
             smtp_ssl
@@ -842,64 +838,13 @@ class ASMWorker:
                     "One or more scan stages failed or were skipped",
                 )
             else:
-                summary, changes, baseline_id = self._perform_change_detection(
-                    scan_run_id, domain_id, reports
-                )
-
-                # Build alert subject/body and recipient rows in memory BEFORE the final
-                # fenced transaction, inside try/except.
-                alert_rows: list[dict[str, str]] = []
-                if summary.get("status") == "computed":
-                    try:
-                        with self.session_factory() as session:
-                            domain_obj = session.get(Domain, domain_id)
-                            if (
-                                domain_obj
-                                and domain_obj.alerts_enabled
-                                and domain_obj.alert_emails
-                                and domain_obj.is_verified
-                                and not all_owners_suspended(session, domain_obj.org_id)
-                            ):
-                                should_alert, triggering_changes = should_trigger_alerts(
-                                    alerts_enabled=domain_obj.alerts_enabled,
-                                    alert_emails=domain_obj.alert_emails,
-                                    verified=domain_obj.is_verified,
-                                    alert_min_severity=domain_obj.alert_min_severity,
-                                    change_summary=summary,
-                                    changes=changes,
-                                )
-                                if should_alert:
-                                    subject, body = build_alert_digest(
-                                        domain_name=domain_obj.name,
-                                        scan_run_id=scan_run_id,
-                                        changes=changes,
-                                        triggering_changes=triggering_changes,
-                                    )
-                                    for email in domain_obj.alert_emails:
-                                        alert_rows.append({
-                                            "recipient": email,
-                                            "subject": subject,
-                                            "body": body,
-                                        })
-                    except Exception as alert_exc:
-                        logger.exception(
-                            "Failed building alerts for scan_run_id=%d: %s",
-                            scan_run_id,
-                            alert_exc,
-                        )
-                        summary["alert_error"] = sanitize_error_text(str(alert_exc))
-                        alert_rows = []
-
                 self._mark_run_final(
                     scan_run_id,
                     claim_token,
                     "succeeded",
                     None,
-                    change_detection=summary,
-                    changes=changes,
                     domain_id=domain_id,
-                    baseline_scan_run_id=baseline_id,
-                    alert_rows=alert_rows,
+                    reports=reports,
                 )
 
         except SecurityGateError as exc:
@@ -1130,66 +1075,142 @@ class ASMWorker:
         scan_run_id: int,
         domain_id: int,
         new_reports: dict[str, dict[str, Any]],
+        session: Session | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
         """Perform in-memory change detection against the most recent earlier succeeded scan."""
+        if session is not None:
+            return self._execute_change_detection(session, scan_run_id, domain_id, new_reports)
+        with self.session_factory() as sess:
+            return self._execute_change_detection(sess, scan_run_id, domain_id, new_reports)
+
+    def _execute_change_detection(
+        self,
+        session: Session,
+        scan_run_id: int,
+        domain_id: int,
+        new_reports: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
         from asm.changes import detect_changes, evaluate_removal_eligibility
 
-        with self.session_factory() as session:
-            baseline_rows = session.execute(
+        inventory: dict[str, dict[str, Any]] = {}
+        baseline_rows = session.execute(
+            text(
+                """
+                SELECT id FROM scan_runs
+                WHERE domain_id = :domain_id AND status = 'succeeded' AND id < :current_id
+                ORDER BY id DESC LIMIT 3
+                """
+            ),
+            {"domain_id": domain_id, "current_id": scan_run_id},
+        ).fetchall()
+
+        if not baseline_rows:
+            detect_changes(
+                {},
+                new_reports,
+                allow_removal=False,
+                persisted_inventory=inventory,
+                current_scan_run_id=scan_run_id,
+                is_first_baseline=True,
+            )
+            summary = {
+                "status": "baseline",
+                "baseline_scan_run_id": None,
+                "removal_detection": "skipped",
+                "skip_reason": "No previous succeeded scan (first scan is baseline)",
+                "error": None,
+                "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+                "_inventory_updates": inventory,
+            }
+            return summary, [], None
+
+        baseline_ids = [r[0] for r in baseline_rows]
+        baseline_id = baseline_ids[0]
+        results = session.execute(
+            text(
+                """
+                SELECT scan_run_id, stage, report FROM scan_results
+                WHERE scan_run_id = ANY(:baseline_ids)
+                ORDER BY scan_run_id DESC
+                """
+            ),
+            {"baseline_ids": baseline_ids},
+        ).fetchall()
+        reports_by_id: dict[int, dict[str, Any]] = {bid: {} for bid in baseline_ids}
+        for row in results:
+            reports_by_id[row[0]][row[1]] = row[2]
+
+        baseline_reports = reports_by_id[baseline_id]
+        historical_baselines = [
+            {"scan_run_id": bid, "reports": reports_by_id[bid]} for bid in baseline_ids
+        ]
+
+        try:
+            sub_rows = session.execute(
                 text(
                     """
-                    SELECT id FROM scan_runs
-                    WHERE domain_id = :domain_id AND status = 'succeeded' AND id < :current_id
-                    ORDER BY id DESC LIMIT 3
+                    SELECT subdomain, status, anchor_source, consecutive_qualifying_absences,
+                           first_seen_scan_run_id, last_seen_scan_run_id,
+                           last_qualifying_absence_scan_run_id, removed_at_scan_run_id,
+                           last_status, last_resolved, last_applied_scan_run_id
+                    FROM domain_subdomains
+                    WHERE domain_id = :domain_id
                     """
                 ),
-                {"domain_id": domain_id, "current_id": scan_run_id},
+                {"domain_id": domain_id},
             ).fetchall()
-
-            if not baseline_rows:
-                summary = {
-                    "status": "baseline",
-                    "baseline_scan_run_id": None,
-                    "removal_detection": "skipped",
-                    "skip_reason": "No previous succeeded scan (first scan is baseline)",
-                    "error": None,
-                    "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            for r in sub_rows:
+                inventory[r[0]] = {
+                    "subdomain": r[0],
+                    "status": r[1],
+                    "anchor_source": r[2],
+                    "consecutive_qualifying_absences": r[3],
+                    "first_seen_scan_run_id": r[4],
+                    "last_seen_scan_run_id": r[5],
+                    "last_qualifying_absence_scan_run_id": r[6],
+                    "removed_at_scan_run_id": r[7],
+                    "last_status": r[8],
+                    "last_resolved": r[9],
+                    "last_applied_scan_run_id": r[10],
                 }
-                return summary, [], None
-
-            baseline_ids = [r[0] for r in baseline_rows]
-            baseline_id = baseline_ids[0]
-            results = session.execute(
-                text(
-                    """
-                    SELECT scan_run_id, stage, report FROM scan_results
-                    WHERE scan_run_id = ANY(:baseline_ids)
-                    ORDER BY scan_run_id DESC
-                    """
-                ),
-                {"baseline_ids": baseline_ids},
-            ).fetchall()
-            reports_by_id: dict[int, dict[str, Any]] = {bid: {} for bid in baseline_ids}
-            for row in results:
-                reports_by_id[row[0]][row[1]] = row[2]
-
-            baseline_reports = reports_by_id[baseline_id]
-            historical_baselines = [
-                {"scan_run_id": bid, "reports": reports_by_id[bid]}
-                for bid in baseline_ids
-            ]
+        except Exception:
+            inventory = {}
 
         base_disc = baseline_reports.get("discover") or {}
         new_disc = new_reports.get("discover") or {}
-        allow_removal, skip_reason = evaluate_removal_eligibility(base_disc, new_disc)
 
         try:
+            if not inventory:
+                detect_changes(
+                    {},
+                    baseline_reports,
+                    allow_removal=False,
+                    persisted_inventory=inventory,
+                    current_scan_run_id=baseline_id,
+                    is_first_baseline=True,
+                )
+
+            if inventory:
+                new_trunc = bool(new_disc.get("truncated", False))
+                new_results = new_disc.get("results")
+                new_empty = not bool(new_results)
+                allow_removal = not new_trunc and not new_empty
+                skip_reason = (
+                    "New discovery report was truncated"
+                    if new_trunc
+                    else ("New discovery report was empty" if new_empty else None)
+                )
+            else:
+                allow_removal, skip_reason = evaluate_removal_eligibility(base_disc, new_disc)
+
             changes = detect_changes(
                 baseline_reports,
                 new_reports,
                 allow_removal=allow_removal,
                 historical_baselines=historical_baselines,
                 baseline_scan_run_id=baseline_id,
+                persisted_inventory=inventory,
+                current_scan_run_id=scan_run_id,
             )
             counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
             for ch in changes:
@@ -1200,6 +1221,11 @@ class ASMWorker:
             # removal_detection records scan-level gate evaluation (performed vs skipped).
             # Individual host removals require two consecutive qualifying absences
             # in detect_changes.
+            untracked_count = (
+                new_reports.get("discover", {}).get("untracked_subdomains_count", 0)
+                if isinstance(new_reports.get("discover"), dict)
+                else 0
+            )
             summary = {
                 "status": "computed",
                 "baseline_scan_run_id": baseline_id,
@@ -1207,6 +1233,9 @@ class ASMWorker:
                 "skip_reason": skip_reason,
                 "error": None,
                 "counts": counts,
+                "capacity_exceeded": untracked_count > 0,
+                "untracked_subdomains_count": untracked_count,
+                "_inventory_updates": inventory,
             }
             return summary, changes, baseline_id
 
@@ -1237,14 +1266,207 @@ class ASMWorker:
         domain_id: int | None = None,
         baseline_scan_run_id: int | None = None,
         alert_rows: list[dict[str, str]] | None = None,
+        reports: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Set terminal status for scan_run and clear claim tokens."""
         sanitized_error = sanitize_error_text(error_msg)
-        change_detection_json = (
-            json.dumps(change_detection) if change_detection is not None else None
-        )
         with self.session_factory() as session:
             self._verify_fence(session, scan_run_id, claim_token)
+
+            if domain_id:
+                # Lock domain row to serialize finalization across scans of the same domain
+                session.execute(
+                    text("SELECT id FROM domains WHERE id = :domain_id FOR UPDATE"),
+                    {"domain_id": domain_id},
+                )
+
+                # Ordering guard: check if a newer scan has already succeeded for this domain
+                newer_succeeded = session.execute(
+                    text(
+                        """
+                        SELECT id FROM scan_runs
+                        WHERE domain_id = :domain_id
+                          AND status = 'succeeded'
+                          AND id > :scan_run_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"domain_id": domain_id, "scan_run_id": scan_run_id},
+                ).fetchone()
+
+                if reports is not None and status == "succeeded":
+                    # Compute change detection against committed domain inventory under the lock
+                    change_detection, changes, baseline_scan_run_id = (
+                        self._perform_change_detection(
+                            scan_run_id, domain_id, reports, session=session
+                        )
+                    )
+
+                    # Persist discover report capacity metadata if truncated
+                    disc_rep = reports.get("discover")
+                    if (
+                        isinstance(disc_rep, dict)
+                        and disc_rep.get("truncation_reason") == "inventory_capacity_exceeded"
+                    ):
+                        session.execute(
+                            text(
+                                """
+                                UPDATE scan_results
+                                SET report = CAST(:report_json AS jsonb)
+                                WHERE scan_run_id = :scan_run_id AND stage = 'discover'
+                                """
+                            ),
+                            {
+                                "scan_run_id": scan_run_id,
+                                "report_json": json.dumps(disc_rep),
+                            },
+                        )
+
+                if newer_succeeded and isinstance(newer_succeeded[0], int):
+                    logger.warning(
+                        "Scan run %d for domain %d is superseded by newer succeeded scan %d; "
+                        "skipping stale inventory and change persistence.",
+                        scan_run_id,
+                        domain_id,
+                        newer_succeeded[0],
+                    )
+                    if isinstance(change_detection, dict):
+                        change_detection["superseded_by"] = newer_succeeded[0]
+                        change_detection.pop("_inventory_updates", None)
+                    else:
+                        change_detection = {"superseded_by": newer_succeeded[0]}
+                    changes = None
+                    alert_rows = None
+                elif reports is not None and status == "succeeded":
+                    # Build alert notifications under the lock
+                    if change_detection and change_detection.get("status") == "computed":
+                        try:
+                            domain_obj = session.get(Domain, domain_id)
+                            if (
+                                domain_obj
+                                and domain_obj.alerts_enabled
+                                and domain_obj.alert_emails
+                                and domain_obj.is_verified
+                                and not all_owners_suspended(session, domain_obj.org_id)
+                            ):
+                                should_alert, triggering_changes = should_trigger_alerts(
+                                    alerts_enabled=domain_obj.alerts_enabled,
+                                    alert_emails=domain_obj.alert_emails,
+                                    verified=domain_obj.is_verified,
+                                    alert_min_severity=domain_obj.alert_min_severity,
+                                    change_summary=change_detection,
+                                    changes=changes or [],
+                                )
+                                if should_alert:
+                                    subject, body = build_alert_digest(
+                                        domain_name=domain_obj.name,
+                                        scan_run_id=scan_run_id,
+                                        changes=changes or [],
+                                        triggering_changes=triggering_changes,
+                                    )
+                                    alert_rows = [
+                                        {"recipient": email, "subject": subject, "body": body}
+                                        for email in domain_obj.alert_emails
+                                    ]
+                        except Exception as alert_exc:
+                            logger.exception(
+                                "Failed building alerts for scan_run_id=%d: %s",
+                                scan_run_id,
+                                alert_exc,
+                            )
+                            if change_detection is not None:
+                                change_detection["alert_error"] = str(alert_exc)
+                            alert_rows = []
+
+            inventory_updates = (
+                change_detection.pop("_inventory_updates", None)
+                if isinstance(change_detection, dict)
+                else None
+            )
+            change_detection_json = (
+                json.dumps(change_detection) if change_detection is not None else None
+            )
+
+            # Persist discovery inventory updates in the fenced transaction
+            if inventory_updates and domain_id:
+                for sub, item in inventory_updates.items():
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO domain_subdomains (
+                                domain_id, subdomain, status, anchor_source,
+                                consecutive_qualifying_absences, first_seen_scan_run_id,
+                                last_seen_scan_run_id, last_qualifying_absence_scan_run_id,
+                                removed_at_scan_run_id, last_status, last_resolved,
+                                last_applied_scan_run_id,
+                                created_at, updated_at
+                            ) VALUES (
+                                :domain_id, :subdomain, :status, :anchor_source,
+                                :consecutive_qualifying_absences, :first_seen_scan_run_id,
+                                :last_seen_scan_run_id, :last_qualifying_absence_scan_run_id,
+                                :removed_at_scan_run_id, :last_status, :last_resolved,
+                                :last_applied_scan_run_id,
+                                now(), now()
+                            )
+                            ON CONFLICT (domain_id, subdomain) DO UPDATE SET
+                                status = EXCLUDED.status,
+                                anchor_source = EXCLUDED.anchor_source,
+                                consecutive_qualifying_absences =
+                                    EXCLUDED.consecutive_qualifying_absences,
+                                last_seen_scan_run_id = COALESCE(
+                                    EXCLUDED.last_seen_scan_run_id,
+                                    domain_subdomains.last_seen_scan_run_id
+                                ),
+                                last_qualifying_absence_scan_run_id =
+                                    EXCLUDED.last_qualifying_absence_scan_run_id,
+                                removed_at_scan_run_id = EXCLUDED.removed_at_scan_run_id,
+                                last_status = EXCLUDED.last_status,
+                                last_resolved = EXCLUDED.last_resolved,
+                                last_applied_scan_run_id = EXCLUDED.last_applied_scan_run_id,
+                                updated_at = now()
+                            WHERE (
+                                domain_subdomains.last_applied_scan_run_id IS NULL
+                                OR domain_subdomains.last_applied_scan_run_id <= :scan_run_id
+                            )
+                            """
+                        ),
+                        {
+                            "domain_id": domain_id,
+                            "subdomain": sub,
+                            "status": item.get("status", "active"),
+                            "anchor_source": item.get("anchor_source", "crt.sh"),
+                            "consecutive_qualifying_absences": item.get(
+                                "consecutive_qualifying_absences", 0
+                            ),
+                            "first_seen_scan_run_id": item.get("first_seen_scan_run_id"),
+                            "last_seen_scan_run_id": item.get("last_seen_scan_run_id"),
+                            "last_qualifying_absence_scan_run_id": item.get(
+                                "last_qualifying_absence_scan_run_id"
+                            ),
+                            "removed_at_scan_run_id": item.get("removed_at_scan_run_id"),
+                            "last_status": item.get("last_status"),
+                            "last_resolved": item.get("last_resolved"),
+                            "last_applied_scan_run_id": item.get(
+                                "last_applied_scan_run_id", scan_run_id
+                            ),
+                            "scan_run_id": scan_run_id,
+                        },
+                    )
+
+                session.execute(
+                    text(
+                        """
+                        DELETE FROM domain_subdomains
+                        WHERE id IN (
+                            SELECT id FROM domain_subdomains
+                            WHERE domain_id = :domain_id AND status = 'removed'
+                            ORDER BY updated_at DESC, id DESC
+                            OFFSET :max_tombstones
+                        )
+                        """
+                    ),
+                    {"domain_id": domain_id, "max_tombstones": 1000},
+                )
 
             # Insert detected changes in the fenced transaction
             if changes and baseline_scan_run_id and domain_id:
@@ -1476,9 +1698,7 @@ class ASMWorker:
                     return
 
                 if attempts < max_attempts:
-                    sanitized_error = sanitize_error_text(
-                        f"Unexpected worker error: {error_msg}"
-                    )
+                    sanitized_error = sanitize_error_text(f"Unexpected worker error: {error_msg}")
                     # Requeue with SQL exponential backoff + jitter
                     session.execute(
                         text(
@@ -1594,17 +1814,21 @@ class ASMWorker:
         moves to when the oldest send in the 24-hour window expires.
         Returns True if the notification was deferred.
         """
-        oldest_in_window = session.execute(
-            text(
-                """
+        oldest_in_window = (
+            session.execute(
+                text(
+                    """
                 SELECT count(*) AS sent, min(sent_at) AS oldest
                 FROM alert_notifications
                 WHERE domain_id = :domain_id AND status = 'sent'
                   AND sent_at > now() - interval '24 hours'
                 """
-            ),
-            {"domain_id": domain_id},
-        ).mappings().one()
+                ),
+                {"domain_id": domain_id},
+            )
+            .mappings()
+            .one()
+        )
         if oldest_in_window["sent"] < MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY:
             return False
         session.execute(
@@ -1678,9 +1902,7 @@ class ASMWorker:
                     subject=row["subject"],
                 )
                 org_owners_suspended = (
-                    all_owners_suspended(session, domain.org_id)
-                    if domain is not None
-                    else True
+                    all_owners_suspended(session, domain.org_id) if domain is not None else True
                 )
 
                 authorized, suppression_reason = check_notification_delivery_authorization(

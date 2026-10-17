@@ -113,9 +113,7 @@ class Domain(Base):
     )
     verification_method: Mapped[str] = mapped_column(String(32), default="dns_txt", nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_misses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     verification_expires_at: Mapped[datetime | None] = mapped_column(
@@ -183,6 +181,11 @@ class Domain(Base):
         back_populates="domain",
         cascade="all, delete-orphan",
         order_by="AlertNotification.id.desc()",
+    )
+    subdomains: Mapped[list["DomainSubdomain"]] = relationship(
+        back_populates="domain",
+        cascade="all, delete-orphan",
+        order_by="DomainSubdomain.id.asc()",
     )
 
 
@@ -275,9 +278,7 @@ class ScanStage(Base):
     """Execution status and duration tracking for a single pipeline stage."""
 
     __tablename__ = "scan_stages"
-    __table_args__ = (
-        UniqueConstraint("scan_run_id", "stage", name="uq_scan_stages_run_stage"),
-    )
+    __table_args__ = (UniqueConstraint("scan_run_id", "stage", name="uq_scan_stages_run_stage"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     scan_run_id: Mapped[int] = mapped_column(
@@ -302,9 +303,7 @@ class ScanResult(Base):
     """Artifact report produced by a single scan pipeline stage."""
 
     __tablename__ = "scan_results"
-    __table_args__ = (
-        UniqueConstraint("scan_run_id", "stage", name="uq_scan_results_run_stage"),
-    )
+    __table_args__ = (UniqueConstraint("scan_run_id", "stage", name="uq_scan_results_run_stage"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     scan_run_id: Mapped[int] = mapped_column(
@@ -382,6 +381,79 @@ class ScanChange(Base):
     )
 
 
+class DomainSubdomain(Base):
+    """Persistent discovery inventory state for a domain's observed subdomains."""
+
+    __tablename__ = "domain_subdomains"
+    __table_args__ = (
+        UniqueConstraint(
+            "domain_id",
+            "subdomain",
+            name="uq_domain_subdomains_domain_subdomain",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'removed')",
+            name="ck_domain_subdomains_status",
+        ),
+        CheckConstraint(
+            "consecutive_qualifying_absences >= 0",
+            name="ck_domain_subdomains_consecutive_absences",
+        ),
+        Index("ix_domain_subdomains_domain_status", "domain_id", "status"),
+        Index("ix_domain_subdomains_domain_updated", "domain_id", "updated_at"),
+        Index("ix_domain_subdomains_domain_applied", "domain_id", "last_applied_scan_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("domains.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    subdomain: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    anchor_source: Mapped[str] = mapped_column(String(64), default="crt.sh", nullable=False)
+    consecutive_qualifying_absences: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_seen_scan_run_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("scan_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_seen_scan_run_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("scan_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_qualifying_absence_scan_run_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("scan_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    removed_at_scan_run_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("scan_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_resolved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_applied_scan_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+    # Relationships
+    domain: Mapped["Domain"] = relationship(back_populates="subdomains")
+
+
 class AlertNotification(Base):
     """Transactional outbox record for scan change email alerts."""
 
@@ -414,9 +486,7 @@ class AlertNotification(Base):
     recipient: Mapped[str] = mapped_column(String(255), nullable=False)
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(20), default="pending", nullable=False, index=True
-    )
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     next_attempt_at: Mapped[datetime] = mapped_column(
@@ -485,9 +555,7 @@ class Organization(Base):
     domains: Mapped[list["Domain"]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
-    audit_events: Mapped[list["AuditEvent"]] = relationship(
-        back_populates="organization"
-    )
+    audit_events: Mapped[list["AuditEvent"]] = relationship(back_populates="organization")
 
 
 class Membership(Base):
@@ -592,9 +660,7 @@ class AuditEvent(Base):
         nullable=False,
     )
     actor_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -631,5 +697,3 @@ event.listen(
     "after_create",
     _audit_trigger_ddl.execute_if(dialect="postgresql"),
 )
-
-
