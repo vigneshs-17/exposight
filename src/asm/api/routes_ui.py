@@ -25,6 +25,7 @@ from asm.api.deps import (
 from asm.api.routes import _domain_to_read, _notification_to_read
 from asm.audit import AUDIT_ACTIONS, build_audit_query
 from asm.auth.config import AuthSettings
+from asm.change_wording import describe_change
 from asm.db.models import (
     AlertNotification,
     Domain,
@@ -52,6 +53,7 @@ templates_env = Environment(
     loader=FileSystemLoader(TEMPLATES_DIR),
     autoescape=select_autoescape(["html", "xml"]),
 )
+templates_env.globals["describe_change"] = describe_change
 
 ui_router = APIRouter(tags=["Dashboard UI"])
 

@@ -91,9 +91,10 @@ def test_build_alert_digest_formatting_and_ordering():
     assert "\r" not in subject
     assert "\n" not in subject
     expected_subject_part = (
-        "[Exposight] CRITICAL: 3 new exposures on example.comBcc: evil@attacker.com"
+        "[Exposight] CRITICAL: 3 exposure changes observed on example.comBcc: evil@attacker.com"
     )
     assert expected_subject_part in subject
+    assert "new exposures" not in subject.lower()
 
     # Body checks: plain text, summaries included, ordered CRITICAL -> HIGH -> LOW
     assert "Scan Run ID: 42" in body

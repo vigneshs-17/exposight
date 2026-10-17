@@ -238,9 +238,9 @@
             <li class="how-card how-card-alert">
               <span class="how-card-step mono">Step 04</span>
               <h3 class="how-card-title">Get told what changed</h3>
-              <p class="how-card-text">Each scan is compared with the previous one. New subdomains, newly open ports and certificate problems are emailed to up to 5 recipients.</p>
+              <p class="how-card-text">Each scan is compared with earlier scans. Subdomains outside the tracked inventory, ports observed accepting connections, and certificate problems are recorded as changes; those at or above your chosen severity are emailed to up to 5 recipients.</p>
               <div class="how-card-visual mono" aria-hidden="true">
-                <span class="chip chip-alert">new open port</span>
+                <span class="chip chip-alert">port observed open</span>
                 <span class="chip chip-alert">certificate expired</span>
               </div>
             </li>
@@ -275,7 +275,7 @@
             <span class="stage-step-num mono">03</span>
             <div>
               <h3 class="stage-step-title">Lightweight TCP port scan</h3>
-              <p class="stage-step-text">Connects to sixteen common service ports to classify them as open or closed and to read non-intrusive service greetings.</p>
+              <p class="stage-step-text">Connects to sixteen common service ports to classify them as open, closed (connection refused) or filtered (inconclusive connection result, such as a timeout or unreachable error) and to read non-intrusive service greetings.</p>
             </div>
             <span class="stage-step-source mono">portscan.py</span>
           </li>
@@ -308,7 +308,7 @@
           <article class="feature-item tilt reveal">
             <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></svg>
             <h3 class="feature-title">Change detection</h3>
-            <p class="feature-desc">Consecutive scans are compared to find new subdomains, newly open ports and certificate problems: expired, untrusted, self-signed or hostname mismatch.</p>
+            <p class="feature-desc">Each scan is compared with earlier scans to record subdomains outside the tracked inventory, ports observed accepting connections, and certificate problems: expired, untrusted, self-signed or hostname mismatch.</p>
           </article>
           <article class="feature-item tilt reveal">
             <svg class="feature-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>

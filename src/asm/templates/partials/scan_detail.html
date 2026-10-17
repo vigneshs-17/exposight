@@ -174,9 +174,14 @@
   <!-- Scan Changes -->
   <div class="surface-panel-header section-header">
     <h3 class="panel-title">Changes detected</h3>
-    <p class="panel-subtitle">Differences observed compared against the baseline scan.</p>
+    <p class="panel-subtitle">Differences between what this scan observed and what earlier scans observed. A change shows when Exposight observed a difference, not when or why it happened.</p>
   </div>
 
+  {% if truncation_notice and scan_run.status not in ('failed', 'cancelled', 'queued', 'running') %}
+  <div class="alert-box alert-info">
+    <strong>Partial coverage:</strong> {{ truncation_notice }}
+  </div>
+  {% endif %}
   {% if scan_changes %}
   {% if scan_run.status in ('failed', 'cancelled') %}
   <div class="alert-box alert-warning">
@@ -197,12 +202,18 @@
       </thead>
       <tbody>
         {% for ch in scan_changes %}
+        {% set change_description = describe_change(ch.change_type, ch.detail) %}
         <tr>
           <td>
             <span class="tier-badge tier-{{ ch.severity.lower() }}">{{ ch.severity|capitalize }}</span>
           </td>
           <td>{{ ch.category|capitalize }}</td>
-          <td><code>{{ ch.change_type }}</code></td>
+          <td>
+            <code>{{ ch.change_type }}</code>
+            {% if change_description %}
+            <p class="text-muted finding-why change-description">{{ change_description }}</p>
+            {% endif %}
+          </td>
           <td><code>{{ ch.asset }}</code></td>
           <td>{{ ch.detail }}</td>
           <td><code>{{ ch.evidence }}</code></td>
