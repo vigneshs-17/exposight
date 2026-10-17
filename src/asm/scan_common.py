@@ -30,6 +30,7 @@ IPV6_ONLY_REASON_PREFIX = "IPv6-only host"
 _NAT64_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _SIX_TO_FOUR_PREFIX = ipaddress.IPv6Network("2002::/16")
 _SITE_LOCAL_PREFIX = ipaddress.IPv6Network("fec0::/10")
+_IPV4_TRANSLATED_PREFIX = ipaddress.IPv6Network("::ffff:0:0:0/96")
 # Public-looking addresses that are cloud platform endpoints, reachable from inside the VM.
 # 168.63.129.16: Azure WireServer / platform DNS (also blocked by deploy/egress/rules.sh).
 _PLATFORM_ENDPOINTS = (ipaddress.IPv4Network("168.63.129.16/32"),)
@@ -196,6 +197,9 @@ def is_safe_public_ip(ip_str: str) -> bool:
         if ip.ipv4_mapped is not None:
             # IPv4-mapped (::ffff:127.0.0.1 -> 127.0.0.1)
             ip = ip.ipv4_mapped
+        elif ip in _IPV4_TRANSLATED_PREFIX:
+            # IPv4-translated (::ffff:0:127.0.0.1 -> 127.0.0.1): judge embedded IPv4
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
         elif ip in _NAT64_PREFIX:
             # NAT64 (64:ff9b::7f00:1 -> 127.0.0.1): judge the embedded IPv4 address
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)

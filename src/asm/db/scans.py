@@ -38,7 +38,7 @@ def enqueue_scan(
             is violated.
     """
     domain = session.get(Domain, domain_id)
-    if domain is None or domain.verification_status != "verified":
+    if domain is None or not domain.is_verified:
         raise UnverifiedDomainError(
             f"Domain ID {domain_id} is not verified. "
             "Ownership verification is required before scanning."
