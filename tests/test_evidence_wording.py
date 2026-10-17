@@ -119,7 +119,11 @@ def test_describe_change_certificate_variants_state_presentation_difference_only
     rotation or CDN behavior.
     """
     desc_issuer = describe_change("CERTIFICATE_CHANGED", "issuer")
-    assert "certificate presented to the scanner has a different issuer" in desc_issuer
+    assert (
+        "certificate presented to the scanner has a different issuing authority (CA)"
+        in desc_issuer
+    )
+    assert "issuer" not in desc_issuer.lower()
     assert "does not by itself show why the certificate differs" in desc_issuer
 
     desc_expiry = describe_change("CERTIFICATE_CHANGED", "not_after")
@@ -384,7 +388,9 @@ def test_scan_detail_template_renders_change_descriptions_and_coverage_notice():
 
     assert "This scan observed the port accepting connections." in html
     assert "refused the scanner&#39;s connection in this scan." in html
-    assert "certificate presented to the scanner has a different issuer" in html
+    assert (
+        "certificate presented to the scanner has a different issuing authority (CA)" in html
+    )
     assert (
         "outside the current tracked inventory. It may be newly discovered or previously observed."
         in html

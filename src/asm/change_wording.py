@@ -59,7 +59,7 @@ _CERT_PRESENTED = (
 
 CERTIFICATE_CHANGED_DESCRIPTIONS: dict[str, str] = {
     "issuer": (
-        "The certificate presented to the scanner has a different issuer from the "
+        "The certificate presented to the scanner has a different issuing authority (CA) from the "
         f"certificate recorded in an earlier scan. {_CERT_PRESENTED}"
     ),
     "not_after": (
