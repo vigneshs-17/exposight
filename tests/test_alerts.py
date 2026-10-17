@@ -6,7 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from asm.alerts.digest import build_alert_digest, sanitize_body_field, sanitize_header_field
-from asm.alerts.rules import should_trigger_alerts
+from asm.alerts.rules import (
+    check_notification_delivery_authorization,
+    is_verification_status_notification,
+    should_trigger_alerts,
+)
 from asm.api.schemas import DomainAlertsUpdate
 
 
@@ -268,3 +272,147 @@ def test_domain_alerts_schema_validation():
             alerts_enabled=False,
             alert_min_severity="INVALID_SEVERITY",
         )
+
+
+def test_is_verification_status_notification():
+    """Verify classification of notification types."""
+    # Scan result notification with run ID is never verification status
+    assert not is_verification_status_notification(
+        42, "Domain verification revoked: monitoring paused"
+    )
+    assert not is_verification_status_notification(
+        1, "[Exposight] CRITICAL: 1 new exposure on test.com"
+    )
+
+    # Domain lapse / revocation notices have scan_run_id=None and verification subject
+    assert is_verification_status_notification(
+        None, "Domain verification revoked: monitoring paused"
+    )
+    assert is_verification_status_notification(
+        None, "Domain verification expired: monitoring paused"
+    )
+    assert is_verification_status_notification(
+        None, "Domain verification lapsed: monitoring paused"
+    )
+
+    # Misleading prefixes and substrings fail safe
+    assert not is_verification_status_notification(None, "Domain verification: 2 open ports")
+    assert not is_verification_status_notification(None, "Domain verification alert: port 22 open")
+    assert not is_verification_status_notification(None, "Verification completed: scan details")
+    assert not is_verification_status_notification(None, "Domain verification bypass attempt")
+    assert not is_verification_status_notification(None, "Unrelated domain alert")
+
+    # Scan-result row with exact verification subject must still fail (scan rows never exempted)
+    assert not is_verification_status_notification(
+        99, "Domain verification lapsed: monitoring paused"
+    )
+    assert not is_verification_status_notification(
+        99, "Domain verification revoked: monitoring paused"
+    )
+
+
+def test_check_notification_delivery_authorization_pure_rules():
+    """Test all authorization rules for outbox notification delivery."""
+    # 1. Domain deleted / does not exist
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=False,
+        alerts_enabled=True,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=True,
+        is_verification_notice=False,
+    )
+    assert not auth
+    assert "Domain no longer exists" in reason
+
+    # 2. Alerts disabled
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=False,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=True,
+        is_verification_notice=False,
+    )
+    assert not auth
+    assert "Domain alerts are disabled" in reason
+
+    # 3. Recipient removed or mismatch (case-insensitive check)
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["other@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=True,
+        is_verification_notice=False,
+    )
+    assert not auth
+    assert "Recipient is no longer configured" in reason
+
+    # 4. Case-insensitive matching succeeds
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["Ops@Test.COM"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=True,
+        is_verification_notice=False,
+    )
+    assert auth
+    assert reason is None
+
+    # 5. All owners suspended
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=True,
+        is_verified=True,
+        is_verification_notice=False,
+    )
+    assert not auth
+    assert "All organization owners are suspended" in reason
+
+    # 6. Scan result notice with inactive/expired verification -> suppressed
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=False,
+        is_verification_notice=False,
+    )
+    assert not auth
+    assert "Domain verification is inactive or expired" in reason
+
+    # 7. Verification notice with inactive verification -> authorized!
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=False,
+        is_verified=False,
+        is_verification_notice=True,
+    )
+    assert auth
+    assert reason is None
+
+    # 8. Verification notice with suspended owners -> suppressed!
+    auth, reason = check_notification_delivery_authorization(
+        domain_exists=True,
+        alerts_enabled=True,
+        configured_alert_emails=["ops@test.com"],
+        recipient="ops@test.com",
+        all_owners_suspended=True,
+        is_verified=False,
+        is_verification_notice=True,
+    )
+    assert not auth
+    assert "All organization owners are suspended" in reason

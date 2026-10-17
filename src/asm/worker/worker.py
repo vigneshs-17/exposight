@@ -21,7 +21,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from asm.admin import all_owners_suspended
 from asm.alerts.delivery import send_smtp_email
 from asm.alerts.digest import build_alert_digest
-from asm.alerts.rules import should_trigger_alerts
+from asm.alerts.rules import (
+    check_notification_delivery_authorization,
+    is_verification_status_notification,
+    should_trigger_alerts,
+)
 from asm.audit import record_event
 from asm.db.models import Domain, ScanResult, ScanRun
 from asm.db.scans import enqueue_scan
@@ -1626,6 +1630,16 @@ class ASMWorker:
         """Deliver pending alert notifications using transactional outbox pattern.
 
         Each notification is processed in its own transaction.
+        Immediately prior to sending, the worker evaluates committed database
+        state to ensure delivery remains authorized (domain exists, alerts enabled,
+        recipient still configured, at least one active owner, and active verification
+        for scan findings).
+
+        Note: Evaluating current committed state immediately before SMTP submission
+        does not retract an email that has already been accepted by an SMTP server
+        (e.g., following a crash before commit) and does not eliminate the unavoidable
+        race window between database evaluation and SMTP socket completion.
+
         The delivery transaction holds the row lock (FOR UPDATE SKIP LOCKED)
         during the SMTP send (bounded by a socket timeout, default 10s).
         Holding the row lock during send prevents double sends by concurrent
@@ -1656,6 +1670,52 @@ class ASMWorker:
                 row = session.execute(stmt).mappings().fetchone()
                 if not row:
                     break
+
+                # 2. Evaluate pre-delivery authorization against current committed state
+                domain = session.get(Domain, row["domain_id"])
+                is_verif_notice = is_verification_status_notification(
+                    scan_run_id=row["scan_run_id"],
+                    subject=row["subject"],
+                )
+                org_owners_suspended = (
+                    all_owners_suspended(session, domain.org_id)
+                    if domain is not None
+                    else True
+                )
+
+                authorized, suppression_reason = check_notification_delivery_authorization(
+                    domain_exists=domain is not None,
+                    alerts_enabled=domain.alerts_enabled if domain else False,
+                    configured_alert_emails=domain.alert_emails if domain else None,
+                    recipient=row["recipient"],
+                    all_owners_suspended=org_owners_suspended,
+                    is_verified=domain.is_verified if domain else False,
+                    is_verification_notice=is_verif_notice,
+                )
+
+                if not authorized:
+                    sanitized_reason = sanitize_error_text(
+                        f"Delivery suppressed: {suppression_reason}"
+                    )
+                    logger.info(
+                        "Alert delivery suppressed id=%d domain_id=%d: %s",
+                        row["id"],
+                        row["domain_id"],
+                        sanitized_reason,
+                    )
+                    session.execute(
+                        text(
+                            """
+                            UPDATE alert_notifications
+                            SET status = 'failed',
+                                last_error = :err
+                            WHERE id = :id
+                            """
+                        ),
+                        {"id": row["id"], "err": sanitized_reason},
+                    )
+                    session.commit()
+                    continue
 
                 if self._defer_if_daily_alert_quota_reached(session, row["id"], row["domain_id"]):
                     session.commit()
