@@ -14,15 +14,16 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Engine, func, select, text, update
+from sqlalchemy import Engine, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from asm.admin import all_owners_suspended
 from asm.alerts.delivery import send_smtp_email
 from asm.alerts.digest import build_alert_digest
 from asm.alerts.rules import should_trigger_alerts
 from asm.audit import record_event
-from asm.db.models import Domain, ScanResult
+from asm.db.models import Domain, ScanResult, ScanRun
 from asm.db.scans import enqueue_scan
 from asm.ratelimit import MAX_ALERT_EMAILS_PER_DOMAIN_PER_DAY
 from asm.retention import purge_enabled, purge_expired
@@ -423,6 +424,10 @@ class ASMWorker:
                     select(Domain)
                     .where(
                         Domain.verification_status == "verified",
+                        or_(
+                            Domain.verification_expires_at.is_(None),
+                            Domain.verification_expires_at > func.now(),
+                        ),
                         Domain.scan_interval_hours.is_not(None),
                         Domain.next_scan_at <= func.now(),
                     )
@@ -433,6 +438,22 @@ class ASMWorker:
                 domain = session.scalar(stmt)
                 if not domain:
                     break
+
+                if not domain.is_verified or all_owners_suspended(session, domain.org_id):
+                    jitter_seconds = random.randint(0, 300)  # jitter, not a secret  # nosec B311
+                    interval_hours = domain.scan_interval_hours
+                    advance_stmt = (
+                        update(Domain)
+                        .where(Domain.id == domain.id)
+                        .values(
+                            next_scan_at=func.now()
+                            + text("interval '1 hour' * :h").bindparams(h=interval_hours)
+                            + text("interval '1 second' * :s").bindparams(s=jitter_seconds)
+                        )
+                    )
+                    session.execute(advance_stmt)
+                    session.commit()
+                    continue
 
                 # 2. Enqueue scan_run and stages using a nested transaction (savepoint)
                 active_scan_exists = False
@@ -688,10 +709,14 @@ class ASMWorker:
                 domain = session.get(Domain, domain_id)
                 if not domain:
                     raise SecurityGateError(f"Domain ID {domain_id} does not exist.")
-                if domain.verification_status != "verified":
+                if not domain.is_verified:
                     raise SecurityGateError(
                         f"Target domain '{domain.name}' verification is not active "
                         f"({domain.verification_status})."
+                    )
+                if all_owners_suspended(session, domain.org_id):
+                    raise SecurityGateError(
+                        f"Scanning is paused for org {domain.org_id} (all owners suspended)."
                     )
                 domain_name = domain.name
 
@@ -745,9 +770,14 @@ class ASMWorker:
                 # Worker-side verification gate check before EVERY stage including discover
                 with self.session_factory() as session:
                     fresh_domain = session.get(Domain, domain_id)
-                    if not fresh_domain or fresh_domain.verification_status != "verified":
+                    if not fresh_domain or not fresh_domain.is_verified:
                         raise SecurityGateError(
                             f"Domain verification lapsed/revoked for '{domain_name}'"
+                        )
+                    if all_owners_suspended(session, fresh_domain.org_id):
+                        raise SecurityGateError(
+                            f"Scanning is paused for org {fresh_domain.org_id} "
+                            "(all owners suspended)."
                         )
 
                 # Mark stage 'running' in short transaction
@@ -823,7 +853,8 @@ class ASMWorker:
                                 domain_obj
                                 and domain_obj.alerts_enabled
                                 and domain_obj.alert_emails
-                                and domain_obj.verification_status == "verified"
+                                and domain_obj.is_verified
+                                and not all_owners_suspended(session, domain_obj.org_id)
                             ):
                                 should_alert, triggering_changes = should_trigger_alerts(
                                     alerts_enabled=domain_obj.alerts_enabled,
@@ -1386,6 +1417,60 @@ class ASMWorker:
         try:
             with self.session_factory() as session:
                 self._verify_fence(session, scan_run_id, claim_token)
+                run = session.get(ScanRun, scan_run_id)
+                domain_id = getattr(run, "domain_id", None)
+                domain = session.get(Domain, domain_id) if domain_id else None
+                if domain and all_owners_suspended(session, domain.org_id):
+                    sanitized_error = "Scanning is paused for this organization."
+                    res = session.execute(
+                        text(
+                            """
+                            UPDATE scan_runs
+                            SET status = 'cancelled',
+                                finished_at = now(),
+                                claimed_by = NULL,
+                                claim_token = NULL,
+                                lease_expires_at = NULL,
+                                error = :error
+                            WHERE id = :id AND status = 'running' AND claim_token = :token
+                            """
+                        ),
+                        {
+                            "id": scan_run_id,
+                            "token": claim_token,
+                            "error": sanitized_error,
+                        },
+                    )
+                    if res.rowcount > 0:
+                        session.execute(
+                            text(
+                                """
+                                UPDATE scan_stages
+                                SET status = 'failed',
+                                    finished_at = now(),
+                                    error = :error
+                                WHERE scan_run_id = :id AND status = 'running'
+                                """
+                            ),
+                            {"id": scan_run_id, "error": sanitized_error},
+                        )
+                        session.execute(
+                            text(
+                                """
+                                UPDATE scan_stages
+                                SET status = 'skipped',
+                                    started_at = coalesce(started_at, now()),
+                                    finished_at = now(),
+                                    duration_ms = 0,
+                                    error = 'Skipped: organization scanning paused'
+                                WHERE scan_run_id = :id AND status = 'pending'
+                                """
+                            ),
+                            {"id": scan_run_id},
+                        )
+                    session.commit()
+                    return
+
                 if attempts < max_attempts:
                     sanitized_error = sanitize_error_text(
                         f"Unexpected worker error: {error_msg}"

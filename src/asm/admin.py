@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from asm.audit import record_event
@@ -406,18 +406,28 @@ def unsuspend_user(session: Session, user_id: str, reason: str) -> int:
     return 0
 
 
-def _all_owners_suspended(session: Session, org_id: int) -> bool:
-    """Return True if the organization has no owner left who is not suspended."""
-    active_owners = session.scalar(
-        select(func.count(Membership.id))
+def all_owners_suspended(session: Session, org_id: int) -> bool:
+    """Return True if the organization has owners and EVERY owner is suspended."""
+    row = session.execute(
+        select(
+            func.count(Membership.id).label("total"),
+            func.count(
+                case((User.suspended_at.is_(None), Membership.id), else_=None)
+            ).label("active"),
+        )
+        .select_from(Membership)
         .join(User, User.id == Membership.user_id)
         .where(
             Membership.org_id == org_id,
             Membership.role == "owner",
-            User.suspended_at.is_(None),
         )
-    )
-    return (active_owners or 0) == 0
+    ).one()
+    total_owners = row.total or 0
+    active_owners = row.active or 0
+    return total_owners > 0 and active_owners == 0
+
+
+_all_owners_suspended = all_owners_suspended
 
 
 def _stop_org_scanning(session: Session, org_id: int) -> tuple[int, int]:

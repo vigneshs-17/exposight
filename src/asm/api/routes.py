@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from asm.admin import all_owners_suspended
 from asm.api.deps import (
     DbSession,
     get_active_user,
@@ -508,13 +509,19 @@ def queue_scan(
     """Queue a scan run for a verified domain with atomic idempotency and concurrency guards."""
     domain = get_domain_for_org(db, org_id, domain_id)
 
-    if domain.verification_status != "verified":
+    if not domain.is_verified:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"Domain '{domain.name}' is not verified for active scanning. "
                 "Ownership verification is required."
             ),
+        )
+
+    if all_owners_suspended(db, org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Scanning is paused for this organization.",
         )
 
     if idempotency_key:
@@ -802,7 +809,7 @@ def update_domain_schedule(
         domain.scan_interval_hours = None
         domain.next_scan_at = None
     else:
-        if domain.verification_status != "verified":
+        if not domain.is_verified:
             raise HTTPException(
                 status_code=422,
                 detail=f"Domain '{domain.name}' is not verified for scanning.",
@@ -858,7 +865,7 @@ def update_domain_alerts(
     """Configure or disable automated email alerts for detected attack surface exposures."""
     domain = get_domain_for_org(db, org_id, domain_id)
 
-    if domain.verification_status != "verified" and payload.alerts_enabled:
+    if not domain.is_verified and payload.alerts_enabled:
         raise HTTPException(
             status_code=422,
             detail=f"Domain '{domain.name}' is not verified.",

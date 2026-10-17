@@ -141,7 +141,16 @@ class Domain(Base):
     @property
     def is_verified(self) -> bool:
         """Return True if domain has proven control and active verified status."""
-        return self.verification_status == "verified"
+        if self.verification_status != "verified":
+            return False
+        if self.verification_expires_at is not None:
+            now_utc = datetime.now(UTC)
+            exp = self.verification_expires_at
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=UTC)
+            if exp <= now_utc:
+                return False
+        return True
 
     @property
     def alert_recipient_count(self) -> int:
