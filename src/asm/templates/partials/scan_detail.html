@@ -81,6 +81,15 @@
   </div>
 
   {% if fix_first and fix_first.total > 0 %}
+  {% if scan_run.status in ('failed', 'cancelled') %}
+  <div class="alert-box alert-warning">
+    <strong>Partial scan findings:</strong> Scan was {{ status_display|lower }} before completion. Displaying {{ fix_first.total }} finding(s) recorded prior to termination.
+  </div>
+  {% elif truncation_notice %}
+  <div class="alert-box alert-info">
+    <strong>Partial coverage:</strong> {{ truncation_notice }}
+  </div>
+  {% endif %}
   <div class="score-summary-grid">
     <div class="score-card">
       <div class="score-card-value">{{ fix_first.domain_score }}</div>
@@ -150,6 +159,14 @@
   <p class="text-muted findings-more">... and {{ fix_first.more_count }} more findings.</p>
   {% endif %}
 
+  {% elif scan_run.status == 'failed' %}
+  <p class="text-muted">Scan failed before completion. No security findings were recorded.</p>
+  {% elif scan_run.status == 'cancelled' %}
+  <p class="text-muted">Scan was cancelled before completion. No security findings were recorded.</p>
+  {% elif scan_run.status in ('queued', 'running') %}
+  <p class="text-muted">Scan is {{ status_display|lower }}. Findings will be reported once all pipeline stages complete.</p>
+  {% elif truncation_notice %}
+  <p class="text-muted">No findings reported for scanned assets. (Note: asset discovery was truncated; see pipeline stage notices).</p>
   {% else %}
   <p class="text-muted">No findings reported for this scan run.</p>
   {% endif %}
@@ -161,6 +178,11 @@
   </div>
 
   {% if scan_changes %}
+  {% if scan_run.status in ('failed', 'cancelled') %}
+  <div class="alert-box alert-warning">
+    <strong>Partial change detection:</strong> Scan was {{ status_display|lower }} before completion. Displaying {{ scan_changes|length }} change(s) recorded prior to termination.
+  </div>
+  {% endif %}
   <div class="table-container">
     <table class="data-table">
       <thead>
@@ -189,6 +211,18 @@
       </tbody>
     </table>
   </div>
+  {% elif scan_run.status == 'failed' %}
+  <p class="text-muted">Scan failed before completion. Changes could not be evaluated.</p>
+  {% elif scan_run.status == 'cancelled' %}
+  <p class="text-muted">Scan was cancelled before completion. Changes were not evaluated.</p>
+  {% elif scan_run.status in ('queued', 'running') %}
+  <p class="text-muted">Scan is {{ status_display|lower }}. Changes will be evaluated once the scan completes.</p>
+  {% elif scan_run.change_detection and scan_run.change_detection.get('status') == 'baseline' %}
+  <p class="text-muted">Baseline scan established. Delta changes will be tracked against subsequent scans.</p>
+  {% elif scan_run.change_detection and scan_run.change_detection.get('status') == 'failed' %}
+  <p class="text-muted">Change detection failed: {{ scan_run.change_detection.get('error') or 'comparison could not be computed' }}.</p>
+  {% elif not scan_run.change_detection %}
+  <p class="text-muted">Change comparison is unavailable for this scan.</p>
   {% else %}
   <p class="text-muted">No changes detected in this scan.</p>
   {% endif %}

@@ -21,6 +21,8 @@
   let isAuthenticated = false;
   let isRefreshing = false;
   let supabaseClient = null;
+  let currentSelectedOrgId = null;
+  let currentSessionEpoch = 0;
 
   // Retrieve configuration from data attributes on document body
   const bodyEl = document.body;
@@ -60,6 +62,10 @@
     if (currentAccessToken) {
       evt.detail.headers['Authorization'] = 'Bearer ' + currentAccessToken;
     }
+    evt.detail.headers['X-Session-Epoch'] = String(currentSessionEpoch);
+    if (currentSelectedOrgId) {
+      evt.detail.headers['X-Origin-Org-Id'] = String(currentSelectedOrgId);
+    }
   });
 
   // True if a response body is the API's 403 "Account suspended" answer.
@@ -87,9 +93,48 @@
     if (panel) panel.classList.remove('hidden');
   }
 
-  // Handle HTMX response errors (e.g. 401 token expiration, 403 suspension)
+  // Drop late responses from a previously selected organization or unauthenticated session
+  document.body.addEventListener('htmx:beforeSwap', function (evt) {
+    if (!isAuthenticated || !currentAccessToken) {
+      evt.detail.shouldSwap = false;
+      return;
+    }
+    const cfg = evt.detail.requestConfig;
+    const reqEpoch = cfg && cfg.headers ? cfg.headers['X-Session-Epoch'] : null;
+    if (reqEpoch && String(reqEpoch) !== String(currentSessionEpoch)) {
+      evt.detail.shouldSwap = false;
+      return;
+    }
+    const reqOrgHeader = cfg && cfg.headers ? cfg.headers['X-Origin-Org-Id'] : null;
+    const path = cfg ? cfg.path : '';
+    const match = path ? /^\/ui\/orgs\/(\d+)\//.exec(path) : null;
+    const reqOrgId = reqOrgHeader || (match ? match[1] : null);
+    if (reqOrgId && currentSelectedOrgId && String(reqOrgId) !== String(currentSelectedOrgId)) {
+      // Late response from previous organization: drop swap to prevent tenant bleeding
+      evt.detail.shouldSwap = false;
+      return;
+    }
+  });
+
+  // Handle HTMX response errors (e.g. 401 token expiration, 403 suspension, 404, 500)
   document.body.addEventListener('htmx:responseError', async function (evt) {
     const xhr = evt.detail.xhr;
+    const cfg = evt.detail.requestConfig;
+    const reqEpoch = cfg && cfg.headers ? cfg.headers['X-Session-Epoch'] : null;
+    if (reqEpoch && String(reqEpoch) !== String(currentSessionEpoch)) {
+      return;
+    }
+    if (!isAuthenticated || !currentAccessToken) {
+      return;
+    }
+    const reqOrgHeader = cfg && cfg.headers ? cfg.headers['X-Origin-Org-Id'] : null;
+    const path = cfg ? cfg.path : '';
+    const match = path ? /^\/ui\/orgs\/(\d+)\//.exec(path) : null;
+    const reqOrgId = reqOrgHeader || (match ? match[1] : null);
+    if (reqOrgId && currentSelectedOrgId && String(reqOrgId) !== String(currentSelectedOrgId)) {
+      return;
+    }
+
     if (xhr && isSuspendedBody(xhr.status, xhr.responseText)) {
       showSuspended();
       return;
@@ -130,11 +175,26 @@
         await supabaseClient.auth.signOut();
         onUserSignedOut();
       }
+      return;
+    }
+    if (xhr && xhr.status === 404) {
+      showError('The requested resource or organization was not found. If your permissions changed, reload your organizations.');
+      return;
+    }
+    if (xhr && xhr.status === 403) {
+      showError('You do not have permission to view or modify this resource.');
+      return;
+    }
+    if (xhr && xhr.status >= 500) {
+      showError('A server error occurred. Please try again later.');
+      return;
     }
   });
 
   // UI state toggles
   function onUserAuthenticated(user) {
+    currentSessionEpoch += 1;
+    clearError();
     const authContainer = document.getElementById('auth-section');
     const appShell = document.getElementById('app-shell');
     const userDisplay = document.getElementById('user-email-display');
@@ -150,15 +210,20 @@
   }
 
   function onUserSignedOut() {
+    currentSessionEpoch += 1;
     isAuthenticated = false;
     currentAccessToken = null;
+    currentSelectedOrgId = null;
+    clearError();
     const authContainer = document.getElementById('auth-section');
     const appShell = document.getElementById('app-shell');
     const contentArea = document.getElementById('main-content-area');
     const orgSelector = document.getElementById('org-switcher-select');
+    const userDisplay = document.getElementById('user-email-display');
 
     if (authContainer) authContainer.classList.remove('hidden');
     if (appShell) appShell.classList.add('hidden');
+    if (userDisplay) userDisplay.textContent = '';
     const suspendedPanel = document.getElementById('suspended-panel');
     if (suspendedPanel) suspendedPanel.classList.add('hidden');
     if (orgSelector) orgSelector.classList.remove('hidden');
@@ -195,6 +260,7 @@
 
       if (!orgs || orgs.length === 0) {
         // User has no organizations; render empty org creation screen
+        currentSelectedOrgId = null;
         loadEmptyOrgView();
         return;
       }
@@ -209,6 +275,7 @@
       // Select the requested organization (e.g. one just joined), else the first one
       const preferred = orgs.find(function (org) { return org.id === preferredOrgId; });
       const selectedOrgId = preferred ? preferred.id : orgs[0].id;
+      currentSelectedOrgId = String(selectedOrgId);
       orgSelect.value = String(selectedOrgId);
       loadDomainsList(selectedOrgId);
     } catch (err) {
@@ -216,49 +283,55 @@
     }
   }
 
-  function loadEmptyOrgView() {
+  function loadEmptyOrgView(source) {
     return window.htmx.ajax('GET', '/ui/empty-org', {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
-  function loadDomainsList(orgId) {
+  function loadDomainsList(orgId, source) {
     if (!orgId) return Promise.resolve();
     return window.htmx.ajax('GET', '/ui/orgs/' + orgId + '/domains', {
       target: '#main-content-area',
+      source: source || document.getElementById('org-switcher-select') || document.body,
     });
   }
 
-  function loadDomainDetail(orgId, domainId) {
+  function loadDomainDetail(orgId, domainId, source) {
     if (!orgId || !domainId) return Promise.resolve();
     return window.htmx.ajax('GET', '/ui/orgs/' + orgId + '/domains/' + domainId, {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
-  function loadScansList(orgId, domainId) {
+  function loadScansList(orgId, domainId, source) {
     if (!orgId || !domainId) return Promise.resolve();
     return window.htmx.ajax('GET', '/ui/orgs/' + orgId + '/domains/' + domainId + '/scans', {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
-  function loadScanDetail(orgId, scanId) {
+  function loadScanDetail(orgId, scanId, source) {
     if (!orgId || !scanId) return Promise.resolve();
     return window.htmx.ajax('GET', '/ui/orgs/' + orgId + '/scans/' + scanId, {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
-  function loadAlertNotifications(orgId, domainId, offset) {
+  function loadAlertNotifications(orgId, domainId, offset, source) {
     if (!orgId || !domainId) return Promise.resolve();
     const off = offset || 0;
     return window.htmx.ajax('GET', '/ui/orgs/' + orgId + '/domains/' + domainId + '/alert-notifications?offset=' + off, {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
-  function loadAuditLog(orgId, params) {
+  function loadAuditLog(orgId, params, source) {
     if (!orgId) return Promise.resolve();
     const p = params || {};
     let url = '/ui/orgs/' + orgId + '/audit-events';
@@ -271,6 +344,7 @@
     }
     return window.htmx.ajax('GET', url, {
       target: '#main-content-area',
+      source: source || document.getElementById('main-content-area') || document.body,
     });
   }
 
@@ -960,8 +1034,9 @@
   document.addEventListener('change', function (evt) {
     if (evt.target && evt.target.id === 'org-switcher-select') {
       const orgId = evt.target.value;
+      currentSelectedOrgId = String(orgId);
       clearError();
-      loadDomainsList(orgId);
+      loadDomainsList(orgId, evt.target);
     }
   });
 })();

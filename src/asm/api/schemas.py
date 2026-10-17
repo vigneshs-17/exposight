@@ -155,6 +155,10 @@ class AlertNotificationRead(BaseModel):
     )
     sent_at: datetime | None = None
     created_at: datetime
+    is_suppressed: bool = Field(
+        default=False,
+        description="True if delivery was halted by pre-delivery authorization checks.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

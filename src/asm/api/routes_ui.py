@@ -418,6 +418,7 @@ def get_org_scan_detail_ui(
         should_poll=should_poll,
         is_stale_active=is_stale_active,
         user_role=membership.role,
+        truncation_notice=truncation_notice,
     )
 
 

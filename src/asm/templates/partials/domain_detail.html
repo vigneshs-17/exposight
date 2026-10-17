@@ -18,8 +18,10 @@
   <div class="form-group">
     <label class="form-label">Current status</label>
     <div>
-      {% if domain.verification_status == 'verified' %}
+      {% if domain.verification_status == 'verified' and domain.is_verified %}
       <span class="status-badge status-verified">Status: verified</span>
+      {% elif domain.verification_status == 'verified' and not domain.is_verified %}
+      <span class="status-badge status-lapsed">Status: expired</span>
       {% elif domain.verification_status == 'lapsed' %}
       <span class="status-badge status-lapsed">Status: lapsed</span>
       {% else %}
@@ -101,7 +103,7 @@
 
   {% if user_role in ('admin', 'owner') %}
   <form id="schedule-settings-form" class="settings-form" data-org-id="{{ org.id }}" data-domain-id="{{ domain.id }}">
-    {% if domain.verification_status != 'verified' %}
+    {% if not domain.is_verified %}
     <div class="alert-box alert-warning">
       Domain ownership verification required before scheduling automated scans.
     </div>
@@ -110,13 +112,13 @@
       <label for="schedule-interval-select" class="form-label">Scan interval</label>
       <select id="schedule-interval-select" name="interval_hours" class="form-select">
         <option value=""{% if not domain.scan_interval_hours %} selected{% endif %}>Off</option>
-        <option value="6"{% if domain.scan_interval_hours == 6 %} selected{% endif %}{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every 6 hours</option>
-        <option value="12"{% if domain.scan_interval_hours == 12 %} selected{% endif %}{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every 12 hours</option>
-        <option value="24"{% if domain.scan_interval_hours == 24 %} selected{% endif %}{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every 24 hours</option>
-        <option value="168"{% if domain.scan_interval_hours == 168 %} selected{% endif %}{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every 7 days</option>
-        <option value="720"{% if domain.scan_interval_hours == 720 %} selected{% endif %}{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every 30 days</option>
+        <option value="6"{% if domain.scan_interval_hours == 6 %} selected{% endif %}{% if not domain.is_verified %} disabled{% endif %}>Every 6 hours</option>
+        <option value="12"{% if domain.scan_interval_hours == 12 %} selected{% endif %}{% if not domain.is_verified %} disabled{% endif %}>Every 12 hours</option>
+        <option value="24"{% if domain.scan_interval_hours == 24 %} selected{% endif %}{% if not domain.is_verified %} disabled{% endif %}>Every 24 hours</option>
+        <option value="168"{% if domain.scan_interval_hours == 168 %} selected{% endif %}{% if not domain.is_verified %} disabled{% endif %}>Every 7 days</option>
+        <option value="720"{% if domain.scan_interval_hours == 720 %} selected{% endif %}{% if not domain.is_verified %} disabled{% endif %}>Every 30 days</option>
         {% if domain.scan_interval_hours and domain.scan_interval_hours not in (6, 12, 24, 168, 720) %}
-        <option value="{{ domain.scan_interval_hours }}" selected{% if domain.verification_status != 'verified' %} disabled{% endif %}>Every {{ domain.scan_interval_hours }} hours (current)</option>
+        <option value="{{ domain.scan_interval_hours }}" selected{% if not domain.is_verified %} disabled{% endif %}>Every {{ domain.scan_interval_hours }} hours (current)</option>
         {% endif %}
       </select>
     </div>
@@ -151,7 +153,7 @@
 
   {% if user_role in ('admin', 'owner') %}
   <form id="alerts-settings-form" class="settings-form" data-org-id="{{ org.id }}" data-domain-id="{{ domain.id }}">
-    {% if domain.verification_status != 'verified' %}
+    {% if not domain.is_verified %}
     <div class="alert-box alert-warning">
       Domain ownership verification required before enabling alerts.
     </div>

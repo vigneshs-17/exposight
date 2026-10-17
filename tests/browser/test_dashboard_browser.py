@@ -1020,6 +1020,7 @@ def test_browser_scan_detail_changes_and_baseline_rendering(
             created_at=datetime.now(UTC),
             started_at=datetime.now(UTC),
             finished_at=datetime.now(UTC),
+            change_detection={"status": "computed", "counts": {}},
         )
         session.add(baseline_scan_1)
         session.flush()
