@@ -12,7 +12,7 @@
   {% if user_role in ('admin', 'owner') %}
   <div class="surface-panel-header">
     <div class="action-row">
-      {% if domain.verification_status == 'verified' %}
+      {% if domain.is_verified %}
       <button type="button" id="btn-run-scan" class="btn btn-primary" data-org-id="{{ org.id }}" data-domain-id="{{ domain.id }}">
         Run scan
       </button>

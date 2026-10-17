@@ -1178,7 +1178,10 @@ def test_scan_detail_failed_state_no_results(
     assert "Connection reset by peer during inspect stage" in resp.text
     assert "<b onmouseover" not in resp.text
     assert "&lt;b onmouseover=alert(1)&gt;" in resp.text
-    assert "No findings reported for this scan run." in resp.text
+    assert "Scan failed before completion. No security findings were recorded." in resp.text
+    assert "Scan failed before completion. Changes could not be evaluated." in resp.text
+    assert "No findings reported for this scan run." not in resp.text
+    assert "No changes detected in this scan." not in resp.text
 
 
 @pytest.mark.db
@@ -1239,14 +1242,28 @@ def test_scan_detail_changes_detected_and_empty(
     assert "&lt;img src=x onerror=alert(1)&gt;" in resp1.text
     assert "&lt;script&gt;alert(&#39;stage&#39;)&lt;/script&gt;" in resp1.text
 
-    # 2. Scan without changes
-    scan_no_changes = ScanRun(domain_id=domain.id, status="succeeded", trigger="manual")
+    # 2. Scan with missing change comparison
+    scan_missing_changes = ScanRun(domain_id=domain.id, status="succeeded", trigger="manual")
+    db_session.add(scan_missing_changes)
+    db_session.flush()
+
+    resp2 = client.get(f"/ui/orgs/{test_org.id}/scans/{scan_missing_changes.id}")
+    assert resp2.status_code == 200
+    assert "Change comparison is unavailable for this scan." in resp2.text
+
+    # 3. Scan with verified clean changes
+    scan_no_changes = ScanRun(
+        domain_id=domain.id,
+        status="succeeded",
+        trigger="manual",
+        change_detection={"status": "computed", "counts": {}},
+    )
     db_session.add(scan_no_changes)
     db_session.flush()
 
-    resp2 = client.get(f"/ui/orgs/{test_org.id}/scans/{scan_no_changes.id}")
-    assert resp2.status_code == 200
-    assert "No changes detected in this scan." in resp2.text
+    resp3 = client.get(f"/ui/orgs/{test_org.id}/scans/{scan_no_changes.id}")
+    assert resp3.status_code == 200
+    assert "No changes detected in this scan." in resp3.text
 
 
 @pytest.mark.db

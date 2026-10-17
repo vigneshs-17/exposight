@@ -27,6 +27,7 @@ STATUS_DISPLAY_NAMES: dict[str, str] = {
     "running": "Running",
     "succeeded": "Succeeded",
     "failed": "Failed",
+    "cancelled": "Cancelled",
 }
 
 

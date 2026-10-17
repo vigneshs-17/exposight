@@ -39,8 +39,10 @@
         <tr>
           <td><strong>{{ domain.name }}</strong></td>
           <td>
-            {% if domain.verification_status == 'verified' %}
+            {% if domain.verification_status == 'verified' and domain.is_verified %}
             <span class="status-badge status-verified">Status: verified</span>
+            {% elif domain.verification_status == 'verified' and not domain.is_verified %}
+            <span class="status-badge status-lapsed">Status: expired</span>
             {% elif domain.verification_status == 'lapsed' %}
             <span class="status-badge status-lapsed">Status: lapsed</span>
             {% else %}

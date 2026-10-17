@@ -133,6 +133,13 @@ def _notification_to_read(
         last_error=notification.last_error if is_privileged else None,
         sent_at=notification.sent_at,
         created_at=notification.created_at,
+        is_suppressed=bool(
+            notification.last_error
+            and (
+                notification.last_error.startswith("Delivery suppressed:")
+                or notification.last_error.startswith("Suppressed:")
+            )
+        ),
     )
 
 

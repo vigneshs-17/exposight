@@ -6,7 +6,7 @@
       </button>
     </div>
     <h2 class="panel-title">Alert history for {{ domain.name }}</h2>
-    <p class="panel-subtitle">Outbox log of automated email notifications dispatched for this domain.</p>
+    <p class="panel-subtitle">Outbox log of automated email notifications for this domain. Sent records SMTP acceptance; suppressed messages are retained without dispatch.</p>
   </div>
 
   {% if notifications %}
@@ -48,6 +48,8 @@
             <span class="status-badge status-verified">Sent</span>
             {% elif n.status == 'pending' %}
             <span class="status-badge status-pending">Pending</span>
+            {% elif n.is_suppressed %}
+            <span class="status-badge status-skipped">Suppressed</span>
             {% else %}
             <span class="status-badge status-failed">Failed</span>
             {% endif %}
