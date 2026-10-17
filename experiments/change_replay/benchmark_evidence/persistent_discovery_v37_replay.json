@@ -1,0 +1,116 @@
+{
+  "version": "v3.7",
+  "model": "bounded_persistent_discovery_inventory",
+  "command": "uv run python experiments/change_replay/adapter_persistent_discovery.py --all",
+  "provenance": {
+    "base_commit": "dd4eb109695806e53721d91c3bb885c3e6a857e3",
+    "harness": "experiments.change_replay.harness (frozen)",
+    "p0_reference": "experiments.change_replay.p0_reference (frozen)"
+  },
+  "findings": {
+    "seed_43_recovery": {
+      "event": "subdomain_removed",
+      "recovered_at_scan": 14,
+      "previous_status": "missed due to 3-scan window eviction",
+      "resolved_status": "recovered via persistent domain_subdomains state"
+    },
+    "seed_79_miss": {
+      "event": "port_closed",
+      "status": "OPEN (unresolved port flap noise blocker)"
+    },
+    "scanner_noise_blockers": {
+      "port_flap_noise_per_1k": 10.88,
+      "cdn_cert_churn_per_1k": 18.93,
+      "status": "OPEN (port-retry experiment not adopted)"
+    },
+    "capacity_limits": {
+      "max_active_subdomains": 5000,
+      "max_tombstones_retained": 1000,
+      "tombstone_pruning_order": "updated_at DESC, id DESC"
+    },
+    "migration_downgrade": {
+      "revision": "0015_domain_subdomains_inventory",
+      "populated_downgrade": "BLOCKED (refuse_lossy_downgrade)"
+    }
+  },
+  "cohort_evaluations": [
+    {
+      "seeds": "1-20",
+      "candidate": {
+        "false_changes": 319,
+        "alert_eligible_fc": 6,
+        "misses": []
+      },
+      "adapter": {
+        "false_changes": 319,
+        "alert_eligible_fc": 6,
+        "misses": []
+      },
+      "delay_diffs": []
+    },
+    {
+      "seeds": "21-40",
+      "candidate": {
+        "false_changes": 330,
+        "alert_eligible_fc": 9,
+        "misses": []
+      },
+      "adapter": {
+        "false_changes": 330,
+        "alert_eligible_fc": 9,
+        "misses": []
+      },
+      "delay_diffs": []
+    },
+    {
+      "seeds": "41-60",
+      "candidate": {
+        "false_changes": 326,
+        "alert_eligible_fc": 14,
+        "misses": [
+          [
+            43,
+            "subdomain_removed"
+          ]
+        ]
+      },
+      "adapter": {
+        "false_changes": 326,
+        "alert_eligible_fc": 14,
+        "misses": []
+      },
+      "delay_diffs": [
+        {
+          "seed": 43,
+          "event": "subdomain_removed",
+          "candidate_t": null,
+          "adapter_t": 14
+        }
+      ]
+    },
+    {
+      "seeds": "61-80",
+      "candidate": {
+        "false_changes": 303,
+        "alert_eligible_fc": 6,
+        "misses": [
+          [
+            79,
+            "port_closed"
+          ]
+        ]
+      },
+      "adapter": {
+        "false_changes": 303,
+        "alert_eligible_fc": 6,
+        "misses": [
+          [
+            79,
+            "port_closed"
+          ]
+        ]
+      },
+      "delay_diffs": []
+    }
+  ]
+}

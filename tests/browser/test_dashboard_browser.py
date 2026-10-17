@@ -36,6 +36,7 @@ from asm.db.models import (
     Membership,
     Organization,
     ScanChange,
+    ScanResult,
     ScanRun,
     ScanStage,
     User,
@@ -1200,3 +1201,79 @@ def test_browser_scan_detail_changes_and_baseline_rendering(
     expect(page.locator(".tier-badge.tier-medium:has-text('Medium')")).to_be_visible()
     expect(page.locator(".tier-badge.tier-low:has-text('Low')")).to_be_visible()
     expect(page.locator(".tier-badge.tier-info:has-text('Info')")).to_have_count(3)
+
+
+def test_browser_persisted_capacity_notice_rendered(
+    page: Page,
+    live_server: str,
+    browser_session_factory: sessionmaker[Session],
+) -> None:
+    """Scan detail UI in a real browser renders the persisted active inventory capacity notice."""
+    with browser_session_factory() as session:
+        user = User(
+            id=UUID("00000000-0000-0000-0000-000000000088"),
+            email="capacity-viewer@example.com",
+        )
+        org = Organization(name="Capacity Notice Org")
+        session.add_all([user, org])
+        session.flush()
+
+        membership = Membership(org_id=org.id, user_id=user.id, role="viewer")
+        domain = Domain(
+            org_id=org.id,
+            name="capacity-notice.example.com",
+            verification_status="verified",
+            alerts_enabled=False,
+        )
+        session.add_all([membership, domain])
+        session.flush()
+
+        run = ScanRun(
+            domain_id=domain.id,
+            status="succeeded",
+            trigger="manual",
+            finished_at=datetime.now(UTC),
+            change_detection={
+                "status": "computed",
+                "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            },
+        )
+        session.add(run)
+        session.flush()
+
+        session.add(
+            ScanStage(
+                scan_run_id=run.id,
+                stage="discover",
+                status="succeeded",
+                duration_ms=120,
+            )
+        )
+        session.add(
+            ScanResult(
+                scan_run_id=run.id,
+                stage="discover",
+                report={
+                    "domain": "capacity-notice.example.com",
+                    "source": "crt.sh",
+                    "truncated": True,
+                    "truncation_reason": "inventory_capacity_exceeded",
+                    "untracked_subdomains_count": 7,
+                    "results": [],
+                },
+            )
+        )
+        session.commit()
+        run_id = run.id
+
+    sign_in(page, "capacity-viewer@example.com", live_server)
+    page.locator(".btn-view-domain").click()
+    page.locator("#btn-view-scans").click()
+
+    page.locator(f"button.btn-view-scan[data-scan-id='{run_id}']").click()
+    scan_detail = page.locator("#scan-detail-container")
+    expect(scan_detail).to_be_visible()
+    expect(scan_detail).to_contain_text(
+        "Active inventory cap reached. 7 observed subdomain(s) could not be retained in "
+        "discovery inventory."
+    )

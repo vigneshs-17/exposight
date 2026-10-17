@@ -97,9 +97,7 @@ def db_engine():
     # Safety check: database name in TEST_DATABASE_URL MUST end with '_test'
     validate_test_database_url(test_db_url)
 
-    engine = create_engine(
-        test_db_url, pool_pre_ping=True, connect_args={"connect_timeout": 5}
-    )
+    engine = create_engine(test_db_url, pool_pre_ping=True, connect_args={"connect_timeout": 5})
 
     # Verify database connectivity
     try:
@@ -161,13 +159,14 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
 @pytest.fixture
 def clean_db(db_engine) -> Generator[None, None, None]:
     """Ensure database tables are truncated before and after multi-threaded concurrency tests."""
+
     def _truncate(conn):
         conn.execute(text("ALTER TABLE audit_events DISABLE TRIGGER trg_audit_events_append_only;"))
         conn.execute(
             text(
                 "TRUNCATE TABLE memberships, organizations, users, alert_notifications, "
-                "scan_changes, scan_results, scan_stages, scan_runs, domains, audit_events "
-                "RESTART IDENTITY CASCADE;"
+                "scan_changes, scan_results, scan_stages, scan_runs, domain_subdomains, "
+                "domains, audit_events RESTART IDENTITY CASCADE;"
             )
         )
         conn.execute(text("ALTER TABLE audit_events ENABLE TRIGGER trg_audit_events_append_only;"))
@@ -200,7 +199,6 @@ def lifecycle_client(clean_db, db_engine) -> Generator[TestClient, None, None]:
                     session.rollback()
                     user = session.get(User, test_user_id)
             return user
-
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_current_user] = _override_get_current_user
@@ -249,7 +247,3 @@ def lifecycle_org(clean_db, db_engine) -> Organization:
         session.commit()
         session.refresh(org)
         return org
-
-
-
-

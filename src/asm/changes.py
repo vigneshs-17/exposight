@@ -167,14 +167,11 @@ def classify_discovery_observation(
 
 def _is_valid_cert_data(cert: Any) -> bool:
     """Return True if cert dictionary contains non-empty certificate evidence."""
-    return (
-        isinstance(cert, dict)
-        and bool(
-            cert.get("issuer")
-            or cert.get("not_after")
-            or cert.get("subject_cn")
-            or cert.get("serial_hex")
-        )
+    return isinstance(cert, dict) and bool(
+        cert.get("issuer")
+        or cert.get("not_after")
+        or cert.get("subject_cn")
+        or cert.get("serial_hex")
     )
 
 
@@ -204,9 +201,7 @@ def _is_defect_remediated(finding_id: str, cert: dict[str, Any]) -> bool:
 
 
 def _find_latest_cert_for_defects(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
 ) -> tuple[int | None, dict[str, Any], dict[str, Any], list[Finding]] | None:
     """Search history window for certificate observation with completed security evaluation."""
@@ -232,9 +227,7 @@ def _find_latest_cert_for_defects(
 
 
 def _find_latest_clean_cert(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
     *,
     issuer: str | None = None,
@@ -285,18 +278,14 @@ def _certs_are_identical(cert1: dict[str, Any], cert2: dict[str, Any]) -> bool:
     sans1 = cert1.get("sans")
     sans2 = cert2.get("sans")
     if (sans1 is not None or sans2 is not None) and (
-        not isinstance(sans1, list)
-        or not isinstance(sans2, list)
-        or sorted(sans1) != sorted(sans2)
+        not isinstance(sans1, list) or not isinstance(sans2, list) or sorted(sans1) != sorted(sans2)
     ):
         return False
     return True
 
 
 def _find_latest_definite_dns_observation(
-    disc_history_indexed: list[
-        tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]
-    ],
+    disc_history_indexed: list[tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]],
     sub: str,
 ) -> tuple[str, bool, int | None] | None:
     """Search up to 3 historical scans for the latest definite DNS resolution observation.
@@ -331,9 +320,7 @@ def _is_valid_header_data(headers: Any) -> bool:
 
 
 def _find_latest_header_observation(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
     header_name: str,
 ) -> tuple[int | None, str, dict[str, Any], list[Finding]] | None:
@@ -367,9 +354,7 @@ def _find_latest_header_observation(
 
 
 def _find_latest_hsts_strength(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
 ) -> tuple[int | None, str] | None:
     """Search history window for the latest definite observation of HSTS strength.
@@ -405,9 +390,7 @@ def _find_latest_hsts_strength(
 
 
 def _find_latest_valid_cert(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
 ) -> tuple[int | None, dict[str, Any], dict[str, Any], list[Finding]] | None:
     """Search history window for the latest valid certificate observation."""
@@ -415,9 +398,7 @@ def _find_latest_valid_cert(
 
 
 def _find_latest_valid_header(
-    history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
-    ],
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]],
     host: str,
 ) -> tuple[int | None, dict[str, Any], dict[str, Any], list[Finding]] | None:
     """Search history window for the latest valid security header observation."""
@@ -486,6 +467,11 @@ def detect_changes(
     *,
     historical_baselines: list[dict[str, Any]] | None = None,
     baseline_scan_run_id: int | None = None,
+    persisted_inventory: dict[str, dict[str, Any]] | None = None,
+    current_scan_run_id: int | None = None,
+    max_active_subdomains: int = 5000,
+    max_tombstones: int = 1000,
+    is_first_baseline: bool = False,
 ) -> list[dict[str, Any]]:
     """Pure comparison function to detect attack surface changes between two scans.
 
@@ -536,16 +522,12 @@ def detect_changes(
             for entry in historical_baselines[:3]
         ]
     elif baseline_reports:
-        disc_history_entries = [
-            {"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}
-        ]
+        disc_history_entries = [{"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}]
     else:
         disc_history_entries = []
 
     # Indexed prior scans: list of (scan_id, source, truncated, is_empty, sub_map)
-    disc_history_indexed: list[
-        tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]
-    ] = []
+    disc_history_indexed: list[tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]] = []
     for entry in disc_history_entries:
         s_id = entry.get("scan_run_id") or entry.get("id")
         rep = entry.get("reports") if "reports" in entry else entry
@@ -593,88 +575,114 @@ def detect_changes(
             == "QUALIFYING_ABSENCE"
         )
 
-    # 2a. Additions (NEW_SUBDOMAIN) and DNS Resolution Changes
-    for sub, n_entry in new_subs.items():
-        # Find latest scan in history where sub was observed PRESENT
-        last_present = None
-        for idx, (s_id, s_src, _s_tr, _s_em, s_subs) in enumerate(disc_history_indexed):
-            if sub in s_subs:
-                last_present = (idx, s_id, s_src, s_subs[sub])
-                break
+    if persisted_inventory is not None:
+        untracked_subdomains: list[str] = []
 
-        if last_present is None:
-            # Case 1: First observed within available history
-            changes.append({
-                "change_type": "NEW_SUBDOMAIN",
-                "category": "exposure",
-                "severity": "INFO",
-                "asset": sub,
-                "detail": "",
-                "evidence": "discover",
-                "previous_state": None,
-                "new_state": {
-                    "status": n_entry.get("status"),
-                    "resolved": n_entry.get("resolved"),
-                },
-                "observed_at": observed_at,
-            })
-        else:
-            # Case 2: Present in history.
-            # Did it undergo confirmed absence immediately before new scan?
-            pres_idx, _p_id, anchor_src, _p_entry = last_present
-            s1_qualifies = (
-                len(disc_history_indexed) >= 1
-                and _is_qualifying_absence(
-                    sub,
-                    disc_history_indexed[0][1],
-                    disc_history_indexed[0][2],
-                    disc_history_indexed[0][3],
-                    disc_history_indexed[0][4],
-                    anchor_src,
-                )
-            )
-            s2_qualifies = (
-                len(disc_history_indexed) >= 2
-                and _is_qualifying_absence(
-                    sub,
-                    disc_history_indexed[1][1],
-                    disc_history_indexed[1][2],
-                    disc_history_indexed[1][3],
-                    disc_history_indexed[1][4],
-                    anchor_src,
-                )
-            )
+        # 2a. Additions, Reappearances, and DNS Resolution Transitions
+        for sub, n_entry in new_subs.items():
+            n_stat = n_entry.get("status")
+            n_res = n_entry.get("resolved", False) is True
 
-            if s1_qualifies and s2_qualifies and pres_idx >= 2:
-                # Confirmed absent prior to new scan -> Genuine rediscovery
-                s1_id = disc_history_indexed[0][0] or default_base_id
-                changes.append({
-                    "change_type": "NEW_SUBDOMAIN",
-                    "category": "exposure",
-                    "severity": "INFO",
-                    "asset": sub,
-                    "detail": "",
-                    "evidence": "discover",
-                    "previous_state": None,
-                    "new_state": {
-                        "status": n_entry.get("status"),
-                        "resolved": n_entry.get("resolved"),
-                    },
-                    "observed_at": observed_at,
-                    **({"baseline_scan_run_id": s1_id} if s1_id is not None else {}),
-                })
+            if sub not in persisted_inventory:
+                active_count = sum(
+                    1 for it in persisted_inventory.values() if it.get("status") == "active"
+                )
+                if is_first_baseline:
+                    if active_count < max_active_subdomains:
+                        persisted_inventory[sub] = {
+                            "subdomain": sub,
+                            "status": "active",
+                            "anchor_source": new_src,
+                            "consecutive_qualifying_absences": 0,
+                            "first_seen_scan_run_id": current_scan_run_id,
+                            "last_seen_scan_run_id": current_scan_run_id,
+                            "last_qualifying_absence_scan_run_id": None,
+                            "removed_at_scan_run_id": None,
+                            "last_status": n_stat,
+                            "last_resolved": n_res,
+                            "last_applied_scan_run_id": current_scan_run_id,
+                        }
+                    else:
+                        untracked_subdomains.append(sub)
+                else:
+                    if active_count < max_active_subdomains:
+                        persisted_inventory[sub] = {
+                            "subdomain": sub,
+                            "status": "active",
+                            "anchor_source": new_src,
+                            "consecutive_qualifying_absences": 0,
+                            "first_seen_scan_run_id": current_scan_run_id,
+                            "last_seen_scan_run_id": current_scan_run_id,
+                            "last_qualifying_absence_scan_run_id": None,
+                            "removed_at_scan_run_id": None,
+                            "last_status": n_stat,
+                            "last_resolved": n_res,
+                            "last_applied_scan_run_id": current_scan_run_id,
+                        }
+                        change_dict = {
+                            "change_type": "NEW_SUBDOMAIN",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": None,
+                            "new_state": {"status": n_stat, "resolved": n_res},
+                            "observed_at": observed_at,
+                        }
+                        if baseline_scan_run_id is not None:
+                            change_dict["baseline_scan_run_id"] = baseline_scan_run_id
+                        changes.append(change_dict)
+                    else:
+                        untracked_subdomains.append(sub)
             else:
-                # Case 3: Noise recovery or stable presence -> evaluate DNS resolution transitions
-                # against the latest definite DNS observation in the bounded history window.
-                latest_dns = _find_latest_definite_dns_observation(disc_history_indexed, sub)
-                if latest_dns is not None:
-                    b_stat, b_res, b_dns_id = latest_dns
-                    n_stat = n_entry.get("status")
-                    n_res = n_entry.get("resolved", False) is True
+                item = persisted_inventory[sub]
+                if item.get("status") == "removed":
+                    # Reappearance after confirmed removal
+                    active_count = sum(
+                        1 for it in persisted_inventory.values() if it.get("status") == "active"
+                    )
+                    if active_count < max_active_subdomains:
+                        item["status"] = "active"
+                        item["anchor_source"] = new_src
+                        item["consecutive_qualifying_absences"] = 0
+                        item["last_seen_scan_run_id"] = current_scan_run_id
+                        item["last_status"] = n_stat
+                        item["last_resolved"] = n_res
+                        item["removed_at_scan_run_id"] = None
+                        item["last_applied_scan_run_id"] = current_scan_run_id
+                        change_dict = {
+                            "change_type": "NEW_SUBDOMAIN",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": None,
+                            "new_state": {"status": n_stat, "resolved": n_res},
+                            "observed_at": observed_at,
+                        }
+                        if baseline_scan_run_id is not None:
+                            change_dict["baseline_scan_run_id"] = baseline_scan_run_id
+                        changes.append(change_dict)
+                    else:
+                        untracked_subdomains.append(sub)
+                else:
+                    # Active host presence
+                    b_stat = item.get("last_status")
+                    b_res = item.get("last_resolved")
+                    b_id = item.get("last_seen_scan_run_id") or baseline_scan_run_id
 
-                    # NXDOMAIN -> RESOLVED
+                    item["consecutive_qualifying_absences"] = 0
+                    item["last_seen_scan_run_id"] = current_scan_run_id
+                    if not new_trunc:
+                        item["anchor_source"] = new_src
+                    item["last_status"] = n_stat
+                    item["last_resolved"] = n_res
+                    item["last_applied_scan_run_id"] = current_scan_run_id
+
                     if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
-                        change_dict: dict[str, Any] = {
+                        change_dict = {
                             "change_type": "NEWLY_RESOLVING",
                             "category": "exposure",
                             "severity": "INFO",
@@ -685,10 +693,9 @@ def detect_changes(
                             "new_state": {"status": n_stat, "resolved": n_res},
                             "observed_at": observed_at,
                         }
-                        if b_dns_id is not None:
-                            change_dict["baseline_scan_run_id"] = b_dns_id
+                        if b_id is not None:
+                            change_dict["baseline_scan_run_id"] = b_id
                         changes.append(change_dict)
-                    # RESOLVED -> NXDOMAIN (Definite stop; TIMEOUT / ERROR are ignored)
                     elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
                         change_dict = {
                             "change_type": "STOPPED_RESOLVING",
@@ -701,62 +708,236 @@ def detect_changes(
                             "new_state": {"status": n_stat, "resolved": n_res},
                             "observed_at": observed_at,
                         }
-                        if b_dns_id is not None:
-                            change_dict["baseline_scan_run_id"] = b_dns_id
+                        if b_id is not None:
+                            change_dict["baseline_scan_run_id"] = b_id
                         changes.append(change_dict)
 
-    # 2b. Removals (REMOVED_SUBDOMAIN)
-    if allow_removal and len(disc_history_indexed) >= 1:
-        # Collect candidate subdomains that have an observed presence in history
-        known_history_subs: dict[str, tuple[int | None, str, dict[str, Any]]] = {}
-        for s_id, s_src, _s_tr, _s_em, s_subs in disc_history_indexed:
-            for s_name, s_obj in s_subs.items():
-                if s_name not in known_history_subs:
-                    known_history_subs[s_name] = (s_id, s_src, s_obj)
+        if (
+            untracked_subdomains
+            and "discover" in new_reports
+            and isinstance(new_reports["discover"], dict)
+        ):
+            new_reports["discover"]["truncated"] = True
+            new_reports["discover"]["truncation_reason"] = "inventory_capacity_exceeded"
+            new_reports["discover"]["untracked_subdomains_count"] = len(untracked_subdomains)
 
-        for sub, (p_id, anchor_src, p_entry) in known_history_subs.items():
-            if sub in new_subs:
-                continue
+        # 2b. Removals
+        if not is_first_baseline:
+            for sub, item in list(persisted_inventory.items()):
+                if item.get("status") != "active":
+                    continue
+                if sub in new_subs:
+                    continue
 
-            s0_qualifies = _is_qualifying_absence(
-                sub, new_src, new_trunc, new_empty, new_subs, anchor_src
-            )
-            if not s0_qualifies:
-                continue
+                anchor_src = item.get("anchor_source", "crt.sh")
+                obs = classify_discovery_observation(
+                    sub, new_src, new_trunc, new_empty, new_subs, anchor_src
+                )
+                if obs != "QUALIFYING_ABSENCE":
+                    # An unknown observation (provider switch, truncated scan, or empty scan)
+                    # retains the host's presence anchor but breaks the consecutive absence streak.
+                    item["consecutive_qualifying_absences"] = 0
+                    continue
 
-            s1_id, s1_src, s1_trunc, s1_empty, s1_subs = disc_history_indexed[0]
-            s1_qualifies = _is_qualifying_absence(
-                sub, s1_src, s1_trunc, s1_empty, s1_subs, anchor_src
-            )
-            if not s1_qualifies:
-                continue
+                if allow_removal:
+                    item["last_applied_scan_run_id"] = current_scan_run_id
+                    if item.get("last_qualifying_absence_scan_run_id") != current_scan_run_id:
+                        item["consecutive_qualifying_absences"] = (
+                            item.get("consecutive_qualifying_absences", 0) + 1
+                        )
+                        item["last_qualifying_absence_scan_run_id"] = current_scan_run_id
 
-            # Prevent repeated removals: S2 must NOT have been a qualifying absence
-            s2_already_confirmed = False
-            if len(disc_history_indexed) >= 2:
-                _s2_id, s2_src, s2_trunc, s2_empty, s2_subs = disc_history_indexed[1]
-                if _is_qualifying_absence(sub, s2_src, s2_trunc, s2_empty, s2_subs, anchor_src):
-                    s2_already_confirmed = True
+                    if item["consecutive_qualifying_absences"] == 2:
+                        item["status"] = "removed"
+                        item["removed_at_scan_run_id"] = current_scan_run_id
+                        base_id = item.get("last_seen_scan_run_id") or baseline_scan_run_id
+                        change_dict = {
+                            "change_type": "REMOVED_SUBDOMAIN",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": {
+                                "status": item.get("last_status"),
+                                "resolved": item.get("last_resolved"),
+                            },
+                            "new_state": None,
+                            "observed_at": observed_at,
+                        }
+                        if base_id is not None:
+                            change_dict["baseline_scan_run_id"] = base_id
+                        changes.append(change_dict)
 
-            if not s2_already_confirmed:
-                base_pres_id = p_id if p_id is not None else default_base_id
-                change_dict = {
-                    "change_type": "REMOVED_SUBDOMAIN",
-                    "category": "exposure",
-                    "severity": "INFO",
-                    "asset": sub,
-                    "detail": "",
-                    "evidence": "discover",
-                    "previous_state": {
-                        "status": p_entry.get("status"),
-                        "resolved": p_entry.get("resolved"),
-                    },
-                    "new_state": None,
-                    "observed_at": observed_at,
-                }
-                if base_pres_id is not None:
-                    change_dict["baseline_scan_run_id"] = base_pres_id
-                changes.append(change_dict)
+        # 2c. Tombstone pruning
+        tombstones = [k for k, v in persisted_inventory.items() if v.get("status") == "removed"]
+        if len(tombstones) > max_tombstones:
+            for k in tombstones[: len(tombstones) - max_tombstones]:
+                del persisted_inventory[k]
+    else:
+        # 2a. Additions (NEW_SUBDOMAIN) and DNS Resolution Changes
+        for sub, n_entry in new_subs.items():
+            # Find latest scan in history where sub was observed PRESENT
+            last_present = None
+            for idx, (s_id, s_src, _s_tr, _s_em, s_subs) in enumerate(disc_history_indexed):
+                if sub in s_subs:
+                    last_present = (idx, s_id, s_src, s_subs[sub])
+                    break
+
+            if last_present is None:
+                # Case 1: First observed within available history
+                changes.append(
+                    {
+                        "change_type": "NEW_SUBDOMAIN",
+                        "category": "exposure",
+                        "severity": "INFO",
+                        "asset": sub,
+                        "detail": "",
+                        "evidence": "discover",
+                        "previous_state": None,
+                        "new_state": {
+                            "status": n_entry.get("status"),
+                            "resolved": n_entry.get("resolved"),
+                        },
+                        "observed_at": observed_at,
+                    }
+                )
+            else:
+                # Case 2: Present in history.
+                # Did it undergo confirmed absence immediately before new scan?
+                pres_idx, _p_id, anchor_src, _p_entry = last_present
+                s1_qualifies = len(disc_history_indexed) >= 1 and _is_qualifying_absence(
+                    sub,
+                    disc_history_indexed[0][1],
+                    disc_history_indexed[0][2],
+                    disc_history_indexed[0][3],
+                    disc_history_indexed[0][4],
+                    anchor_src,
+                )
+                s2_qualifies = len(disc_history_indexed) >= 2 and _is_qualifying_absence(
+                    sub,
+                    disc_history_indexed[1][1],
+                    disc_history_indexed[1][2],
+                    disc_history_indexed[1][3],
+                    disc_history_indexed[1][4],
+                    anchor_src,
+                )
+
+                if s1_qualifies and s2_qualifies and pres_idx >= 2:
+                    # Confirmed absent prior to new scan -> Genuine rediscovery
+                    s1_id = disc_history_indexed[0][0] or default_base_id
+                    changes.append(
+                        {
+                            "change_type": "NEW_SUBDOMAIN",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": None,
+                            "new_state": {
+                                "status": n_entry.get("status"),
+                                "resolved": n_entry.get("resolved"),
+                            },
+                            "observed_at": observed_at,
+                            **({"baseline_scan_run_id": s1_id} if s1_id is not None else {}),
+                        }
+                    )
+                else:
+                    # Case 3: Noise recovery or stable presence -> evaluate DNS
+                    # resolution transitions against the latest definite DNS observation
+                    # in the bounded history window.
+                    latest_dns = _find_latest_definite_dns_observation(disc_history_indexed, sub)
+                    if latest_dns is not None:
+                        b_stat, b_res, b_dns_id = latest_dns
+                        n_stat = n_entry.get("status")
+                        n_res = n_entry.get("resolved", False) is True
+
+                        # NXDOMAIN -> RESOLVED
+                        if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
+                            change_dict: dict[str, Any] = {
+                                "change_type": "NEWLY_RESOLVING",
+                                "category": "exposure",
+                                "severity": "INFO",
+                                "asset": sub,
+                                "detail": "",
+                                "evidence": "discover",
+                                "previous_state": {"status": b_stat, "resolved": b_res},
+                                "new_state": {"status": n_stat, "resolved": n_res},
+                                "observed_at": observed_at,
+                            }
+                            if b_dns_id is not None:
+                                change_dict["baseline_scan_run_id"] = b_dns_id
+                            changes.append(change_dict)
+                        # RESOLVED -> NXDOMAIN (Definite stop; TIMEOUT / ERROR are ignored)
+                        elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
+                            change_dict = {
+                                "change_type": "STOPPED_RESOLVING",
+                                "category": "exposure",
+                                "severity": "INFO",
+                                "asset": sub,
+                                "detail": "",
+                                "evidence": "discover",
+                                "previous_state": {"status": b_stat, "resolved": b_res},
+                                "new_state": {"status": n_stat, "resolved": n_res},
+                                "observed_at": observed_at,
+                            }
+                            if b_dns_id is not None:
+                                change_dict["baseline_scan_run_id"] = b_dns_id
+                            changes.append(change_dict)
+
+        # 2b. Removals (REMOVED_SUBDOMAIN)
+        if allow_removal and len(disc_history_indexed) >= 1:
+            # Collect candidate subdomains that have an observed presence in history
+            known_history_subs: dict[str, tuple[int | None, str, dict[str, Any]]] = {}
+            for s_id, s_src, _s_tr, _s_em, s_subs in disc_history_indexed:
+                for s_name, s_obj in s_subs.items():
+                    if s_name not in known_history_subs:
+                        known_history_subs[s_name] = (s_id, s_src, s_obj)
+
+            for sub, (p_id, anchor_src, p_entry) in known_history_subs.items():
+                if sub in new_subs:
+                    continue
+
+                s0_qualifies = _is_qualifying_absence(
+                    sub, new_src, new_trunc, new_empty, new_subs, anchor_src
+                )
+                if not s0_qualifies:
+                    continue
+
+                s1_id, s1_src, s1_trunc, s1_empty, s1_subs = disc_history_indexed[0]
+                s1_qualifies = _is_qualifying_absence(
+                    sub, s1_src, s1_trunc, s1_empty, s1_subs, anchor_src
+                )
+                if not s1_qualifies:
+                    continue
+
+                # Prevent repeated removals: S2 must NOT have been a qualifying absence
+                s2_already_confirmed = False
+                if len(disc_history_indexed) >= 2:
+                    _s2_id, s2_src, s2_trunc, s2_empty, s2_subs = disc_history_indexed[1]
+                    if _is_qualifying_absence(sub, s2_src, s2_trunc, s2_empty, s2_subs, anchor_src):
+                        s2_already_confirmed = True
+
+                if not s2_already_confirmed:
+                    base_pres_id = p_id if p_id is not None else default_base_id
+                    change_dict = {
+                        "change_type": "REMOVED_SUBDOMAIN",
+                        "category": "exposure",
+                        "severity": "INFO",
+                        "asset": sub,
+                        "detail": "",
+                        "evidence": "discover",
+                        "previous_state": {
+                            "status": p_entry.get("status"),
+                            "resolved": p_entry.get("resolved"),
+                        },
+                        "new_state": None,
+                        "observed_at": observed_at,
+                    }
+                    if base_pres_id is not None:
+                        change_dict["baseline_scan_run_id"] = base_pres_id
+                    changes.append(change_dict)
 
     # -------------------------------------------------------------------------
     # 3. Diffing FINDINGS for Probe, Portscan, and Inspect
@@ -807,15 +988,11 @@ def detect_changes(
             for entry in historical_baselines[:3]
         ]
     elif baseline_reports:
-        probe_history_entries = [
-            {"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}
-        ]
+        probe_history_entries = [{"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}]
     else:
         probe_history_entries = []
 
-    probe_history_indexed: list[
-        tuple[int | None, dict[str, dict[str, Any]]]
-    ] = []
+    probe_history_indexed: list[tuple[int | None, dict[str, dict[str, Any]]]] = []
     for entry in probe_history_entries:
         s_id = entry.get("scan_run_id") or entry.get("id")
         rep = entry.get("reports") if "reports" in entry else entry
@@ -900,7 +1077,6 @@ def detect_changes(
                 change_dict["baseline_scan_run_id"] = prior_success_id
             changes.append(change_dict)
 
-
     # B. Portscan Changes
     # Build portscan history window (up to 3 previous scans, newest to oldest)
     if historical_baselines is not None:
@@ -926,9 +1102,7 @@ def detect_changes(
                     host_map[r["subdomain"]] = r
         history_indexed.append((scan_id, host_map))
 
-    default_base_id = (
-        history_indexed[0][0] if history_indexed else baseline_scan_run_id
-    )
+    default_base_id = history_indexed[0][0] if history_indexed else baseline_scan_run_id
 
     all_port_hosts = set(base_port_hosts.keys()) | set(new_port_hosts.keys())
     for _scan_id, host_map in history_indexed:
@@ -943,11 +1117,15 @@ def detect_changes(
             for p in n_host_data.get("open_ports", [])
             if p.get("state") == "OPEN" and isinstance(p.get("port"), int)
         }
-        n_closed_ports = {
-            p
-            for p in n_host_data.get("closed_ports", [])
-            if isinstance(p, int) and p not in n_open_ports_map
-        } if n_probed else set()
+        n_closed_ports = (
+            {
+                p
+                for p in n_host_data.get("closed_ports", [])
+                if isinstance(p, int) and p not in n_open_ports_map
+            }
+            if n_probed
+            else set()
+        )
 
         # 1. Port newly open
         for port, p_obj in n_open_ports_map.items():
@@ -1030,9 +1208,7 @@ def detect_changes(
             for entry in historical_baselines[:3]
         ]
     else:
-        inspect_history = [
-            {"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}
-        ]
+        inspect_history = [{"scan_run_id": baseline_scan_run_id, "reports": baseline_reports}]
 
     inspect_history_indexed: list[
         tuple[int | None, dict[str, dict[str, Any]], dict[str, list[Finding]]]
@@ -1665,9 +1841,7 @@ def detect_changes(
                 changes.append(change_dict)
 
     # Domain risk band (reusing canonical derive_domain_band and domain_findings semantics)
-    removed_assets = {
-        c["asset"] for c in changes if c["change_type"] == "REMOVED_SUBDOMAIN"
-    }
+    removed_assets = {c["asset"] for c in changes if c["change_type"] == "REMOVED_SUBDOMAIN"}
 
     def _effective_domain_band_and_score(target_idx: int) -> tuple[str | None, Any, bool]:
         rep = score_scans[target_idx][1]
@@ -1799,41 +1973,45 @@ def detect_changes(
         n_d_rank = TIER_RANK.get(n_domain_band, 0)
 
         if n_d_rank > b_d_rank:
-            changes.append({
-                "change_type": "DOMAIN_RISK_BAND_INCREASED",
-                "category": "summary",
-                "severity": n_domain_band,
-                "asset": domain_name,
-                "detail": "",
-                "evidence": "score",
-                "previous_state": {
-                    "band": b_domain_band,
-                    "score": b_domain_score,
-                },
-                "new_state": {
-                    "band": n_domain_band,
-                    "score": n_domain_score,
-                },
-                "observed_at": observed_at,
-            })
+            changes.append(
+                {
+                    "change_type": "DOMAIN_RISK_BAND_INCREASED",
+                    "category": "summary",
+                    "severity": n_domain_band,
+                    "asset": domain_name,
+                    "detail": "",
+                    "evidence": "score",
+                    "previous_state": {
+                        "band": b_domain_band,
+                        "score": b_domain_score,
+                    },
+                    "new_state": {
+                        "band": n_domain_band,
+                        "score": n_domain_score,
+                    },
+                    "observed_at": observed_at,
+                }
+            )
         elif n_d_rank < b_d_rank:
-            changes.append({
-                "change_type": "DOMAIN_RISK_BAND_DECREASED",
-                "category": "summary",
-                "severity": "INFO",
-                "asset": domain_name,
-                "detail": "",
-                "evidence": "score",
-                "previous_state": {
-                    "band": b_domain_band,
-                    "score": b_domain_score,
-                },
-                "new_state": {
-                    "band": n_domain_band,
-                    "score": n_domain_score,
-                },
-                "observed_at": observed_at,
-            })
+            changes.append(
+                {
+                    "change_type": "DOMAIN_RISK_BAND_DECREASED",
+                    "category": "summary",
+                    "severity": "INFO",
+                    "asset": domain_name,
+                    "detail": "",
+                    "evidence": "score",
+                    "previous_state": {
+                        "band": b_domain_band,
+                        "score": b_domain_score,
+                    },
+                    "new_state": {
+                        "band": n_domain_band,
+                        "score": n_domain_score,
+                    },
+                    "observed_at": observed_at,
+                }
+            )
 
     # -------------------------------------------------------------------------
     # 5. Deduplicate by unique key (change_type, asset, detail)
