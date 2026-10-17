@@ -116,7 +116,13 @@ def test_worker_delivery_failure_log_has_no_recipient(db_engine, clean_db, caplo
         org = Organization(name="Log Org")
         session.add(org)
         session.flush()
-        domain = Domain(org_id=org.id, name="log-redact.example.com")
+        domain = Domain(
+            org_id=org.id,
+            name="log-redact.example.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["secret.person@example.com"],
+        )
         session.add(domain)
         session.flush()
         session.add(

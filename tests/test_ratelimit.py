@@ -228,7 +228,13 @@ def _seed_sent_alerts(db_engine, count: int) -> tuple[int, int, datetime]:
         org = Organization(name="Alert Quota Org")
         session.add(org)
         session.flush()
-        domain = Domain(org_id=org.id, name="alert-quota.example.com")
+        domain = Domain(
+            org_id=org.id,
+            name="alert-quota.example.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["next@example.com"],
+        )
         session.add(domain)
         session.flush()
         oldest = datetime.now(UTC) - timedelta(hours=20)

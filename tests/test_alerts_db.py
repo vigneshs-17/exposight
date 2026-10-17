@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
@@ -12,7 +13,9 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from asm.db.models import AlertNotification, Domain, Organization, ScanRun
+from asm.admin import revoke_verification, suspend_user
+from asm.api.routes import _notification_to_read
+from asm.db.models import AlertNotification, Domain, Membership, Organization, ScanRun, User
 from asm.db.scans import enqueue_scan
 from asm.worker.runner import IScannerRunner
 from asm.worker.worker import ASMWorker
@@ -399,6 +402,8 @@ def test_worker_delivery_success_and_retry_backoff(
             org_id=_ensure_org(session).id,
             name="delivery-test.com",
             verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["user@delivery-test.com", "fail@delivery-test.com"],
         )
         session.add(domain)
         session.flush()
@@ -509,6 +514,8 @@ def test_concurrent_workers_deliver_each_row_once(
             org_id=_ensure_org(session).id,
             name="concurrent-delivery.com",
             verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=[f"user{i}@concurrent-delivery.com" for i in range(4)],
         )
         session.add(domain)
         session.flush()
@@ -597,3 +604,946 @@ def test_smtp_host_unset_leaves_rows_pending(db_engine, clean_db: None) -> None:
         row = session.get(AlertNotification, notif_id)
         assert row.status == "pending"
         assert row.attempts == 0
+
+
+@pytest.mark.db
+def test_predelivery_authorization_recipient_removed_suppressed(
+    db_engine, clean_db: None
+) -> None:
+    """Queued notification is suppressed when recipient is removed before delivery."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-r@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="recipient-rem.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["alice@recipient-rem.com", "bob@recipient-rem.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="alice@recipient-rem.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Separate session removes alice from alert_emails
+    with session_factory() as session:
+        dom = session.get(Domain, domain_id)
+        dom.alert_emails = ["bob@recipient-rem.com"]
+        session.commit()
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "failed"
+        assert row.attempts == 0  # Truthful count preserved: no send was attempted
+        assert "Recipient is no longer configured" in row.last_error
+
+    # Second pass does not retry
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+
+@pytest.mark.db
+def test_predelivery_authorization_alerts_disabled_suppressed(
+    db_engine, clean_db: None
+) -> None:
+    """Queued notification is suppressed when domain alerts are disabled before delivery."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-d@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="alerts-dis.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["ops@alerts-dis.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@alerts-dis.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Separate session disables alerts
+    with session_factory() as session:
+        dom = session.get(Domain, domain_id)
+        dom.alerts_enabled = False
+        session.commit()
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "failed"
+        assert row.attempts == 0
+        assert "Domain alerts are disabled" in row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_all_owners_suspended_suppressed(
+    db_engine, clean_db: None
+) -> None:
+    """Queued notification is suppressed when all owners are suspended before delivery."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = Organization(name="Suspended Org")
+        session.add(org)
+        session.flush()
+        owner = User(id=uuid.uuid4(), email="sole-owner@susp.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="susp-owner.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["admin@susp-owner.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+        owner_id = owner.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="admin@susp-owner.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Separate session suspends the sole owner
+    with session_factory() as session:
+        suspend_user(session, str(owner_id), reason="Non-payment")
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "failed"
+        assert row.attempts == 0
+        assert "All organization owners are suspended" in row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_one_active_owner_remains_delivered(
+    db_engine, clean_db: None
+) -> None:
+    """Notification delivers if at least one active owner remains."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = Organization(name="Multi Owner Org")
+        session.add(org)
+        session.flush()
+        owner1 = User(id=uuid.uuid4(), email="owner1@multi.com")
+        owner2 = User(id=uuid.uuid4(), email="owner2@multi.com")
+        session.add_all([owner1, owner2])
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner1.id, role="owner"))
+        session.add(Membership(org_id=org.id, user_id=owner2.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="multi-owner.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["ops@multi-owner.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+        owner1_id = owner1.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@multi-owner.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Suspend owner1, leaving owner2 active
+    with session_factory() as session:
+        suspend_user(session, str(owner1_id), reason="Departed")
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 1
+        assert mock_send.call_count == 1
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "sent"
+        assert row.attempts == 1
+
+
+@pytest.mark.db
+def test_predelivery_authorization_verification_revoked_suppressed(
+    db_engine, clean_db: None
+) -> None:
+    """Scan-result notification is suppressed when verification is revoked before delivery."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-v@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="verif-rev.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["ops@verif-rev.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@verif-rev.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Separate session revokes verification
+    with session_factory() as session:
+        revoke_verification(session, domain_id, reason="Ownership expired")
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        # Note: revoke_verification queues a verification-lapse alert; here we check
+        # that the scan-result alert is suppressed and only the lapse alert sends.
+        worker.deliver_pending_alerts()
+        assert not any(
+            "[Exposight] Alert" in call.kwargs.get("subject", "")
+            for call in mock_send.call_args_list
+        )
+
+    with session_factory() as session:
+        scan_alert_row = session.get(AlertNotification, notif_id)
+        assert scan_alert_row.status == "failed"
+        assert scan_alert_row.attempts == 0
+        assert "Domain verification is inactive or expired" in scan_alert_row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_verification_loss_notice_sends(
+    db_engine, clean_db: None
+) -> None:
+    """Verification-loss notice delivers even when domain verification is inactive."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-vl@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="verif-loss.com",
+            verification_status="pending",  # Inactive verification
+            alerts_enabled=True,
+            alert_emails=["admin@verif-loss.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        # Verification lapse notice: scan_run_id=None
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="admin@verif-loss.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Details",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 1
+        assert mock_send.call_count == 1
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "sent"
+        assert row.attempts == 1
+
+
+@pytest.mark.db
+def test_predelivery_authorization_viewer_privacy(
+    db_engine, clean_db: None
+) -> None:
+    """Viewer responses redact recipient and suppression details in last_error."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        domain = Domain(
+            org_id=org.id,
+            name="viewer-privacy.com",
+            verification_status="verified",
+        )
+        session.add(domain)
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain.id,
+            scan_run_id=None,
+            recipient="secret@viewer-privacy.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="failed",
+            attempts=0,
+            last_error="Delivery suppressed: Recipient is no longer configured for domain alerts",
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        viewer_dto = _notification_to_read(row, role="viewer")
+        admin_dto = _notification_to_read(row, role="admin")
+
+        assert viewer_dto.recipient is None
+        assert viewer_dto.last_error is None
+        assert admin_dto.recipient == "secret@viewer-privacy.com"
+        assert "Delivery suppressed" in admin_dto.last_error
+
+
+@pytest.mark.db
+def test_predelivery_malformed_notification_isolation(
+    db_engine, clean_db: None
+) -> None:
+    """Malformed notification does not abort processing of other pending rows in batch."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-m@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="malformed-iso.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["injected\r\nattacker@malformed-iso.com", "good@malformed-iso.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        n_bad = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="injected\r\nattacker@malformed-iso.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Bad body",
+            status="pending",
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=20),
+        )
+        n_good = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="good@malformed-iso.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Good body",
+            status="pending",
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add_all([n_bad, n_good])
+        session.commit()
+        bad_id = n_bad.id
+        good_id = n_good.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+
+    delivered_recipients = []
+    def mock_send(**kwargs):
+        from asm.alerts.delivery import validate_email_address_header
+        validate_email_address_header(kwargs["to_addr"])
+        delivered_recipients.append(kwargs["to_addr"])
+
+    with patch("asm.worker.worker.send_smtp_email", side_effect=mock_send):
+        delivered = worker.deliver_pending_alerts(batch_limit=10)
+
+    assert delivered == 1
+    assert delivered_recipients == ["good@malformed-iso.com"]
+
+    with session_factory() as session:
+        bad_row = session.get(AlertNotification, bad_id)
+        good_row = session.get(AlertNotification, good_id)
+        assert bad_row.status == "pending"
+        assert bad_row.attempts == 1
+        assert "carriage return" in bad_row.last_error
+        assert bad_row.next_attempt_at > datetime.now(UTC)
+        assert good_row.status == "sent"
+        assert good_row.attempts == 1
+
+
+@pytest.mark.db
+def test_predelivery_smtp_accept_crash_recovery_at_least_once(
+    db_engine, clean_db: None
+) -> None:
+    """Worker crash after SMTP accept results in at-least-once re-delivery upon restart."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-c@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="crash-rec.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["admin@crash-rec.com"],
+        )
+        session.add(domain)
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain.id,
+            scan_run_id=None,
+            recipient="admin@crash-rec.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Crash body",
+            status="pending",
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    w1 = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    def crash_after_send(**kwargs):
+        raise KeyboardInterrupt("Simulated sudden worker crash / SIGKILL")
+
+    with patch("asm.worker.worker.send_smtp_email", side_effect=crash_after_send):
+        try:
+            w1.deliver_pending_alerts()
+        except KeyboardInterrupt:
+            pass
+
+    # Inspect DB after crash: transaction rolled back
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "pending"
+        assert row.attempts == 0
+
+    # Second worker run restarts and delivers (at-least-once delivery)
+    w2 = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = w2.deliver_pending_alerts()
+        assert delivered == 1
+        assert mock_send.call_count == 1
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "sent"
+        assert row.attempts == 1
+
+
+@pytest.mark.db
+def test_predelivery_authorization_verification_expires_suppressed(
+    db_engine, clean_db: None
+) -> None:
+    """Scan notification is suppressed when verification_expires_at lapses after queueing."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-exp@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="verif-exp.com",
+            verification_status="verified",
+            verification_expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            alerts_enabled=True,
+            alert_emails=["ops@verif-exp.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@verif-exp.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Separate session updates verification_expires_at to the past
+    with session_factory() as session:
+        dom = session.get(Domain, domain_id)
+        dom.verification_expires_at = datetime.now(UTC) - timedelta(seconds=10)
+        session.commit()
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "failed"
+        assert row.attempts == 0
+        assert "Domain verification is inactive or expired" in row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_prior_attempts_preserved_on_suppression(
+    db_engine, clean_db: None
+) -> None:
+    """A previously attempted notification keeps its truthful attempt count upon suppression."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-att@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="prior-att.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["ops@prior-att.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        # Notification that already had 2 prior failed SMTP attempts
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@prior-att.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=2,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    # Now domain alerts are disabled
+    with session_factory() as session:
+        dom = session.get(Domain, domain_id)
+        dom.alerts_enabled = False
+        session.commit()
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "failed"
+        # Truthful attempt count preserved: must still be 2, not 3 or 5!
+        assert row.attempts == 2
+        assert "Domain alerts are disabled" in row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_verification_loss_still_obeys_shared_rules(
+    db_engine, clean_db: None
+) -> None:
+    """Verification-loss notices still require enabled alerts, valid recipient, and active owner."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-vl-shared@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="vl-shared.com",
+            verification_status="lapsed",
+            alerts_enabled=True,
+            alert_emails=["ops@vl-shared.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+        owner_id = owner.id
+
+        # 1. Verification-loss notice for removed recipient
+        n_removed = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="departed@vl-shared.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Details",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        # 2. Verification-loss notice for valid recipient
+        n_valid = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="ops@vl-shared.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Details",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add_all([n_removed, n_valid])
+        session.commit()
+        rem_id = n_removed.id
+        val_id = n_valid.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+
+    # Pass 1: removed recipient is suppressed, valid recipient is delivered
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 1
+        assert mock_send.call_count == 1
+        assert mock_send.call_args.kwargs["to_addr"] == "ops@vl-shared.com"
+
+    with session_factory() as session:
+        rem_row = session.get(AlertNotification, rem_id)
+        val_row = session.get(AlertNotification, val_id)
+        assert rem_row.status == "failed"
+        assert rem_row.attempts == 0
+        assert "Recipient is no longer configured" in rem_row.last_error
+        assert val_row.status == "sent"
+
+    # Pass 2: If all owners suspended, even valid verification-loss notice is suppressed
+    with session_factory() as session:
+        n_susp = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="ops@vl-shared.com",
+            subject="Domain verification lapsed: monitoring paused",
+            body="Details",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n_susp)
+        session.commit()
+        susp_id = n_susp.id
+
+    with session_factory() as session:
+        suspend_user(session, str(owner_id), reason="Non-payment")
+
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        susp_row = session.get(AlertNotification, susp_id)
+        assert susp_row.status == "failed"
+        assert susp_row.attempts == 0
+        assert "All organization owners are suspended" in susp_row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_unknown_notification_type_denied_exemption(
+    db_engine, clean_db: None
+) -> None:
+    """Unknown or misleading domain notifications do not receive the verification exemption."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-unk@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="unknown-type.com",
+            verification_status="pending",  # Inactive verification
+            alerts_enabled=True,
+            alert_emails=["ops@unknown-type.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        # Misleading subject prefix
+        n_misleading = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="ops@unknown-type.com",
+            subject="Domain verification: 2 new open ports detected",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        # Unrelated domain-level alert
+        n_unrelated = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=None,
+            recipient="ops@unknown-type.com",
+            subject="System maintenance advisory",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add_all([n_misleading, n_unrelated])
+        session.commit()
+        m_id = n_misleading.id
+        u_id = n_unrelated.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 0
+        mock_send.assert_not_called()
+
+    with session_factory() as session:
+        m_row = session.get(AlertNotification, m_id)
+        u_row = session.get(AlertNotification, u_id)
+        assert m_row.status == "failed"
+        assert "Domain verification is inactive or expired" in m_row.last_error
+        assert u_row.status == "failed"
+        assert "Domain verification is inactive or expired" in u_row.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_fresh_domain_state_observed_within_batch(
+    db_engine, clean_db: None
+) -> None:
+    """Fresh committed domain state is observed when multiple notifications are in one batch."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = _ensure_org(session)
+        owner = User(id=uuid.uuid4(), email="owner-batch@test.com")
+        session.add(owner)
+        session.flush()
+        session.add(Membership(org_id=org.id, user_id=owner.id, role="owner"))
+        domain = Domain(
+            org_id=org.id,
+            name="batch-freshness.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["alice@batch-freshness.com", "bob@batch-freshness.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n1 = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="alice@batch-freshness.com",
+            subject="[Exposight] Alert 1",
+            body="Body 1",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=20),
+        )
+        n2 = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="bob@batch-freshness.com",
+            subject="[Exposight] Alert 2",
+            body="Body 2",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add_all([n1, n2])
+        session.commit()
+        n1_id = n1.id
+        n2_id = n2.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+
+    delivered_recipients = []
+    def send_and_mutate_domain(**kwargs):
+        delivered_recipients.append(kwargs["to_addr"])
+        # While n1 is delivering, a separate session removes bob from domain.alert_emails
+        with session_factory() as mut_session:
+            d = mut_session.get(Domain, domain_id)
+            d.alert_emails = ["alice@batch-freshness.com"]
+            mut_session.commit()
+
+    with patch("asm.worker.worker.send_smtp_email", side_effect=send_and_mutate_domain):
+        delivered = worker.deliver_pending_alerts(batch_limit=10)
+
+    # In the same batch call, n1 delivered and n2 observed the mutation and was suppressed!
+    assert delivered == 1
+    assert delivered_recipients == ["alice@batch-freshness.com"]
+
+    with session_factory() as session:
+        r1 = session.get(AlertNotification, n1_id)
+        r2 = session.get(AlertNotification, n2_id)
+        assert r1.status == "sent"
+        assert r2.status == "failed"
+        assert "Recipient is no longer configured" in r2.last_error
+
+
+@pytest.mark.db
+def test_predelivery_authorization_zero_owner_org_delivers(
+    db_engine, clean_db: None
+) -> None:
+    """An organization with zero owners is not treated as suspended and allows delivery."""
+    session_factory = sessionmaker(bind=db_engine)
+    with session_factory() as session:
+        org = Organization(name="Zero Owner Org")
+        session.add(org)
+        session.flush()
+        domain = Domain(
+            org_id=org.id,
+            name="zero-owner.com",
+            verification_status="verified",
+            alerts_enabled=True,
+            alert_emails=["ops@zero-owner.com"],
+        )
+        session.add(domain)
+        session.flush()
+        domain_id = domain.id
+
+        run = enqueue_scan(session, domain_id, trigger="manual")
+        session.flush()
+
+        n = AlertNotification(
+            domain_id=domain_id,
+            scan_run_id=run.id,
+            recipient="ops@zero-owner.com",
+            subject="[Exposight] Alert",
+            body="Body",
+            status="pending",
+            attempts=0,
+            next_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+        )
+        session.add(n)
+        session.commit()
+        notif_id = n.id
+
+    worker = ASMWorker(engine=db_engine, smtp_host="mock-smtp.local")
+    with patch("asm.worker.worker.send_smtp_email") as mock_send:
+        delivered = worker.deliver_pending_alerts()
+        assert delivered == 1
+        assert mock_send.call_count == 1
+
+    with session_factory() as session:
+        row = session.get(AlertNotification, notif_id)
+        assert row.status == "sent"
