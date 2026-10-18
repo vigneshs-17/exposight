@@ -249,7 +249,7 @@ dns_timeout,8,cert_rotated,14,14,0
 dns_timeout,8,header_removed,17,17,0
 dns_timeout,8,port_closed,20,20,0
 dns_timeout,8,header_added,22,22,0
-dns_timeout,8,stopped_resolving,25,,
+dns_timeout,8,stopped_resolving,25,25,0
 dns_timeout,8,cert_issuer_changed,27,27,0
 dns_timeout,9,subdomain_added,5,5,0
 dns_timeout,9,port_opened,8,8,0
@@ -1262,7 +1262,7 @@ port_flap_closed,20,cert_issuer_changed,27,27,0
 cdn_edge,1,subdomain_added,5,5,0
 cdn_edge,1,port_opened,8,8,0
 cdn_edge,1,subdomain_removed,11,12,1
-cdn_edge,1,cert_rotated,14,,
+cdn_edge,1,cert_rotated,14,15,1
 cdn_edge,1,header_removed,17,17,0
 cdn_edge,1,port_closed,20,20,0
 cdn_edge,1,header_added,22,22,0
@@ -1361,7 +1361,7 @@ cdn_edge,11,cert_issuer_changed,27,27,0
 cdn_edge,12,subdomain_added,5,5,0
 cdn_edge,12,port_opened,8,8,0
 cdn_edge,12,subdomain_removed,11,12,1
-cdn_edge,12,cert_rotated,14,,
+cdn_edge,12,cert_rotated,14,14,0
 cdn_edge,12,header_removed,17,17,0
 cdn_edge,12,port_closed,20,20,0
 cdn_edge,12,header_added,22,22,0
@@ -1901,7 +1901,7 @@ combined,11,cert_issuer_changed,27,27,0
 combined,12,subdomain_added,5,5,0
 combined,12,port_opened,8,8,0
 combined,12,subdomain_removed,11,12,1
-combined,12,cert_rotated,14,,
+combined,12,cert_rotated,14,15,1
 combined,12,header_removed,17,17,0
 combined,12,port_closed,20,20,0
 combined,12,header_added,22,22,0
