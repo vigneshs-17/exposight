@@ -284,6 +284,21 @@ def _certs_are_identical(cert1: dict[str, Any], cert2: dict[str, Any]) -> bool:
     return True
 
 
+def _is_definite_dns_observation(status: str | None, resolved: bool | None) -> bool:
+    """Return True if (status, resolved) represents a definite DNS resolution observation.
+
+    Definite states:
+      - status == 'RESOLVED' and resolved is True
+      - status == 'NXDOMAIN' and not resolved
+    Inconclusive states (TIMEOUT, ERROR, NO_ANSWER, UNKNOWN, None, etc.) return False.
+    """
+    if status == "RESOLVED" and resolved is True:
+        return True
+    if status == "NXDOMAIN" and not resolved:
+        return True
+    return False
+
+
 def _find_latest_definite_dns_observation(
     disc_history_indexed: list[tuple[int | None, str, bool, bool, dict[str, dict[str, Any]]]],
     sub: str,
@@ -716,46 +731,66 @@ def detect_changes(
                     b_stat = item.get("last_status")
                     b_res = item.get("last_resolved")
                     b_id = item.get("last_seen_scan_run_id") or baseline_scan_run_id
+                    if disc_history_indexed:
+                        latest_dns = _find_latest_definite_dns_observation(
+                            disc_history_indexed, sub
+                        )
+                        if (
+                            latest_dns is not None
+                            and latest_dns[2] is not None
+                            and latest_dns[0] == b_stat
+                        ):
+                            b_id = latest_dns[2]
 
                     item["consecutive_qualifying_absences"] = 0
                     item["last_seen_scan_run_id"] = current_scan_run_id
                     if not new_trunc:
                         item["anchor_source"] = new_src
-                    item["last_status"] = n_stat
-                    item["last_resolved"] = n_res
                     item["last_applied_scan_run_id"] = current_scan_run_id
-                    _record_transition(sub, item)
 
-                    if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
-                        change_dict = {
-                            "change_type": "NEWLY_RESOLVING",
-                            "category": "exposure",
-                            "severity": "INFO",
-                            "asset": sub,
-                            "detail": "",
-                            "evidence": "discover",
-                            "previous_state": {"status": b_stat, "resolved": b_res},
-                            "new_state": {"status": n_stat, "resolved": n_res},
-                            "observed_at": observed_at,
-                        }
-                        if b_id is not None:
-                            change_dict["baseline_scan_run_id"] = b_id
-                        changes.append(change_dict)
-                    elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
-                        change_dict = {
-                            "change_type": "STOPPED_RESOLVING",
-                            "category": "exposure",
-                            "severity": "INFO",
-                            "asset": sub,
-                            "detail": "",
-                            "evidence": "discover",
-                            "previous_state": {"status": b_stat, "resolved": b_res},
-                            "new_state": {"status": n_stat, "resolved": n_res},
-                            "observed_at": observed_at,
-                        }
-                        if b_id is not None:
-                            change_dict["baseline_scan_run_id"] = b_id
-                        changes.append(change_dict)
+                    if _is_definite_dns_observation(n_stat, n_res):
+                        if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
+                            change_dict = {
+                                "change_type": "NEWLY_RESOLVING",
+                                "category": "exposure",
+                                "severity": "INFO",
+                                "asset": sub,
+                                "detail": "",
+                                "evidence": "discover",
+                                "previous_state": {"status": b_stat, "resolved": b_res},
+                                "new_state": {"status": n_stat, "resolved": n_res},
+                                "observed_at": observed_at,
+                            }
+                            if b_id is not None:
+                                change_dict["baseline_scan_run_id"] = b_id
+                            changes.append(change_dict)
+                        elif b_stat == "RESOLVED" and b_res and n_stat == "NXDOMAIN" and not n_res:
+                            change_dict = {
+                                "change_type": "STOPPED_RESOLVING",
+                                "category": "exposure",
+                                "severity": "INFO",
+                                "asset": sub,
+                                "detail": "",
+                                "evidence": "discover",
+                                "previous_state": {"status": b_stat, "resolved": b_res},
+                                "new_state": {"status": n_stat, "resolved": n_res},
+                                "observed_at": observed_at,
+                            }
+                            if b_id is not None:
+                                change_dict["baseline_scan_run_id"] = b_id
+                            changes.append(change_dict)
+
+                        item["last_status"] = n_stat
+                        item["last_resolved"] = n_res
+                    else:
+                        # Inconclusive observation (TIMEOUT, ERROR, NO_ANSWER, etc.):
+                        # preserve prior definite state if established;
+                        # otherwise update inconclusive
+                        if not _is_definite_dns_observation(b_stat, b_res):
+                            item["last_status"] = n_stat
+                            item["last_resolved"] = n_res
+
+                    _record_transition(sub, item)
 
         if (
             untracked_subdomains

@@ -1820,3 +1820,118 @@ def test_reappearance_after_retained_or_evicted_tombstone_db(clean_db, db_engine
             assert row.consecutive_qualifying_absences == 0
             assert row.removed_at_scan_run_id is None
             assert row.last_seen_scan_run_id == r4
+
+
+def test_worker_persistent_inventory_definite_dns_preservation_db(clean_db, db_engine):
+    """G3.2: Worker preserves definite DNS state in PostgreSQL across sessions and timeouts."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "dns-preservation-db.example.com")
+
+    h_res = {
+        "subdomain": "api.dns-preservation-db.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+        "ip_addresses": ["203.0.113.50"],
+    }
+    h_timeout = {
+        "subdomain": "api.dns-preservation-db.example.com",
+        "status": "TIMEOUT",
+        "resolved": False,
+        "ip_addresses": [],
+    }
+    h_nx = {
+        "subdomain": "api.dns-preservation-db.example.com",
+        "status": "NXDOMAIN",
+        "resolved": False,
+        "ip_addresses": [],
+    }
+
+    rep_1 = _make_report([h_res], source="crt.sh", truncated=False)
+    rep_2 = _make_report([h_timeout], source="crt.sh", truncated=False)
+    rep_3 = _make_report([h_nx], source="crt.sh", truncated=False)
+    rep_4 = _make_report([h_nx], source="crt.sh", truncated=False)
+
+    runner = ScriptedRunner([rep_1, rep_2, rep_3, rep_4])
+
+    # Scan 1: RESOLVED baseline
+    worker1 = ASMWorker(db_engine, runner=runner)
+    with Session(db_engine) as session:
+        r1 = _queue_scan(session, domain_id)
+    worker1.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        row1 = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="api.dns-preservation-db.example.com")
+            .one()
+        )
+        assert row1.status == "active"
+        assert row1.last_status == "RESOLVED"
+        assert row1.last_resolved is True
+        assert row1.last_seen_scan_run_id == r1
+
+    # Scan 2: TIMEOUT (fresh worker session simulating process restart)
+    worker2 = ASMWorker(db_engine, runner=runner)
+    with Session(db_engine) as session:
+        r2 = _queue_scan(session, domain_id)
+    worker2.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        row2 = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="api.dns-preservation-db.example.com")
+            .one()
+        )
+        assert row2.status == "active"
+        # Preserved definite state in PostgreSQL despite transient timeout
+        assert row2.last_status == "RESOLVED"
+        assert row2.last_resolved is True
+        assert row2.last_seen_scan_run_id == r2
+
+        ch2 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r2, change_type="STOPPED_RESOLVING")
+            .all()
+        )
+        assert len(ch2) == 0
+
+    # Scan 3: NXDOMAIN (another fresh worker session)
+    worker3 = ASMWorker(db_engine, runner=runner)
+    with Session(db_engine) as session:
+        r3 = _queue_scan(session, domain_id)
+    worker3.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        row3 = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="api.dns-preservation-db.example.com")
+            .one()
+        )
+        assert row3.status == "active"
+        assert row3.last_status == "NXDOMAIN"
+        assert row3.last_resolved is False
+        assert row3.last_seen_scan_run_id == r3
+
+        ch3 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r3, change_type="STOPPED_RESOLVING")
+            .all()
+        )
+        assert len(ch3) == 1
+        assert ch3[0].asset == "api.dns-preservation-db.example.com"
+        assert ch3[0].previous_state == {"status": "RESOLVED", "resolved": True}
+        assert ch3[0].new_state == {"status": "NXDOMAIN", "resolved": False}
+
+    # Scan 4: Repeated NXDOMAIN (no duplicate change)
+    worker4 = ASMWorker(db_engine, runner=runner)
+    with Session(db_engine) as session:
+        r4 = _queue_scan(session, domain_id)
+    worker4.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        ch4 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r4, change_type="STOPPED_RESOLVING")
+            .all()
+        )
+        assert len(ch4) == 0
