@@ -1152,9 +1152,11 @@ class ASMWorker:
                     SELECT subdomain, status, anchor_source, consecutive_qualifying_absences,
                            first_seen_scan_run_id, last_seen_scan_run_id,
                            last_qualifying_absence_scan_run_id, removed_at_scan_run_id,
-                           last_status, last_resolved, last_applied_scan_run_id
+                           last_status, last_resolved, last_applied_scan_run_id,
+                           updated_at, id
                     FROM domain_subdomains
                     WHERE domain_id = :domain_id
+                    ORDER BY subdomain ASC
                     """
                 ),
                 {"domain_id": domain_id},
@@ -1172,6 +1174,8 @@ class ASMWorker:
                     "last_status": r[8],
                     "last_resolved": r[9],
                     "last_applied_scan_run_id": r[10],
+                    "updated_at": r[11],
+                    "id": r[12],
                 }
         except Exception:
             inventory = {}
@@ -1180,13 +1184,18 @@ class ASMWorker:
         new_disc = new_reports.get("discover") or {}
 
         try:
+            inventory_transitions: dict[str, dict[str, Any]] = {}
+            max_tombstones = int(getattr(self, "max_tombstones", 1000))
+
             if not inventory:
                 detect_changes(
                     {},
                     baseline_reports,
                     allow_removal=False,
                     persisted_inventory=inventory,
+                    persisted_transitions=inventory_transitions,
                     current_scan_run_id=baseline_id,
+                    max_tombstones=max_tombstones,
                     is_first_baseline=True,
                 )
 
@@ -1210,7 +1219,9 @@ class ASMWorker:
                 historical_baselines=historical_baselines,
                 baseline_scan_run_id=baseline_id,
                 persisted_inventory=inventory,
+                persisted_transitions=inventory_transitions,
                 current_scan_run_id=scan_run_id,
+                max_tombstones=max_tombstones,
             )
             counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
             for ch in changes:
@@ -1236,6 +1247,7 @@ class ASMWorker:
                 "capacity_exceeded": untracked_count > 0,
                 "untracked_subdomains_count": untracked_count,
                 "_inventory_updates": inventory,
+                "_inventory_transitions": inventory_transitions,
             }
             return summary, changes, baseline_id
 
@@ -1333,6 +1345,7 @@ class ASMWorker:
                     if isinstance(change_detection, dict):
                         change_detection["superseded_by"] = newer_succeeded[0]
                         change_detection.pop("_inventory_updates", None)
+                        change_detection.pop("_inventory_transitions", None)
                     else:
                         change_detection = {"superseded_by": newer_succeeded[0]}
                     changes = None
@@ -1383,13 +1396,23 @@ class ASMWorker:
                 if isinstance(change_detection, dict)
                 else None
             )
+            inventory_transitions = (
+                change_detection.pop("_inventory_transitions", None)
+                if isinstance(change_detection, dict)
+                else None
+            )
             change_detection_json = (
                 json.dumps(change_detection) if change_detection is not None else None
             )
 
-            # Persist discovery inventory updates in the fenced transaction
-            if inventory_updates and domain_id:
-                for sub, item in inventory_updates.items():
+            # Persist discovery inventory transitions before pruning retained tombstones
+            rows_to_upsert = (
+                inventory_transitions if inventory_transitions is not None else inventory_updates
+            )
+            if (
+                rows_to_upsert is not None or inventory_updates is not None
+            ) and domain_id:
+                for sub, item in sorted((rows_to_upsert or {}).items()):
                     session.execute(
                         text(
                             """
@@ -1423,7 +1446,16 @@ class ASMWorker:
                                 last_status = EXCLUDED.last_status,
                                 last_resolved = EXCLUDED.last_resolved,
                                 last_applied_scan_run_id = EXCLUDED.last_applied_scan_run_id,
-                                updated_at = now()
+                                updated_at = CASE
+                                    WHEN domain_subdomains.status = 'removed'
+                                         AND EXCLUDED.status = 'removed'
+                                         AND domain_subdomains.removed_at_scan_run_id
+                                             IS NOT DISTINCT FROM EXCLUDED.removed_at_scan_run_id
+                                         AND domain_subdomains.last_applied_scan_run_id
+                                             IS NOT DISTINCT FROM EXCLUDED.last_applied_scan_run_id
+                                    THEN domain_subdomains.updated_at
+                                    ELSE now()
+                                END
                             WHERE (
                                 domain_subdomains.last_applied_scan_run_id IS NULL
                                 OR domain_subdomains.last_applied_scan_run_id <= :scan_run_id
@@ -1460,12 +1492,20 @@ class ASMWorker:
                         WHERE id IN (
                             SELECT id FROM domain_subdomains
                             WHERE domain_id = :domain_id AND status = 'removed'
-                            ORDER BY updated_at DESC, id DESC
+                            ORDER BY
+                                removed_at_scan_run_id DESC NULLS LAST,
+                                last_applied_scan_run_id DESC NULLS LAST,
+                                updated_at DESC,
+                                subdomain DESC,
+                                id DESC
                             OFFSET :max_tombstones
                         )
                         """
                     ),
-                    {"domain_id": domain_id, "max_tombstones": 1000},
+                    {
+                        "domain_id": domain_id,
+                        "max_tombstones": int(getattr(self, "max_tombstones", 1000)),
+                    },
                 )
 
             # Insert detected changes in the fenced transaction
