@@ -4500,3 +4500,588 @@ def test_detect_changes_tombstone_pruning_preserves_newest_and_records_transitio
     assert transitions_f["victim.example.com"]["status"] == "removed"
     assert "tomb-1.example.com" not in transitions_f
 
+
+def test_persistent_inventory_definite_dns_resolved_timeout_nxdomain_emits_once():
+    """G3.2: RESOLVED -> TIMEOUT -> NXDOMAIN emits STOPPED_RESOLVING once and preserves state."""
+    host = "dev.example.com"
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    s1_res = _disc("RESOLVED", True, ["203.0.113.10"])
+    s2_timeout = _disc("TIMEOUT", False, [])
+    s3_nx = _disc("NXDOMAIN", False, [])
+    s4_nx_again = _disc("NXDOMAIN", False, [])
+
+    # Scan 1: Baseline
+    ch1 = detect_changes(
+        {},
+        s1_res,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=101,
+        is_first_baseline=True,
+    )
+    assert ch1 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scan 2: Inconclusive TIMEOUT must NOT overwrite last definite status
+    ch2 = detect_changes(
+        s1_res,
+        s2_timeout,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=102,
+        baseline_scan_run_id=101,
+    )
+    assert ch2 == []
+    assert inv[host]["last_seen_scan_run_id"] == 102
+    assert inv[host]["consecutive_qualifying_absences"] == 0
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scan 3: Definite NXDOMAIN -> emits STOPPED_RESOLVING once
+    ch3 = detect_changes(
+        s2_timeout,
+        s3_nx,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=103,
+        baseline_scan_run_id=102,
+    )
+    stopped = [c for c in ch3 if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    assert stopped[0]["asset"] == host
+    assert stopped[0]["previous_state"] == {"status": "RESOLVED", "resolved": True}
+    assert stopped[0]["new_state"] == {"status": "NXDOMAIN", "resolved": False}
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 4: Sustained NXDOMAIN does not emit duplicate STOPPED_RESOLVING
+    ch4 = detect_changes(
+        s3_nx,
+        s4_nx_again,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=104,
+        baseline_scan_run_id=103,
+    )
+    assert ch4 == []
+
+
+def test_persistent_inventory_definite_dns_nxdomain_error_resolved_emits_once():
+    """G3.2: NXDOMAIN -> ERROR -> RESOLVED emits NEWLY_RESOLVING once and preserves state."""
+    host = "stg.example.com"
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    s1_nx = _disc("NXDOMAIN", False, [])
+    s2_error = _disc("ERROR", False, [])
+    s3_res = _disc("RESOLVED", True, ["203.0.113.20"])
+    s4_res_again = _disc("RESOLVED", True, ["203.0.113.20"])
+
+    # Scan 1: Baseline
+    ch1 = detect_changes(
+        {},
+        s1_nx,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=201,
+        is_first_baseline=True,
+    )
+    assert ch1 == []
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 2: Inconclusive ERROR must NOT overwrite last definite status
+    ch2 = detect_changes(
+        s1_nx,
+        s2_error,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=202,
+        baseline_scan_run_id=201,
+    )
+    assert ch2 == []
+    assert inv[host]["last_seen_scan_run_id"] == 202
+    assert inv[host]["consecutive_qualifying_absences"] == 0
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 3: Definite RESOLVED -> emits NEWLY_RESOLVING once
+    ch3 = detect_changes(
+        s2_error,
+        s3_res,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=203,
+        baseline_scan_run_id=202,
+    )
+    newly = [c for c in ch3 if c["change_type"] == "NEWLY_RESOLVING"]
+    assert len(newly) == 1
+    assert newly[0]["asset"] == host
+    assert newly[0]["previous_state"] == {"status": "NXDOMAIN", "resolved": False}
+    assert newly[0]["new_state"] == {"status": "RESOLVED", "resolved": True}
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scan 4: Sustained RESOLVED does not emit duplicate NEWLY_RESOLVING
+    ch4 = detect_changes(
+        s3_res,
+        s4_res_again,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=204,
+        baseline_scan_run_id=203,
+    )
+    assert ch4 == []
+
+
+def test_persistent_inventory_multiple_inconclusive_observations_between_definite():
+    """G3.2: Inconclusive observations (TIMEOUT, ERROR, NO_ANSWER) preserve definite state."""
+    host = "api.example.com"
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    # 1. RESOLVED
+    detect_changes(
+        {},
+        _disc("RESOLVED", True, ["203.0.113.1"]),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=301,
+        is_first_baseline=True,
+    )
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # 2. TIMEOUT -> preserved
+    ch2 = detect_changes(
+        _disc("RESOLVED", True, ["203.0.113.1"]),
+        _disc("TIMEOUT", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=302,
+        baseline_scan_run_id=301,
+    )
+    assert ch2 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # 3. ERROR -> preserved
+    ch3 = detect_changes(
+        _disc("TIMEOUT", False, []),
+        _disc("ERROR", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=303,
+        baseline_scan_run_id=302,
+    )
+    assert ch3 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # 4. NO_ANSWER -> preserved
+    ch4 = detect_changes(
+        _disc("ERROR", False, []),
+        _disc("NO_ANSWER", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=304,
+        baseline_scan_run_id=303,
+    )
+    assert ch4 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # 5. NXDOMAIN -> emits STOPPED_RESOLVING once
+    ch5 = detect_changes(
+        _disc("NO_ANSWER", False, []),
+        _disc("NXDOMAIN", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=305,
+        baseline_scan_run_id=304,
+    )
+    stopped = [c for c in ch5 if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    assert inv[host]["last_status"] == "NXDOMAIN"
+
+    # 6. ERROR -> preserved
+    ch6 = detect_changes(
+        _disc("NXDOMAIN", False, []),
+        _disc("ERROR", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=306,
+        baseline_scan_run_id=305,
+    )
+    assert ch6 == []
+    assert inv[host]["last_status"] == "NXDOMAIN"
+
+    # 7. TIMEOUT -> preserved
+    ch7 = detect_changes(
+        _disc("ERROR", False, []),
+        _disc("TIMEOUT", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=307,
+        baseline_scan_run_id=306,
+    )
+    assert ch7 == []
+    assert inv[host]["last_status"] == "NXDOMAIN"
+
+    # 8. RESOLVED -> emits NEWLY_RESOLVING once
+    ch8 = detect_changes(
+        _disc("TIMEOUT", False, []),
+        _disc("RESOLVED", True, ["203.0.113.1"]),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=308,
+        baseline_scan_run_id=307,
+    )
+    newly = [c for c in ch8 if c["change_type"] == "NEWLY_RESOLVING"]
+    assert len(newly) == 1
+    assert inv[host]["last_status"] == "RESOLVED"
+
+
+def test_persistent_inventory_resolved_unknown_resolved_no_false_transition():
+    """G3.2: RESOLVED -> UNKNOWN -> RESOLVED produces no false transitions."""
+    host = "web.example.com"
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    # Scan 1: RESOLVED
+    detect_changes(
+        {},
+        _disc("RESOLVED", True, ["203.0.113.5"]),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=401,
+        is_first_baseline=True,
+    )
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # Scan 2: UNKNOWN
+    ch2 = detect_changes(
+        _disc("RESOLVED", True, ["203.0.113.5"]),
+        _disc("UNKNOWN", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=402,
+        baseline_scan_run_id=401,
+    )
+    assert ch2 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+
+    # Scan 3: RESOLVED again -> must NOT emit NEWLY_RESOLVING
+    ch3 = detect_changes(
+        _disc("UNKNOWN", False, []),
+        _disc("RESOLVED", True, ["203.0.113.5"]),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=403,
+        baseline_scan_run_id=402,
+    )
+    assert ch3 == []
+    assert inv[host]["last_status"] == "RESOLVED"
+
+
+def test_persistent_inventory_initially_unknown_dns_preserves_baseline_semantics():
+    """G3.2: Initial unknown DNS before first definite observation emits no false transition."""
+    host = "first-unknown.example.com"
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    # Scan 1: Initial observation is TIMEOUT (inconclusive)
+    detect_changes(
+        {},
+        _disc("TIMEOUT", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=501,
+        is_first_baseline=True,
+    )
+    assert inv[host]["last_status"] == "TIMEOUT"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 2: First definite observation is RESOLVED -> must NOT emit NEWLY_RESOLVING
+    ch2 = detect_changes(
+        _disc("TIMEOUT", False, []),
+        _disc("RESOLVED", True, ["203.0.113.8"]),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=502,
+        baseline_scan_run_id=501,
+    )
+    assert ch2 == []
+    # Now definite DNS state is established as RESOLVED
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scan 3: Transition to NXDOMAIN -> emits STOPPED_RESOLVING once
+    ch3 = detect_changes(
+        _disc("RESOLVED", True, ["203.0.113.8"]),
+        _disc("NXDOMAIN", False, []),
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=503,
+        baseline_scan_run_id=502,
+    )
+    stopped = [c for c in ch3 if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    assert inv[host]["last_status"] == "NXDOMAIN"
+
+
+def test_persistent_inventory_dns_parity_with_legacy_lookback():
+    """G3.2: Persistent inventory and legacy lookback emit identical transitions on sequence."""
+    host = "parity.example.com"
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    s1 = _disc("RESOLVED", True, ["203.0.113.15"])
+    s2 = _disc("TIMEOUT", False, [])
+    s3 = _disc("NXDOMAIN", False, [])
+
+    # Legacy lookback path
+    ch_legacy = detect_changes(
+        s2,
+        s3,
+        persisted_inventory=None,
+        historical_baselines=[
+            {"scan_run_id": 602, "reports": s2},
+            {"scan_run_id": 601, "reports": s1},
+        ],
+        baseline_scan_run_id=602,
+    )
+
+    # Persistent inventory path
+    inv: dict[str, dict[str, Any]] = {}
+    detect_changes(
+        {}, s1, persisted_inventory=inv, current_scan_run_id=601, is_first_baseline=True
+    )
+    detect_changes(
+        s1, s2, persisted_inventory=inv, current_scan_run_id=602, baseline_scan_run_id=601
+    )
+    ch_persistent = detect_changes(
+        s2,
+        s3,
+        persisted_inventory=inv,
+        historical_baselines=[
+            {"scan_run_id": 602, "reports": s2},
+            {"scan_run_id": 601, "reports": s1},
+        ],
+        current_scan_run_id=603,
+        baseline_scan_run_id=602,
+    )
+
+    legacy_stops = [c for c in ch_legacy if c["change_type"] == "STOPPED_RESOLVING"]
+    persistent_stops = [c for c in ch_persistent if c["change_type"] == "STOPPED_RESOLVING"]
+
+    assert len(legacy_stops) == 1
+    assert len(persistent_stops) == 1
+    assert legacy_stops[0]["asset"] == persistent_stops[0]["asset"] == host
+    assert legacy_stops[0]["previous_state"] == persistent_stops[0]["previous_state"]
+    assert legacy_stops[0]["new_state"] == persistent_stops[0]["new_state"]
+    assert legacy_stops[0]["baseline_scan_run_id"] == 601
+    assert persistent_stops[0]["baseline_scan_run_id"] == 601
+
+
+def test_persistent_inventory_definite_dns_beyond_lookback_window():
+    """G3.2: Definite DNS state preserved across >3 inconclusive scans outside lookback window.
+
+    When the last definite DNS observation is older than the 3-scan lookback window,
+    the persistent inventory preserves the last definite DNS state (RESOLVED), so that
+    when an opposite definite result (NXDOMAIN) arrives, STOPPED_RESOLVING is correctly
+    emitted. The comparison baseline scan reference (baseline_scan_run_id) references
+    the immediate baseline scan run per the ScanChange foreign key contract, without
+    falsely claiming in detail or wording that the inconclusive scan was where addresses
+    were returned.
+    """
+    host = "outside-lookback.example.com"
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    s1 = _disc("RESOLVED", True, ["203.0.113.50"])
+    s3 = _disc("TIMEOUT", False, [])
+    s4 = _disc("TIMEOUT", False, [])
+    s5 = _disc("TIMEOUT", False, [])
+    s6 = _disc("NXDOMAIN", False, [])
+
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    # Scan 1 (701): Initial RESOLVED
+    detect_changes(
+        {},
+        s1,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=701,
+        is_first_baseline=True,
+    )
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scans 2-5 (702-705): 4 consecutive TIMEOUT scans (exceeding 3-scan lookback)
+    for scan_id in range(702, 706):
+        ch = detect_changes(
+            _disc("TIMEOUT", False, []),
+            _disc("TIMEOUT", False, []),
+            persisted_inventory=inv,
+            persisted_transitions=transitions,
+            current_scan_run_id=scan_id,
+            baseline_scan_run_id=scan_id - 1,
+        )
+        assert len(ch) == 0
+        assert inv[host]["last_status"] == "RESOLVED"
+        assert inv[host]["last_resolved"] is True
+
+    # Scan 6 (706): NXDOMAIN arrives. Historical baselines only contains the 3 recent TIMEOUTs.
+    historical_baselines = [
+        {"scan_run_id": 705, "reports": s5},
+        {"scan_run_id": 704, "reports": s4},
+        {"scan_run_id": 703, "reports": s3},
+    ]
+
+    ch6 = detect_changes(
+        s5,
+        s6,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        historical_baselines=historical_baselines,
+        current_scan_run_id=706,
+        baseline_scan_run_id=705,
+    )
+
+    stopped = [c for c in ch6 if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    change = stopped[0]
+    assert change["asset"] == host
+    assert change["previous_state"] == {"status": "RESOLVED", "resolved": True}
+    assert change["new_state"] == {"status": "NXDOMAIN", "resolved": False}
+    assert change["evidence"] == "discover"
+    assert change["detail"] == ""
+    # baseline_scan_run_id is the comparison baseline FK
+    assert change["baseline_scan_run_id"] == 705
+    # Inventory updated to NXDOMAIN
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 7 (707): Subsequent inconclusive scan does not re-emit or clobber NXDOMAIN
+    s7 = _disc("TIMEOUT", False, [])
+    ch7 = detect_changes(
+        s6,
+        s7,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=707,
+        baseline_scan_run_id=706,
+    )
+    assert len(ch7) == 0
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
