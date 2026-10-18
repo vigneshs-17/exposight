@@ -17,13 +17,22 @@ Covers:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from asm.db.models import Domain, DomainSubdomain, Organization, ScanChange, ScanRun, ScanStage
+from asm.db.models import (
+    Domain,
+    DomainSubdomain,
+    Organization,
+    ScanChange,
+    ScanResult,
+    ScanRun,
+    ScanStage,
+)
 from asm.worker.worker import ASMWorker, LostLeaseError
 
 pytestmark = pytest.mark.db
@@ -1362,9 +1371,7 @@ def test_capacity_limit_persisted_to_scan_results_and_rendered_in_html_db(clean_
             app.dependency_overrides.clear()
 
 
-def test_tombstone_at_capacity_newly_removed_host_persisted_and_retained_db(
-    clean_db, db_engine
-):
+def test_tombstone_at_capacity_newly_removed_host_persisted_and_retained_db(clean_db, db_engine):
     """G3.1 regression: when tombstones are at capacity and an earlier-inserted active host
     reaches its 2nd qualifying absence, finalization must persist active->removed, retain the
     newest tombstone, and never emit duplicate REMOVED_SUBDOMAIN on subsequent scans.
@@ -1436,9 +1443,7 @@ def test_tombstone_at_capacity_newly_removed_host_persisted_and_retained_db(
         assert victim_row.last_applied_scan_run_id == r3
 
         tombstone_count = (
-            session.query(DomainSubdomain)
-            .filter_by(domain_id=domain_id, status="removed")
-            .count()
+            session.query(DomainSubdomain).filter_by(domain_id=domain_id, status="removed").count()
         )
         assert tombstone_count == 1000
 
@@ -1539,9 +1544,7 @@ def test_tombstone_pruning_independent_of_row_return_order_and_ties_db(clean_db,
             )
             emitted = sorted(c.asset.removesuffix(f".{dom_name}") for c in changes)
             rows = session.query(DomainSubdomain).filter_by(domain_id=domain_id).all()
-            persisted = {
-                r.subdomain.removesuffix(f".{dom_name}"): r.status for r in rows
-            }
+            persisted = {r.subdomain.removesuffix(f".{dom_name}"): r.status for r in rows}
             return emitted, persisted
 
     emitted_a, persisted_a = _run_scenario(dom_a, "order-a.example.com", reverse_seed_order=False)
@@ -1625,9 +1628,7 @@ def test_multiple_simultaneous_removals_exceeding_tombstone_cap_db(clean_db, db_
         assert changes_r4 == []
 
 
-def test_tombstone_pruning_rollback_and_repeated_finalization_db(
-    clean_db, db_engine, monkeypatch
-):
+def test_tombstone_pruning_rollback_and_repeated_finalization_db(clean_db, db_engine, monkeypatch):
     """Transaction rollback during finalization leaves pre-existing active rows and tombstones
     untouched; subsequent retry succeeds cleanly and repeated finalization is rejected.
     """
@@ -1704,9 +1705,7 @@ def test_tombstone_pruning_rollback_and_repeated_finalization_db(
         assert victim.status == "active"
         assert victim.consecutive_qualifying_absences == 1
         tombs = (
-            session.query(DomainSubdomain)
-            .filter_by(domain_id=domain_id, status="removed")
-            .all()
+            session.query(DomainSubdomain).filter_by(domain_id=domain_id, status="removed").all()
         )
         assert sorted(t.subdomain for t in tombs) == [
             "tomb-0.rollback-g31.example.com",
@@ -1799,9 +1798,7 @@ def test_reappearance_after_retained_or_evicted_tombstone_db(clean_db, db_engine
 
     with Session(db_engine) as session:
         changes_r4 = (
-            session.query(ScanChange)
-            .filter_by(scan_run_id=r4, change_type="NEW_SUBDOMAIN")
-            .all()
+            session.query(ScanChange).filter_by(scan_run_id=r4, change_type="NEW_SUBDOMAIN").all()
         )
         assert sorted(c.asset for c in changes_r4) == [
             "a-evicted.reappear-g31.example.com",
@@ -1935,3 +1932,536 @@ def test_worker_persistent_inventory_definite_dns_preservation_db(clean_db, db_e
             .all()
         )
         assert len(ch4) == 0
+
+
+def test_bootstrap_independent_review_finding_3_upgrade_db(clean_db, db_engine):
+    """Reproduction of Finding 3 / G3.3:
+    Bootstrap across historical baselines prevents false NEW_SUBDOMAIN
+    and recovers REMOVED_SUBDOMAIN.
+    """
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "finding3-upgrade.example.com")
+
+        # Simulate pre-0015 historical scans S2 and S1 (domain_subdomains is initially empty):
+        # S2: saw existing, vanishing, anchor
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        s2_rep = _make_report(
+            [
+                {"subdomain": "existing.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": "vanishing.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s2_rep.items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=stage_name, report=payload))
+
+        # S1: vanishing has 1st qualifying absence, existing was transiently absent/missed
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        s1_rep = _make_report(
+            [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s1_rep.items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=stage_name, report=payload))
+        session.commit()
+
+    # S0 runs: existing is present (was in S2), vanishing is absent (2nd qualifying absence)
+    s0_rep = _make_report(
+        [
+            {"subdomain": "existing.example.com", "status": "RESOLVED", "resolved": True},
+            {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+        ],
+        source="crt.sh",
+        truncated=False,
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([s0_rep]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        change_set = {(c.change_type, c.asset) for c in changes}
+
+        # existing.example.com must NOT be emitted as NEW_SUBDOMAIN (already seen in S2)
+        assert ("NEW_SUBDOMAIN", "existing.example.com") not in change_set
+        # vanishing.example.com MUST be emitted as REMOVED_SUBDOMAIN (2nd qualifying absence)
+        assert ("REMOVED_SUBDOMAIN", "vanishing.example.com") in change_set
+
+
+def test_bootstrap_empty_or_truncated_latest_prior_scan_db(clean_db, db_engine):
+    """Latest prior scan (S1) was empty or truncated, but earlier scan (S2) contains known hosts."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "empty-prior.example.com")
+
+        # S2: contains alpha and beta
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        s2_rep = _make_report(
+            [
+                {
+                    "subdomain": "alpha.empty-prior.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+                {
+                    "subdomain": "beta.empty-prior.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s2_rep.items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=stage_name, report=payload))
+
+        # S1: empty discovery
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        s1_rep = _make_report([], source="crt.sh", truncated=False)
+        for stage_name, payload in s1_rep.items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=stage_name, report=payload))
+        session.commit()
+
+    # S0: sees alpha and beta again
+    s0_rep = _make_report(
+        [
+            {"subdomain": "alpha.empty-prior.example.com", "status": "RESOLVED", "resolved": True},
+            {"subdomain": "beta.empty-prior.example.com", "status": "RESOLVED", "resolved": True},
+        ],
+        source="crt.sh",
+        truncated=False,
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([s0_rep]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        change_set = {(c.change_type, c.asset) for c in changes}
+        # Neither alpha nor beta should be flagged as NEW_SUBDOMAIN
+        assert ("NEW_SUBDOMAIN", "alpha.empty-prior.example.com") not in change_set
+        assert ("NEW_SUBDOMAIN", "beta.empty-prior.example.com") not in change_set
+
+        # Verify DB inventory populated with both hosts
+        subs = session.query(DomainSubdomain).filter_by(domain_id=domain_id, status="active").all()
+        sub_names = {s.subdomain for s in subs}
+        assert "alpha.empty-prior.example.com" in sub_names
+        assert "beta.empty-prior.example.com" in sub_names
+
+
+def test_bootstrap_consecutive_absence_removals_db(clean_db, db_engine):
+    """Earlier scan records presence, next records 1st absence, current records 2nd."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "consecutive-absence.example.com")
+
+        # S2: anchor and target present
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        s2_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.consecutive-absence.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+                {
+                    "subdomain": "target.consecutive-absence.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s2_rep.items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=stage_name, report=payload))
+
+        # S1: target absent (qualifying absence 1)
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        s1_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.consecutive-absence.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s1_rep.items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=stage_name, report=payload))
+        session.commit()
+        s2_id = s2_run.id
+
+    # S0: target absent again (qualifying absence 2 -> removal)
+    s0_rep = _make_report(
+        [
+            {
+                "subdomain": "anchor.consecutive-absence.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+        ],
+        source="crt.sh",
+        truncated=False,
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([s0_rep]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        removals = [c for c in changes if c.change_type == "REMOVED_SUBDOMAIN"]
+        assert len(removals) == 1
+        assert removals[0].asset == "target.consecutive-absence.example.com"
+        assert removals[0].baseline_scan_run_id == s2_id
+
+        target_row = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="target.consecutive-absence.example.com")
+            .one()
+        )
+        assert target_row.status == "removed"
+        assert target_row.consecutive_qualifying_absences == 2
+        assert target_row.removed_at_scan_run_id == s0_id
+
+
+def test_bootstrap_provider_change_and_unknown_interrupts_absence_streak_db(clean_db, db_engine):
+    """Provider change or UNKNOWN observation in historical scans interrupts absence streak."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "provider-interrupt.example.com")
+
+        # S2: anchor and unstable present via crt.sh
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        s2_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.provider-interrupt.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+                {
+                    "subdomain": "unstable.provider-interrupt.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s2_rep.items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=stage_name, report=payload))
+
+        # S1: provider changes to Cert Spotter (different provider -> UNKNOWN observation)
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        s1_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.provider-interrupt.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="Cert Spotter",
+            truncated=False,
+        )
+        for stage_name, payload in s1_rep.items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=stage_name, report=payload))
+        session.commit()
+
+    # S0: back to crt.sh, unstable is absent (qualifying absence 1, NOT 2)
+    s0_rep = _make_report(
+        [
+            {
+                "subdomain": "anchor.provider-interrupt.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+        ],
+        source="crt.sh",
+        truncated=False,
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([s0_rep]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        removals = [c for c in changes if c.change_type == "REMOVED_SUBDOMAIN"]
+        # Must NOT be removed because provider change in S1 interrupted the streak
+        assert len(removals) == 0
+
+        unstable_row = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="unstable.provider-interrupt.example.com")
+            .one()
+        )
+        assert unstable_row.status == "active"
+        assert unstable_row.consecutive_qualifying_absences == 1
+
+
+def test_bootstrap_reappearance_after_incomplete_coverage_not_new_db(clean_db, db_engine):
+    """Existing host reappears after incomplete coverage without being marked newly added."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "reappearance-incomplete.example.com")
+
+        # S2: anchor and existing present (crt.sh, complete)
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        s2_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.reappearance-incomplete.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+                {
+                    "subdomain": "existing.reappearance-incomplete.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=False,
+        )
+        for stage_name, payload in s2_rep.items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=stage_name, report=payload))
+
+        # S1: truncated discovery (incomplete coverage)
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        s1_rep = _make_report(
+            [
+                {
+                    "subdomain": "anchor.reappearance-incomplete.example.com",
+                    "status": "RESOLVED",
+                    "resolved": True,
+                },
+            ],
+            source="crt.sh",
+            truncated=True,
+        )
+        for stage_name, payload in s1_rep.items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=stage_name, report=payload))
+        session.commit()
+
+    # S0: complete coverage, existing is seen again
+    s0_rep = _make_report(
+        [
+            {
+                "subdomain": "anchor.reappearance-incomplete.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+            {
+                "subdomain": "existing.reappearance-incomplete.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+        ],
+        source="crt.sh",
+        truncated=False,
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([s0_rep]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        new_subs = [c for c in changes if c.change_type == "NEW_SUBDOMAIN"]
+        # Must NOT be described as newly added
+        assert len(new_subs) == 0
+
+        existing_row = (
+            session.query(DomainSubdomain)
+            .filter_by(
+                domain_id=domain_id, subdomain="existing.reappearance-incomplete.example.com"
+            )
+            .one()
+        )
+        assert existing_row.status == "active"
+        assert existing_row.consecutive_qualifying_absences == 0
+
+
+def test_bootstrap_genuinely_new_domain_and_new_hosts_db(clean_db, db_engine):
+    """Covers genuinely new domain and genuinely new hosts."""
+    # 1. Genuinely new domain (0 prior scans)
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "genuinely-new.example.com")
+
+    # Scan 1: first scan ever -> baseline scan
+    rep1 = _make_report(
+        [{"subdomain": "host1.genuinely-new.example.com", "status": "RESOLVED", "resolved": True}],
+        source="crt.sh",
+    )
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([rep1]))
+    with Session(db_engine) as session:
+        r1 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        r1_run = session.query(ScanRun).filter_by(id=r1).one()
+        assert r1_run.change_detection["status"] == "baseline"
+        ch1 = session.query(ScanChange).filter_by(scan_run_id=r1).all()
+        assert len(ch1) == 0
+
+        sub1 = session.query(DomainSubdomain).filter_by(domain_id=domain_id, status="active").one()
+        assert sub1.subdomain == "host1.genuinely-new.example.com"
+
+    # Scan 2: contains host1 + brand new host
+    rep2 = _make_report(
+        [
+            {
+                "subdomain": "host1.genuinely-new.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+            {
+                "subdomain": "brandnew.genuinely-new.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            },
+        ],
+        source="crt.sh",
+    )
+    worker2 = ASMWorker(db_engine, runner=ScriptedRunner([rep2]))
+    with Session(db_engine) as session:
+        r2 = _queue_scan(session, domain_id)
+    worker2.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        ch2 = session.query(ScanChange).filter_by(scan_run_id=r2).all()
+        new_subs = [c for c in ch2 if c.change_type == "NEW_SUBDOMAIN"]
+        assert len(new_subs) == 1
+        assert new_subs[0].asset == "brandnew.genuinely-new.example.com"
+
+
+def test_bootstrap_legitimately_empty_inventory_no_reset_db(clean_db, db_engine):
+    """Legitimately empty inventory doesn't reset lifecycle state or invent additions."""
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "empty-inventory.example.com")
+
+        # Two prior scans with empty discovery
+        s2_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=2),
+        )
+        session.add(s2_run)
+        session.flush()
+        for st, rep in _make_report([], source="crt.sh").items():
+            session.add(ScanResult(scan_run_id=s2_run.id, stage=st, report=rep))
+
+        s1_run = ScanRun(
+            domain_id=domain_id,
+            status="succeeded",
+            finished_at=datetime.now(UTC) - timedelta(days=1),
+        )
+        session.add(s1_run)
+        session.flush()
+        for st, rep in _make_report([], source="crt.sh").items():
+            session.add(ScanResult(scan_run_id=s1_run.id, stage=st, report=rep))
+        session.commit()
+
+    # S0: also empty discovery
+    rep0 = _make_report([], source="crt.sh")
+    worker = ASMWorker(db_engine, runner=ScriptedRunner([rep0]))
+    with Session(db_engine) as session:
+        s0_id = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        ch0 = session.query(ScanChange).filter_by(scan_run_id=s0_id).all()
+        assert len(ch0) == 0
+        s0_run = session.query(ScanRun).filter_by(id=s0_id).one()
+        assert s0_run.status == "succeeded"
+        assert s0_run.change_detection["status"] == "computed"
+
+    # S1: first host ever discovered for this domain -> correctly emitted as NEW_SUBDOMAIN
+    rep1 = _make_report(
+        [
+            {
+                "subdomain": "first.empty-inventory.example.com",
+                "status": "RESOLVED",
+                "resolved": True,
+            }
+        ],
+        source="crt.sh",
+    )
+    worker1 = ASMWorker(db_engine, runner=ScriptedRunner([rep1]))
+    with Session(db_engine) as session:
+        s1_id = _queue_scan(session, domain_id)
+    worker1.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        ch1 = session.query(ScanChange).filter_by(scan_run_id=s1_id).all()
+        new_subs = [c for c in ch1 if c.change_type == "NEW_SUBDOMAIN"]
+        assert len(new_subs) == 1
+        assert new_subs[0].asset == "first.empty-inventory.example.com"

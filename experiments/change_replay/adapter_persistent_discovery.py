@@ -16,7 +16,10 @@ from typing import Any
 
 sys.path.insert(0, ".")
 
-from asm.changes import detect_changes  # noqa: E402
+from asm.changes import (
+    bootstrap_persistent_inventory,
+    detect_changes,
+)  # noqa: E402
 from experiments.change_replay.harness import (  # noqa: E402
     EVENTS,
     N_SCANS,
@@ -47,22 +50,16 @@ def run_persistent_discovery_replay(
     clean_inv: dict[str, dict[str, Any]] = {}
     noisy_inv: dict[str, dict[str, Any]] = {}
 
-    # Scan t=0 baseline bootstrap
-    detect_changes(
-        {},
-        clean[0],
+    # Scan t=0 baseline bootstrap using shared helper
+    bootstrap_persistent_inventory(
+        [{"scan_run_id": 0, "reports": clean[0]}],
         persisted_inventory=clean_inv,
-        current_scan_run_id=0,
-        is_first_baseline=True,
         max_active_subdomains=max_active,
         max_tombstones=max_tombstones,
     )
-    detect_changes(
-        {},
-        noisy[0],
+    bootstrap_persistent_inventory(
+        [{"scan_run_id": 0, "reports": noisy[0]}],
         persisted_inventory=noisy_inv,
-        current_scan_run_id=0,
-        is_first_baseline=True,
         max_active_subdomains=max_active,
         max_tombstones=max_tombstones,
     )
