@@ -231,30 +231,74 @@ def extract_title(html_bytes: bytes, content_type: str | None) -> str | None:
     return cleaned_title
 
 
+def _has_non_identity_content_encoding(response: httpx.Response) -> bool:
+    """Return True if the response declares any non-identity Content-Encoding.
+
+    Sending Accept-Encoding: identity is only a request preference; an origin or
+    CDN may still return gzip/deflate/br/zstd or multi-valued encodings across
+    comma-separated or repeated Content-Encoding headers.
+    """
+    raw_values = response.headers.get_list("content-encoding", split_commas=True)
+    tokens = [val.strip().lower() for val in raw_values if val.strip()]
+    return any(tok != "identity" for tok in tokens)
+
+
 def _stream_and_read_body(
     response: httpx.Response,
     deadline: float,
 ) -> bytes:
-    """Stream and read at most 64 KB of the response body while enforcing the deadline.
+    """Read and retain at most MAX_BODY_BYTES (64 KB) of an uncompressed response body.
+
+    Contract:
+    - Checks Content-Encoding before reading or iterating the response body. If any
+      non-identity encoding token is present (across comma-separated or repeated
+      headers), returns b"" without reading or decompressing the body.
+    - For open streaming responses (the production client.stream path), iterates
+      raw wire bytes via response.iter_raw(chunk_size=4096) so httpx never invokes
+      automatic content decoders, retaining at most MAX_BODY_BYTES and stopping
+      further stream reads once the cap is reached. (Note: MAX_BODY_BYTES bounds the
+      retained body buffer; underlying socket/transport read buffers are governed by
+      the transport.)
+    - If a caller supplies an already-consumed httpx.Response (is_stream_consumed=True,
+      e.g. a pre-materialized transport response), enforces the deadline and returns
+      at most MAX_BODY_BYTES from response.content without invoking iter_bytes.
+    - Always closes the response in a finally block on completion, truncation,
+      Content-Encoding rejection, or exception.
 
     Args:
-        response: Open streaming httpx Response.
+        response: httpx.Response from client.stream().
         deadline: Monotonic deadline timestamp.
 
     Returns:
-        Bytes read (up to 64 KB).
+        Retained uncompressed bytes (up to MAX_BODY_BYTES), or b"" if Content-Encoding
+        is not identity.
 
     Raises:
-        DeadlineExceeded: If deadline is passed during body read.
+        DeadlineExceeded: If deadline is passed before or during body read.
     """
-    body = bytearray()
-    for chunk in response.iter_bytes(chunk_size=4096):
-        if time.perf_counter() > deadline:
-            raise DeadlineExceeded("10s deadline exceeded while reading response body")
-        body.extend(chunk)
-        if len(body) >= MAX_BODY_BYTES:
-            break
-    return bytes(body[:MAX_BODY_BYTES])
+    try:
+        if _has_non_identity_content_encoding(response):
+            return b""
+
+        if response.is_stream_consumed:
+            if time.perf_counter() > deadline:
+                raise DeadlineExceeded("10s deadline exceeded while reading response body")
+            return bytes(response.content[:MAX_BODY_BYTES])
+
+        body = bytearray()
+        for chunk in response.iter_raw(chunk_size=4096):
+            if time.perf_counter() > deadline:
+                raise DeadlineExceeded("10s deadline exceeded while reading response body")
+            if not chunk:
+                continue
+            remaining = MAX_BODY_BYTES - len(body)
+            if remaining > 0:
+                body.extend(chunk[:remaining])
+            if len(body) >= MAX_BODY_BYTES:
+                break
+        return bytes(body)
+    finally:
+        response.close()
 
 
 def _execute_single_url_probe(
@@ -313,12 +357,11 @@ def _execute_single_url_probe(
             timeout=timeout,
         ) as response:
             response_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
-            body_bytes = _stream_and_read_body(response, deadline)
-
             status_code = response.status_code
             server_hdr = response.headers.get("server")
             x_powered_hdr = response.headers.get("x-powered-by")
             content_type_hdr = response.headers.get("content-type")
+            body_bytes = _stream_and_read_body(response, deadline)
 
             # Check for redirect status codes
             if status_code in (301, 302, 303, 307, 308):
