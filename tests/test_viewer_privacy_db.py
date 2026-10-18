@@ -18,9 +18,10 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from asm.admin import revoke_verification, verify_domain
 from asm.api.deps import get_current_user
 from asm.api.main import app
 from asm.db.models import AlertNotification, Domain, Membership, Organization, User
@@ -478,3 +479,120 @@ def test_web_ui_viewer_view_consistency(privacy_fixture):
         assert "relay.dmz.local" in res_a_history.text
     finally:
         app.dependency_overrides.clear()
+
+
+def test_g5_1_operator_verification_reasons_redacted_for_viewers_and_notifications_db(
+    privacy_fixture,
+):
+    """G5.1: Operator verification reasons are redacted/hidden from viewer roles and notifications.
+
+    1. Operator grants verification with sensitive email/IP in reason.
+       - Owner/admin receives full verification_reason in GET /domains/{id} and /verification.
+       - Viewer receives verification_reason=None in both endpoints.
+    2. Operator revokes verification with sensitive email/IP in reason.
+       - Outbox AlertNotification.body has sensitive tokens replaced with [redacted].
+       - Viewer receives verification_reason=None and redacted notification body.
+       - Admin/owner receives full verification_reason in domain read and retains audit event.
+       - Viewer is forbidden (403) from /audit-events.
+    """
+    fix = privacy_fixture
+    org_id = fix["org"].id
+    dom_id = fix["dom_with_alerts"].id
+    db_s = fix["db_session"]
+
+    try:
+        # 1. Operator grants verification with sensitive contact & IP
+        grant_reason = "Approved by CISO ciso-private@privacy-corp.example per ticket 10.20.30.40"
+        ret = verify_domain(db_s, domain_id=dom_id, reason=grant_reason, expires_in_days=30)
+        assert ret == 0
+
+        # Owner/Admin sees full verification_reason
+        client_owner = _make_client_for_user(fix["owner"], db_s)
+        res_o_dom = client_owner.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_o_dom.status_code == 200
+        assert res_o_dom.json()["verification_reason"] == grant_reason
+
+        res_o_ver = client_owner.get(f"/orgs/{org_id}/domains/{dom_id}/verification")
+        assert res_o_ver.status_code == 200
+        assert res_o_ver.json()["verification_reason"] == grant_reason
+
+        client_admin = _make_client_for_user(fix["admin"], db_s)
+        res_a_dom = client_admin.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_a_dom.status_code == 200
+        assert res_a_dom.json()["verification_reason"] == grant_reason
+
+        # Viewer receives verification_reason=None (redacted/hidden)
+        client_viewer = _make_client_for_user(fix["viewer"], db_s)
+        res_v_dom = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_v_dom.status_code == 200
+        assert res_v_dom.json()["verification_reason"] is None
+        assert "ciso-private@privacy-corp.example" not in res_v_dom.text
+        assert "10.20.30.40" not in res_v_dom.text
+
+        res_v_ver = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}/verification")
+        assert res_v_ver.status_code == 200
+        assert res_v_ver.json()["verification_reason"] is None
+        assert "ciso-private@privacy-corp.example" not in res_v_ver.text
+        assert "10.20.30.40" not in res_v_ver.text
+
+        # 2. Operator revokes verification with sensitive contact & IP
+        revoke_reason = "Revoked by lead sec-ops@privacy-corp.example from gateway 192.168.1.100"
+        ret_rev = revoke_verification(db_s, domain_id=dom_id, reason=revoke_reason)
+        assert ret_rev == 0
+
+        # Outbox notification body must NOT contain sensitive email/IP
+        stmt = (
+            select(AlertNotification)
+            .where(
+                AlertNotification.domain_id == dom_id,
+                AlertNotification.subject == "Domain verification lapsed: monitoring paused",
+            )
+            .order_by(AlertNotification.id.desc())
+        )
+        notif = db_s.scalars(stmt).first()
+        assert notif is not None
+        assert "sec-ops@privacy-corp.example" not in notif.body
+        assert "192.168.1.100" not in notif.body
+        assert "[redacted]" in notif.body
+
+        # Viewer reading notification history sees redacted body and no sensitive text
+        res_v_notifs = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}/alert-notifications")
+        assert res_v_notifs.status_code == 200
+        for n in res_v_notifs.json():
+            assert "sec-ops@privacy-corp.example" not in n["body"]
+            assert "192.168.1.100" not in n["body"]
+
+        # Viewer reading domain or verification endpoint still gets verification_reason=None
+        res_v_dom2 = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_v_dom2.status_code == 200
+        assert res_v_dom2.json()["verification_reason"] is None
+
+        res_v_ver2 = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}/verification")
+        assert res_v_ver2.status_code == 200
+        assert res_v_ver2.json()["verification_reason"] is None
+
+        # Owner/Admin reading domain receives full revoked reason
+        client_owner = _make_client_for_user(fix["owner"], db_s)
+        res_o_dom2 = client_owner.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_o_dom2.status_code == 200
+        assert "sec-ops@privacy-corp.example" in (res_o_dom2.json()["verification_reason"] or "")
+
+        # Audit events are accessible to admin/owner and redact free text
+        res_a_audit = client_admin.get(f"/orgs/{org_id}/audit-events?domain_id={dom_id}")
+        assert res_a_audit.status_code == 200
+        audit_events = res_a_audit.json()
+        assert len(audit_events) >= 2
+        for ev in audit_events:
+            reason_in_meta = ev.get("metadata", {}).get("reason")
+            if reason_in_meta:
+                assert "ciso-private@privacy-corp.example" not in reason_in_meta
+                assert "sec-ops@privacy-corp.example" not in reason_in_meta
+
+        # Viewer cannot access audit events
+        client_viewer = _make_client_for_user(fix["viewer"], db_s)
+        res_v_audit = client_viewer.get(f"/orgs/{org_id}/audit-events")
+        assert res_v_audit.status_code == 403
+
+    finally:
+        app.dependency_overrides.clear()
+

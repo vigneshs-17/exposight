@@ -44,7 +44,10 @@ class DomainVerificationRead(BaseModel):
     verified_at: datetime | None = None
     last_checked_at: datetime | None = None
     consecutive_misses: int = 0
-    verification_reason: str | None = None
+    verification_reason: str | None = Field(
+        default=None,
+        description="Reason for operator verification or revocation. Redacted (None) for viewers.",
+    )
     verification_expires_at: datetime | None = None
     is_verified: bool = False
     check_outcome: Literal["match", "absent", "unknown"] | None = None
@@ -65,7 +68,10 @@ class DomainRead(BaseModel):
     verified_at: datetime | None = None
     last_checked_at: datetime | None = None
     consecutive_misses: int = 0
-    verification_reason: str | None = None
+    verification_reason: str | None = Field(
+        default=None,
+        description="Reason for operator verification or revocation. Redacted (None) for viewers.",
+    )
     verification_expires_at: datetime | None = None
     scan_interval_hours: int | None = None
     next_scan_at: datetime | None = None
@@ -144,7 +150,10 @@ class AlertNotificationRead(BaseModel):
         description="Delivery email address for the notification. Redacted (None) for viewers.",
     )
     subject: str
-    body: str
+    body: str = Field(
+        ...,
+        description="Notification body text. Sensitive text redacted for viewers.",
+    )
     status: str
     attempts: int
     max_attempts: int
