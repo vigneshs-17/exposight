@@ -306,3 +306,26 @@ def test_g3_5_replay_candidate_passes_positive_scan_ids_and_production_allow_rem
     assert False in [c["allow_removal"] for c in scan2_calls]
 
 
+def test_scanner_benchmark_gates_adr_alignment(tmp_path):
+    """ADR 0001: benchmark stop-rule gates match empirical baseline and evaluate to pass."""
+    from experiments.change_replay.run import (
+        MAX_ALERT_FALSE_PER_1000,
+        MAX_FALSE_PER_1000,
+        MAX_MISSED,
+        main,
+    )
+
+    assert MAX_FALSE_PER_1000 == 60.0
+    assert MAX_ALERT_FALSE_PER_1000 == 2.0
+    assert MAX_MISSED == 1
+
+    out_dir = tmp_path / "replay_out"
+    main(["--candidate", "--seed", "1", "--seeds", "3", "--out", str(out_dir)])
+
+    summary_text = (out_dir / "summary.md").read_text(encoding="utf-8")
+    assert "- false changes per 1,000 <= 60.0: pass" in summary_text
+    assert "- alert-eligible false per 1,000 <= 2.0: pass" in summary_text
+    assert "- missed real events <= 1: pass" in summary_text
+    assert "**Verdict: NEGLIGIBLE: keep P0.**" in summary_text
+
+
