@@ -4975,3 +4975,113 @@ def test_persistent_inventory_dns_parity_with_legacy_lookback():
     assert legacy_stops[0]["new_state"] == persistent_stops[0]["new_state"]
     assert legacy_stops[0]["baseline_scan_run_id"] == 601
     assert persistent_stops[0]["baseline_scan_run_id"] == 601
+
+
+def test_persistent_inventory_definite_dns_beyond_lookback_window():
+    """G3.2: Definite DNS state preserved across >3 inconclusive scans outside lookback window.
+
+    When the last definite DNS observation is older than the 3-scan lookback window,
+    the persistent inventory preserves the last definite DNS state (RESOLVED), so that
+    when an opposite definite result (NXDOMAIN) arrives, STOPPED_RESOLVING is correctly
+    emitted. The comparison baseline scan reference (baseline_scan_run_id) references
+    the immediate baseline scan run per the ScanChange foreign key contract, without
+    falsely claiming in detail or wording that the inconclusive scan was where addresses
+    were returned.
+    """
+    host = "outside-lookback.example.com"
+
+    def _disc(status: str, resolved: bool, ips: list[str]) -> dict[str, Any]:
+        return {
+            "discover": {
+                "domain": "example.com",
+                "source": "crt.sh",
+                "results": [
+                    {
+                        "subdomain": host,
+                        "status": status,
+                        "resolved": resolved,
+                        "ip_addresses": ips,
+                    }
+                ],
+            }
+        }
+
+    s1 = _disc("RESOLVED", True, ["203.0.113.50"])
+    s3 = _disc("TIMEOUT", False, [])
+    s4 = _disc("TIMEOUT", False, [])
+    s5 = _disc("TIMEOUT", False, [])
+    s6 = _disc("NXDOMAIN", False, [])
+
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+
+    # Scan 1 (701): Initial RESOLVED
+    detect_changes(
+        {},
+        s1,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=701,
+        is_first_baseline=True,
+    )
+    assert inv[host]["last_status"] == "RESOLVED"
+    assert inv[host]["last_resolved"] is True
+
+    # Scans 2-5 (702-705): 4 consecutive TIMEOUT scans (exceeding 3-scan lookback)
+    for scan_id in range(702, 706):
+        ch = detect_changes(
+            _disc("TIMEOUT", False, []),
+            _disc("TIMEOUT", False, []),
+            persisted_inventory=inv,
+            persisted_transitions=transitions,
+            current_scan_run_id=scan_id,
+            baseline_scan_run_id=scan_id - 1,
+        )
+        assert len(ch) == 0
+        assert inv[host]["last_status"] == "RESOLVED"
+        assert inv[host]["last_resolved"] is True
+
+    # Scan 6 (706): NXDOMAIN arrives. Historical baselines only contains the 3 recent TIMEOUTs.
+    historical_baselines = [
+        {"scan_run_id": 705, "reports": s5},
+        {"scan_run_id": 704, "reports": s4},
+        {"scan_run_id": 703, "reports": s3},
+    ]
+
+    ch6 = detect_changes(
+        s5,
+        s6,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        historical_baselines=historical_baselines,
+        current_scan_run_id=706,
+        baseline_scan_run_id=705,
+    )
+
+    stopped = [c for c in ch6 if c["change_type"] == "STOPPED_RESOLVING"]
+    assert len(stopped) == 1
+    change = stopped[0]
+    assert change["asset"] == host
+    assert change["previous_state"] == {"status": "RESOLVED", "resolved": True}
+    assert change["new_state"] == {"status": "NXDOMAIN", "resolved": False}
+    assert change["evidence"] == "discover"
+    assert change["detail"] == ""
+    # baseline_scan_run_id is the comparison baseline FK
+    assert change["baseline_scan_run_id"] == 705
+    # Inventory updated to NXDOMAIN
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
+
+    # Scan 7 (707): Subsequent inconclusive scan does not re-emit or clobber NXDOMAIN
+    s7 = _disc("TIMEOUT", False, [])
+    ch7 = detect_changes(
+        s6,
+        s7,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+        current_scan_run_id=707,
+        baseline_scan_run_id=706,
+    )
+    assert len(ch7) == 0
+    assert inv[host]["last_status"] == "NXDOMAIN"
+    assert inv[host]["last_resolved"] is False
