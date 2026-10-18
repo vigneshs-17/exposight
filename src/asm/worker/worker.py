@@ -1090,7 +1090,11 @@ class ASMWorker:
         domain_id: int,
         new_reports: dict[str, dict[str, Any]],
     ) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
-        from asm.changes import detect_changes, evaluate_removal_eligibility
+        from asm.changes import (
+            bootstrap_persistent_inventory,
+            detect_changes,
+            evaluate_removal_eligibility,
+        )
 
         inventory: dict[str, dict[str, Any]] = {}
         baseline_rows = session.execute(
@@ -1186,17 +1190,15 @@ class ASMWorker:
         try:
             inventory_transitions: dict[str, dict[str, Any]] = {}
             max_tombstones = int(getattr(self, "max_tombstones", 1000))
+            max_active_subdomains = int(getattr(self, "max_active_subdomains", 5000))
 
             if not inventory:
-                detect_changes(
-                    {},
-                    baseline_reports,
-                    allow_removal=False,
+                bootstrap_persistent_inventory(
+                    historical_baselines,
                     persisted_inventory=inventory,
                     persisted_transitions=inventory_transitions,
-                    current_scan_run_id=baseline_id,
+                    max_active_subdomains=max_active_subdomains,
                     max_tombstones=max_tombstones,
-                    is_first_baseline=True,
                 )
 
             if inventory:
@@ -1221,6 +1223,7 @@ class ASMWorker:
                 persisted_inventory=inventory,
                 persisted_transitions=inventory_transitions,
                 current_scan_run_id=scan_run_id,
+                max_active_subdomains=max_active_subdomains,
                 max_tombstones=max_tombstones,
             )
             counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -1409,9 +1412,7 @@ class ASMWorker:
             rows_to_upsert = (
                 inventory_transitions if inventory_transitions is not None else inventory_updates
             )
-            if (
-                rows_to_upsert is not None or inventory_updates is not None
-            ) and domain_id:
+            if (rows_to_upsert is not None or inventory_updates is not None) and domain_id:
                 for sub, item in sorted((rows_to_upsert or {}).items()):
                     session.execute(
                         text(

@@ -491,9 +491,7 @@ def _tombstone_retention_sort_key(
     app_id = item.get("last_applied_scan_run_id")
     upd = item.get("updated_at")
     if isinstance(upd, datetime):
-        upd_ts = (
-            upd.timestamp() if upd.tzinfo is not None else upd.replace(tzinfo=UTC).timestamp()
-        )
+        upd_ts = upd.timestamp() if upd.tzinfo is not None else upd.replace(tzinfo=UTC).timestamp()
     elif isinstance(upd, (int, float)):
         upd_ts = float(upd)
     else:
@@ -2116,3 +2114,117 @@ def detect_changes(
             deduped_changes.append(change)
 
     return deduped_changes
+
+
+def bootstrap_persistent_inventory(
+    historical_baselines: list[dict[str, Any]],
+    *,
+    persisted_inventory: dict[str, dict[str, Any]] | None = None,
+    persisted_transitions: dict[str, dict[str, Any]] | None = None,
+    max_active_subdomains: int = 5000,
+    max_tombstones: int = 1000,
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct persistent discovery inventory state from bounded historical scans.
+
+    Replays up to 3 available historical scans in chronological order (oldest to newest)
+    using production change detection transition logic without emitting historical changes
+    or alerts.
+
+    Evidence older than the available bootstrap window (at most 3 prior scans)
+    is unavailable and is not queried.
+
+    Args:
+        historical_baselines: Bounded list of prior succeeded scans (newest to oldest,
+            up to 3 entries) as [{'scan_run_id': int, 'reports': dict}, ...].
+        persisted_inventory: Mutable dict to populate with reconstructed state.
+        persisted_transitions: Optional out-dict populated with reconstructed inventory
+            rows to persist to the database.
+        max_active_subdomains: Maximum active subdomains cap.
+        max_tombstones: Maximum retained removed tombstones cap.
+
+    Returns:
+        The mutated persisted_inventory map containing reconstructed state.
+    """
+    if persisted_inventory is None:
+        persisted_inventory = {}
+
+    if not historical_baselines:
+        return persisted_inventory
+
+    # Only use existing bounded historical inputs (up to 3 prior scans)
+    bounded_entries = historical_baselines[:3]
+
+    def _normalize_entry(entry: Any) -> tuple[int | None, dict[str, dict[str, Any]]]:
+        if isinstance(entry, dict) and "reports" in entry:
+            s_id = entry.get("scan_run_id") or entry.get("id")
+            rep = entry.get("reports")
+        elif isinstance(entry, dict) and ("discover" in entry or "score" in entry):
+            s_id = entry.get("scan_run_id") or entry.get("id")
+            rep = entry
+        elif isinstance(entry, dict):
+            s_id = entry.get("scan_run_id") or entry.get("id")
+            rep = entry.get("reports") or entry
+        else:
+            s_id = None
+            rep = {}
+        return s_id, rep if isinstance(rep, dict) else {}
+
+    # Chronological replay: oldest to newest
+    chronological = list(reversed(bounded_entries))
+    if not chronological:
+        return persisted_inventory
+
+    # 1. Oldest scan serves as initial baseline
+    first_id, first_rep = _normalize_entry(chronological[0])
+    detect_changes(
+        {},
+        first_rep,
+        allow_removal=False,
+        historical_baselines=[],
+        baseline_scan_run_id=None,
+        persisted_inventory=persisted_inventory,
+        persisted_transitions=persisted_transitions,
+        current_scan_run_id=first_id,
+        max_active_subdomains=max_active_subdomains,
+        max_tombstones=max_tombstones,
+        is_first_baseline=True,
+    )
+
+    # 2. Subsequent scans transition state in chronological order
+    for idx in range(1, len(chronological)):
+        prev_id, prev_rep = _normalize_entry(chronological[idx - 1])
+        curr_id, curr_rep = _normalize_entry(chronological[idx])
+
+        curr_disc = curr_rep.get("discover") or {}
+        curr_trunc = bool(curr_disc.get("truncated", False))
+        curr_results = curr_disc.get("results")
+        curr_empty = not bool(curr_results)
+        allow_rem = not curr_trunc and not curr_empty
+
+        # Historical window for this intermediate scan: up to 3 prior scans (newest to oldest)
+        h_prior = [
+            {"scan_run_id": s_id, "reports": r}
+            for s_id, r in [_normalize_entry(chronological[j]) for j in range(idx - 1, -1, -1)][:3]
+        ]
+
+        detect_changes(
+            prev_rep,
+            curr_rep,
+            allow_removal=allow_rem,
+            historical_baselines=h_prior,
+            baseline_scan_run_id=prev_id,
+            persisted_inventory=persisted_inventory,
+            persisted_transitions=persisted_transitions,
+            current_scan_run_id=curr_id,
+            max_active_subdomains=max_active_subdomains,
+            max_tombstones=max_tombstones,
+            is_first_baseline=False,
+        )
+
+    # Guarantee all reconstructed inventory items are present in persisted_transitions
+    if persisted_transitions is not None:
+        for k, v in persisted_inventory.items():
+            if k not in persisted_transitions:
+                persisted_transitions[k] = dict(v)
+
+    return persisted_inventory

@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from asm.changes import detect_changes, evaluate_removal_eligibility
+from asm.changes import (
+    bootstrap_persistent_inventory,
+    detect_changes,
+    evaluate_removal_eligibility,
+)
 
 
 def test_evaluate_removal_eligibility():
@@ -185,8 +189,7 @@ def test_truncated_report_skips_removals():
     changes = detect_changes(baseline, new_scan, allow_removal=eligible)
     # new.example.com is added
     assert any(
-        c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == "new.example.com"
-        for c in changes
+        c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == "new.example.com" for c in changes
     )
     # old.example.com removal is SKIPPED
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" for c in changes)
@@ -463,8 +466,7 @@ def test_dns_status_changes():
     )
     # newly resolving
     assert any(
-        c["change_type"] == "NEWLY_RESOLVING" and c["asset"] == "nx.example.com"
-        for c in changes
+        c["change_type"] == "NEWLY_RESOLVING" and c["asset"] == "nx.example.com" for c in changes
     )
     # TIMEOUT is ignored: unknown is not absent
     assert not any(c["asset"] == "stable.example.com" for c in changes)
@@ -848,9 +850,7 @@ def test_port_open_filtered_open_suppresses_port_newly_open():
 def test_port_open_filtered_closed_emits_closure_with_correct_baseline_id():
     """OPEN -> FILTERED -> CLOSED emits PORT_NO_LONGER_OPEN with the open scan's ID."""
     host = "api.example.com"
-    s1 = _make_port_scan(
-        host, open_ports=[{"port": 80, "state": "OPEN", "service_guess": "http"}]
-    )
+    s1 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN", "service_guess": "http"}])
     s2 = _make_port_scan(host, filtered_ports=[80])
     s3 = _make_port_scan(host, closed_ports=[80])
 
@@ -1195,12 +1195,8 @@ def test_port_multiple_changes_draw_from_different_baseline_ids():
     s1 = _make_port_scan(
         host, open_ports=[{"port": 80, "state": "OPEN"}, {"port": 443, "state": "OPEN"}]
     )
-    s2 = _make_port_scan(
-        host, open_ports=[], closed_ports=[80], filtered_ports=[443]
-    )
-    s3 = _make_port_scan(
-        host, open_ports=[{"port": 80, "state": "OPEN"}], closed_ports=[443]
-    )
+    s2 = _make_port_scan(host, open_ports=[], closed_ports=[80], filtered_ports=[443])
+    s3 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}], closed_ports=[443])
 
     hist = [{"scan_run_id": 602, "reports": s2}, {"scan_run_id": 601, "reports": s1}]
     changes = detect_changes(s2, s3, historical_baselines=hist, baseline_scan_run_id=602)
@@ -1356,10 +1352,12 @@ def test_worker_mark_run_final_persists_per_change_baseline_id():
     run_level_baseline_id = 103
     inserted_rows = []
     for ch in changes:
-        inserted_rows.append({
-            "baseline_scan_run_id": ch.get("baseline_scan_run_id") or run_level_baseline_id,
-            "change_type": ch["change_type"],
-        })
+        inserted_rows.append(
+            {
+                "baseline_scan_run_id": ch.get("baseline_scan_run_id") or run_level_baseline_id,
+                "change_type": ch["change_type"],
+            }
+        )
 
     assert inserted_rows[0]["baseline_scan_run_id"] == 101
     assert inserted_rows[1]["baseline_scan_run_id"] == 103
@@ -1530,8 +1528,7 @@ def test_inspect_partial_observations_separate_validity():
 
     # Cert rotation was detected because cert was valid
     has_rot = any(
-        c["change_type"] == "CERTIFICATE_CHANGED" and c["detail"] == "not_after"
-        for c in changes
+        c["change_type"] == "CERTIFICATE_CHANGED" and c["detail"] == "not_after" for c in changes
     )
     assert has_rot
     # No false header removal was emitted because header observation in s2 was invalid/error
@@ -1988,12 +1985,8 @@ def test_discovery_p_a_a_p_cycle():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_23 = detect_changes(
-        s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002
-    )
-    rem_ch = next(
-        c for c in ch_23 if c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub
-    )
+    ch_23 = detect_changes(s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002)
+    rem_ch = next(c for c in ch_23 if c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub)
     assert rem_ch["baseline_scan_run_id"] == 1001
     assert rem_ch["previous_state"] == {"status": "RESOLVED", "resolved": True}
     assert rem_ch["new_state"] is None
@@ -2004,9 +1997,7 @@ def test_discovery_p_a_a_p_cycle():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_34 = detect_changes(
-        s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    ch_34 = detect_changes(s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     rediscover_ch = next(
         c for c in ch_34 if c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub
     )
@@ -2032,9 +2023,7 @@ def test_discovery_p_a_a_a_no_repeated_removal():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_34 = detect_changes(
-        s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    ch_34 = detect_changes(s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
 
 
@@ -2056,9 +2045,7 @@ def test_discovery_p_a_unknown_a_resets_absence():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_34 = detect_changes(
-        s3_unknown, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    ch_34 = detect_changes(s3_unknown, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
 
 
@@ -2080,9 +2067,7 @@ def test_discovery_p_a_degraded_p_a_resets_absence():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_23 = detect_changes(
-        s2, s3_degraded, historical_baselines=hist_3, baseline_scan_run_id=1002
-    )
+    ch_23 = detect_changes(s2, s3_degraded, historical_baselines=hist_3, baseline_scan_run_id=1002)
     assert not any(c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub for c in ch_23)
 
     # Scan 3 -> 4: only 1 absence since S3 presence; no removal
@@ -2091,9 +2076,7 @@ def test_discovery_p_a_degraded_p_a_resets_absence():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_34 = detect_changes(
-        s3_degraded, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    ch_34 = detect_changes(s3_degraded, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
 
 
@@ -2117,9 +2100,7 @@ def test_discovery_source_incomparability_primary_vs_fallback():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_23 = detect_changes(
-        s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002
-    )
+    ch_23 = detect_changes(s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_23)
 
     # Scan 3 -> 4: primary reappearance was not confirmed absent -> no rediscovery addition
@@ -2128,9 +2109,7 @@ def test_discovery_source_incomparability_primary_vs_fallback():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_34 = detect_changes(
-        s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    ch_34 = detect_changes(s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     assert not any(c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
 
@@ -2150,12 +2129,8 @@ def test_discovery_fallback_confirmed_absence():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    ch_23 = detect_changes(
-        s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002
-    )
-    rem_ch = next(
-        c for c in ch_23 if c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub
-    )
+    ch_23 = detect_changes(s2, s3, historical_baselines=hist_3, baseline_scan_run_id=1002)
+    rem_ch = next(c for c in ch_23 if c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub)
     assert rem_ch["baseline_scan_run_id"] == 1001
     assert rem_ch["previous_state"] == {"status": "RESOLVED", "resolved": True}
 
@@ -2182,12 +2157,8 @@ def test_discovery_window_eviction_beyond_three_scans():
         {"scan_run_id": 1003, "reports": s3},
         {"scan_run_id": 1002, "reports": s2},
     ]
-    ch_45 = detect_changes(
-        s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004
-    )
-    new_ch = next(
-        c for c in ch_45 if c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub
-    )
+    ch_45 = detect_changes(s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004)
+    new_ch = next(c for c in ch_45 if c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub)
     # First observed in available history does not override baseline_scan_run_id
     assert "baseline_scan_run_id" not in new_ch
     assert new_ch["previous_state"] is None
@@ -2209,9 +2180,7 @@ def test_discovery_genuinely_new_hostname_in_degraded_response():
         historical_baselines=[{"scan_run_id": 1001, "reports": s1}],
         baseline_scan_run_id=1001,
     )
-    new_ch = next(
-        c for c in changes if c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub
-    )
+    new_ch = next(c for c in changes if c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub)
     assert new_ch["previous_state"] is None
     assert new_ch["new_state"] == {"status": "RESOLVED", "resolved": True}
 
@@ -2297,9 +2266,7 @@ def test_discovery_p_unknown_a_a_confirms_removal():
         {"scan_run_id": 1002, "reports": s2},
         {"scan_run_id": 1001, "reports": s1},
     ]
-    changes = detect_changes(
-        s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003
-    )
+    changes = detect_changes(s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     rem_ch = next(
         c for c in changes if c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub
     )
@@ -2335,12 +2302,8 @@ def test_discovery_p_a_unknown_a_a_expired_presence_no_removal():
         {"scan_run_id": 1003, "reports": s3},
         {"scan_run_id": 1002, "reports": s2},
     ]
-    changes = detect_changes(
-        s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004
-    )
-    assert not any(
-        c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in changes
-    )
+    changes = detect_changes(s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004)
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in changes)
 
 
 def test_discovery_repeated_stable_presence_after_rediscovery():
@@ -2371,9 +2334,7 @@ def test_discovery_repeated_stable_presence_after_rediscovery():
         {"scan_run_id": 1003, "reports": s3},
         {"scan_run_id": 1002, "reports": s2},
     ]
-    ch_45 = detect_changes(
-        s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004
-    )
+    ch_45 = detect_changes(s4, s5, historical_baselines=hist_5, baseline_scan_run_id=1004)
     assert not any(c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub for c in ch_45)
 
     # Scan 5 -> 6: sub present in S4, S5, and S6
@@ -2382,9 +2343,7 @@ def test_discovery_repeated_stable_presence_after_rediscovery():
         {"scan_run_id": 1004, "reports": s4},
         {"scan_run_id": 1003, "reports": s3},
     ]
-    ch_56 = detect_changes(
-        s5, s6, historical_baselines=hist_6, baseline_scan_run_id=1005
-    )
+    ch_56 = detect_changes(s5, s6, historical_baselines=hist_6, baseline_scan_run_id=1005)
     assert not any(c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub for c in ch_56)
 
 
@@ -2461,6 +2420,7 @@ def test_worker_first_scan_is_baseline_and_emits_no_changes_or_alerts():
 # HTTPS-Loss Bounded Confirmation Tests
 # -------------------------------------------------------------------------
 
+
 def _make_probe_scan(
     host: str = "api.example.com",
     *,
@@ -2499,9 +2459,7 @@ def test_https_lost_success_fail_success_no_loss_event():
     s0 = _make_probe_scan(scan_time="2026-10-01T09:00:00Z", https_reachable=True)
 
     # Scan 1: single failure streak=1 -> no HTTPS_LOST
-    changes_s1 = detect_changes(
-        s2, s1, historical_baselines=[{"scan_run_id": 1, "reports": s2}]
-    )
+    changes_s1 = detect_changes(s2, s1, historical_baselines=[{"scan_run_id": 1, "reports": s2}])
     assert not any(c["change_type"] == "HTTPS_LOST" for c in changes_s1)
 
     # Scan 2: recovered to SUCCESS -> no HTTPS_LOST
@@ -3301,8 +3259,7 @@ def test_canonical_domain_scoring_multi_high_hosts_and_fallback():
                 }
             )
             has_rdp = all_rdp and (
-                (h in ("h1.example.com", "h2.example.com"))
-                or (h == "h3.example.com" and h3_rdp)
+                (h in ("h1.example.com", "h2.example.com")) or (h == "h3.example.com" and h3_rdp)
             )
             ports = [80, 443, 3389] if has_rdp else [80, 443]
             ps.append(
@@ -3438,9 +3395,7 @@ def test_canonical_domain_scoring_multi_high_hosts_and_fallback():
         h3_hdr_err=True,
         h10_timeout=True,
     )
-    s10_escalated["score"]["domain_findings"].append(
-        {"id": "DOMAIN_CUSTOM_POSTURE", "points": 2}
-    )
+    s10_escalated["score"]["domain_findings"].append({"id": "DOMAIN_CUSTOM_POSTURE", "points": 2})
     ch_esc = detect_changes(
         s10_low,
         s10_escalated,
@@ -3452,7 +3407,6 @@ def test_canonical_domain_scoring_multi_high_hosts_and_fallback():
     assert dom_inc[0]["previous_state"] == {"band": "LOW", "score": 10}
     # 3 HIGH hosts (3 * 8 = 24) + 7 LOW hosts (7 * 1 = 7) + preserved domain_findings (2) = 33
     assert dom_inc[0]["new_state"] == {"band": "HIGH", "score": 33}
-
 
     band, is_esc = derive_domain_band(
         score_domain_payloads(
@@ -3505,9 +3459,7 @@ def test_unavailable_portscan_does_not_suppress_fresh_inspection_findings_and_ri
             ]
         else:
             ps = [{"subdomain": host, "status": "TIMEOUT", "open_ports": [], "closed_ports": []}]
-        insp = [
-            {"subdomain": host, "status": "PROBED", "cert": cert_dict, "headers": headers_dict}
-        ]
+        insp = [{"subdomain": host, "status": "PROBED", "cert": cert_dict, "headers": headers_dict}]
         sc = score_domain_payloads("example.com", disc, probe, ps, insp).to_dict()
         return {
             "discover": {"domain": "example.com", "scan_time": ts, "results": disc},
@@ -4947,9 +4899,7 @@ def test_persistent_inventory_dns_parity_with_legacy_lookback():
 
     # Persistent inventory path
     inv: dict[str, dict[str, Any]] = {}
-    detect_changes(
-        {}, s1, persisted_inventory=inv, current_scan_run_id=601, is_first_baseline=True
-    )
+    detect_changes({}, s1, persisted_inventory=inv, current_scan_run_id=601, is_first_baseline=True)
     detect_changes(
         s1, s2, persisted_inventory=inv, current_scan_run_id=602, baseline_scan_run_id=601
     )
@@ -5085,3 +5035,171 @@ def test_persistent_inventory_definite_dns_beyond_lookback_window():
     assert len(ch7) == 0
     assert inv[host]["last_status"] == "NXDOMAIN"
     assert inv[host]["last_resolved"] is False
+
+
+def test_bootstrap_persistent_inventory_bounded_window_and_chronology():
+    """Verify bootstrap uses only the bounded 3-scan window in chronological order."""
+
+    # Historical baselines: 5 scans provided (newest to oldest: 50, 40, 30, 20, 10).
+    # Only scans 50, 40, 30 must be used (scans 20 and 10 are outside the bounded window).
+    def _make_hist_scan(scan_id: int, host_list: list[str]) -> dict[str, Any]:
+        return {
+            "scan_run_id": scan_id,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": h, "status": "RESOLVED", "resolved": True} for h in host_list
+                    ],
+                }
+            },
+        }
+
+    baselines = [
+        _make_hist_scan(50, ["recent.example.com"]),
+        _make_hist_scan(40, ["recent.example.com", "mid.example.com"]),
+        _make_hist_scan(30, ["mid.example.com", "window_start.example.com"]),
+        _make_hist_scan(20, ["too_old_20.example.com"]),
+        _make_hist_scan(10, ["too_old_10.example.com"]),
+    ]
+
+    inv: dict[str, dict[str, Any]] = {}
+    transitions: dict[str, dict[str, Any]] = {}
+    bootstrap_persistent_inventory(
+        baselines,
+        persisted_inventory=inv,
+        persisted_transitions=transitions,
+    )
+
+    # Scans 10 and 20 are outside the 3-scan window and unavailable
+    assert "too_old_10.example.com" not in inv
+    assert "too_old_20.example.com" not in inv
+
+    # window_start was present in 30, absent in 40 (streak 1), absent in 50 (streak 2 -> removed)
+    assert inv["window_start.example.com"]["status"] == "removed"
+    assert inv["window_start.example.com"]["consecutive_qualifying_absences"] == 2
+    assert inv["window_start.example.com"]["removed_at_scan_run_id"] == 50
+
+    # mid was present in 30, present in 40, absent in 50 (streak 1)
+    assert inv["mid.example.com"]["status"] == "active"
+    assert inv["mid.example.com"]["consecutive_qualifying_absences"] == 1
+
+    # recent was absent in 30, added in 40, present in 50 (active, streak 0)
+    assert inv["recent.example.com"]["status"] == "active"
+    assert inv["recent.example.com"]["consecutive_qualifying_absences"] == 0
+    assert inv["recent.example.com"]["last_seen_scan_run_id"] == 50
+
+
+def test_bootstrap_persistent_inventory_preserves_definite_dns_across_inconclusive():
+    """Verify G3.2 definite DNS preservation across inconclusive observations during bootstrap."""
+    # S3 (300): RESOLVED True
+    # S2 (301): TIMEOUT False (inconclusive)
+    # S1 (302): ERROR False (inconclusive)
+    baselines = [
+        {
+            "scan_run_id": 302,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "dns.example.com", "status": "ERROR", "resolved": False}
+                    ],
+                }
+            },
+        },
+        {
+            "scan_run_id": 301,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "dns.example.com", "status": "TIMEOUT", "resolved": False}
+                    ],
+                }
+            },
+        },
+        {
+            "scan_run_id": 300,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "dns.example.com", "status": "RESOLVED", "resolved": True}
+                    ],
+                }
+            },
+        },
+    ]
+
+    inv: dict[str, dict[str, Any]] = {}
+    bootstrap_persistent_inventory(baselines, persisted_inventory=inv)
+
+    # Definite state from scan 300 is preserved despite intervening inconclusive observations
+    assert inv["dns.example.com"]["status"] == "active"
+    assert inv["dns.example.com"]["last_status"] == "RESOLVED"
+    assert inv["dns.example.com"]["last_resolved"] is True
+
+
+def test_bootstrap_persistent_inventory_provider_change_streak_reset():
+    """Verify provider changes or unknown observations reset absence streak during bootstrap."""
+    baselines = [
+        # S1 (202): crt.sh, host absent (streak becomes 1)
+        {
+            "scan_run_id": 202,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+                    ],
+                }
+            },
+        },
+        # S2 (201): Cert Spotter (different provider -> UNKNOWN observation, resets streak)
+        {
+            "scan_run_id": 201,
+            "reports": {
+                "discover": {
+                    "source": "Cert Spotter",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+                    ],
+                }
+            },
+        },
+        # S3 (200): crt.sh, anchor and flaky present
+        {
+            "scan_run_id": 200,
+            "reports": {
+                "discover": {
+                    "source": "crt.sh",
+                    "truncated": False,
+                    "results": [
+                        {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+                        {"subdomain": "flaky.example.com", "status": "RESOLVED", "resolved": True},
+                    ],
+                }
+            },
+        },
+    ]
+
+    inv: dict[str, dict[str, Any]] = {}
+    bootstrap_persistent_inventory(baselines, persisted_inventory=inv)
+
+    # flaky should have streak=1, NOT streak=2 (because S2 was a provider change resetting streak)
+    assert inv["flaky.example.com"]["status"] == "active"
+    assert inv["flaky.example.com"]["consecutive_qualifying_absences"] == 1
+
+
+def test_bootstrap_persistent_inventory_empty_history_returns_empty():
+    """Verify empty historical inputs produce empty inventory without errors."""
+    inv: dict[str, dict[str, Any]] = {}
+    res = bootstrap_persistent_inventory([], persisted_inventory=inv)
+    assert res == {}
+    assert inv == {}
