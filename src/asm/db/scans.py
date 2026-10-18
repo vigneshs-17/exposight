@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from asm.db.models import Domain, ScanRun, ScanStage
@@ -65,3 +66,42 @@ def enqueue_scan(
     session.flush()
 
     return scan_run
+
+
+def cancel_queued_scans_for_domain(
+    session: Session,
+    domain_id: int,
+    reason: str = "Domain verification is not active.",
+) -> int:
+    """Cancel any queued scan runs for a domain and skip their pending stages.
+
+    Ensures that unverified or lapsed domains do not strand queued scans that
+    block future scans via the uq_scan_runs_active_domain partial unique index.
+    """
+    queued_ids = session.scalars(
+        select(ScanRun.id)
+        .where(ScanRun.domain_id == domain_id, ScanRun.status == "queued")
+        .with_for_update(of=ScanRun)
+    ).all()
+    if queued_ids:
+        session.execute(
+            update(ScanRun)
+            .where(ScanRun.id.in_(queued_ids))
+            .values(
+                status="cancelled",
+                finished_at=func.now(),
+                error=reason,
+            )
+        )
+        session.execute(
+            update(ScanStage)
+            .where(ScanStage.scan_run_id.in_(queued_ids), ScanStage.status == "pending")
+            .values(
+                status="skipped",
+                finished_at=func.now(),
+                duration_ms=0,
+                error=f"Skipped: {reason}",
+            )
+        )
+    return len(queued_ids)
+
