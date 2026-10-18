@@ -11,7 +11,7 @@
 - **Fix**: Replaced `.replace(tzinfo=UTC)` with `.astimezone(UTC)` when timezone offset is present, eliminating spurious 5.5h offsets on non-UTC local environments without weakening time boundary assertions.
 
 ## Item 2: G4 Worker & Owner Lifecycle
-- **Status**: Completed & Verified in Worktree `D:\exposight-g4-wt`
+- **Status**: Completed & Merged (PR #28 merged into `main` at `81702fbeaa1a8a29b472eecaa4da1d6bb4a2d829`)
 - **Failing Before / Passing After**:
   - `tests/test_worker_lifecycle_db.py::test_g4_1_verification_loss_during_exception_cancels_run_instead_of_requeueing`
   - `tests/test_worker_lifecycle_db.py::test_g4_2_stranded_queued_scans_cancelled_on_revocation_and_unblocks_unique_scan`
@@ -31,8 +31,22 @@
 - **Limits**: Kept raw reasons for owner/admin in DB and API responses; preserved audit log role isolation (viewers receive HTTP 403 on `/audit-events`).
 
 ## Item 4: G3.4 Capacity Check Ordering & Truncation Separation
-- **Status**: Completed & Verified in Worktree `D:\exposight-g34-wt`
+- **Status**: Completed & Merged (PR #30 merged into `main` at `266a5be838b58a32c3f89e9f097342936cef05cc`)
 - **Failing Before / Passing After**: `tests/test_change_detection.py::test_g3_4_capacity_check_ordering_vs_same_scan_removals_and_separate_truncation_metadata`.
 - **Fix**: Reordered change detection in `src/asm/changes.py` so Section 2b removals run before Section 2a additions, immediately freeing active slots for new hosts or reappearances occurring within the same scan. Separated inventory capacity metadata (`inventory_capacity_exceeded = True`, `untracked_subdomains_count = len(untracked_subdomains)`) from upstream CT provider truncation, eliminating mutation of provider `truncated=True` or `truncation_reason` so downstream absence tracking is not corrupted. Updated `routes_ui.py` to display inventory cap warnings independently from provider truncation, and updated `worker.py` persistence check.
 - **Limits**: Preserved `max_active_subdomains = 5000` limit, deterministic tombstone retention, and provider truncation semantics.
+
+## Item 5: G2 Frontend Asynchronous Session / Organization Races
+- **Status**: Completed & Verified in Worktree `D:\exposight-g2-wt`
+- **Failing Before / Passing After**:
+  - `tests/browser/test_g2_frontend_races_browser.py::test_g2_1_request_path_org_vs_header_mismatch_browser`
+  - `tests/browser/test_g2_frontend_races_browser.py::test_g2_2_action_continuation_delayed_response_after_org_switch_browser`
+  - `tests/browser/test_g2_frontend_races_browser.py::test_g2_2_action_continuation_delayed_response_after_logout_browser`
+  - `tests/browser/test_g2_frontend_races_browser.py::test_g2_3_load_org_switcher_delayed_after_logout_browser`
+  - `tests/browser/test_g2_frontend_races_browser.py::test_g2_3_401_refresh_retry_delayed_after_org_switch_browser`
+- **Fix**:
+  - G2.1: Derived `X-Origin-Org-Id` in `htmx:configRequest` from the request URL org ID path (`/^\/ui\/orgs\/(\d+)\//`) before falling back to `currentSelectedOrgId`. In `htmx:beforeSwap`, dropped swap if either `pathOrgId` or `reqOrgHeader` mismatches `currentSelectedOrgId` or if they disagree, eliminating header-shadowing and cross-org DOM contamination.
+  - G2.2: Guarded all async action continuations in forms (`#create-org-form`, `#accept-invite-form`, `#add-domain-form`, `#schedule-settings-form`, `#alerts-settings-form`) and buttons (`#btn-check-verification`, `#btn-rotate-token`, `#btn-run-scan`) by capturing `(startEpoch, startOrgId)` and checking `currentSessionEpoch === startEpoch && isAuthenticated && String(currentSelectedOrgId) === String(startOrgId)` after every `await authenticatedFetch` and `await resp.json()`.
+  - G2.3: Guarded `loadOrgSwitcher` after `await authenticatedFetch('/orgs')` and `await resp.json()`. In `htmx:responseError`, guarded post-refresh retry against session epoch changes, sign-out, or org switches away from `pathOrgId`. Guarded `authenticatedFetch` against session epoch changes across `refreshSession`.
+- **Limits**: Preserved server-side RBAC and session token validation (client headers never grant backend access).
 

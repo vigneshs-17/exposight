@@ -63,8 +63,11 @@
       evt.detail.headers['Authorization'] = 'Bearer ' + currentAccessToken;
     }
     evt.detail.headers['X-Session-Epoch'] = String(currentSessionEpoch);
-    if (currentSelectedOrgId) {
-      evt.detail.headers['X-Origin-Org-Id'] = String(currentSelectedOrgId);
+    const path = evt.detail.path || '';
+    const match = /^\/ui\/orgs\/(\d+)\//.exec(path);
+    const orgId = match ? match[1] : currentSelectedOrgId;
+    if (orgId) {
+      evt.detail.headers['X-Origin-Org-Id'] = String(orgId);
     }
   });
 
@@ -108,9 +111,17 @@
     const reqOrgHeader = cfg && cfg.headers ? cfg.headers['X-Origin-Org-Id'] : null;
     const path = cfg ? cfg.path : '';
     const match = path ? /^\/ui\/orgs\/(\d+)\//.exec(path) : null;
-    const reqOrgId = reqOrgHeader || (match ? match[1] : null);
-    if (reqOrgId && currentSelectedOrgId && String(reqOrgId) !== String(currentSelectedOrgId)) {
-      // Late response from previous organization: drop swap to prevent tenant bleeding
+    const pathOrgId = match ? match[1] : null;
+
+    if (pathOrgId && currentSelectedOrgId && String(pathOrgId) !== String(currentSelectedOrgId)) {
+      evt.detail.shouldSwap = false;
+      return;
+    }
+    if (reqOrgHeader && currentSelectedOrgId && String(reqOrgHeader) !== String(currentSelectedOrgId)) {
+      evt.detail.shouldSwap = false;
+      return;
+    }
+    if (pathOrgId && reqOrgHeader && String(pathOrgId) !== String(reqOrgHeader)) {
       evt.detail.shouldSwap = false;
       return;
     }
@@ -130,8 +141,11 @@
     const reqOrgHeader = cfg && cfg.headers ? cfg.headers['X-Origin-Org-Id'] : null;
     const path = cfg ? cfg.path : '';
     const match = path ? /^\/ui\/orgs\/(\d+)\//.exec(path) : null;
-    const reqOrgId = reqOrgHeader || (match ? match[1] : null);
-    if (reqOrgId && currentSelectedOrgId && String(reqOrgId) !== String(currentSelectedOrgId)) {
+    const pathOrgId = match ? match[1] : null;
+    if (pathOrgId && currentSelectedOrgId && String(pathOrgId) !== String(currentSelectedOrgId)) {
+      return;
+    }
+    if (reqOrgHeader && currentSelectedOrgId && String(reqOrgHeader) !== String(currentSelectedOrgId)) {
       return;
     }
 
@@ -140,11 +154,25 @@
       return;
     }
     if (xhr && xhr.status === 401 && !isRefreshing && supabaseClient) {
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = currentSelectedOrgId;
       isRefreshing = true;
       try {
         const { data, error } = await supabaseClient.auth.refreshSession();
         if (error || !data || !data.session) {
           throw error || new Error('Session refresh failed');
+        }
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) {
+          isRefreshing = false;
+          return;
+        }
+        if (pathOrgId && String(pathOrgId) !== String(currentSelectedOrgId)) {
+          isRefreshing = false;
+          return;
+        }
+        if (startOrgId && String(currentSelectedOrgId) !== String(startOrgId)) {
+          isRefreshing = false;
+          return;
         }
         currentAccessToken = data.session.access_token;
         isRefreshing = false;
@@ -162,6 +190,7 @@
             target: evt.detail.target,
             headers: Object.assign({}, cfg.headers, {
               Authorization: 'Bearer ' + currentAccessToken,
+              'X-Session-Epoch': String(currentSessionEpoch),
             }),
           };
           if (swapStyle) {
@@ -171,9 +200,11 @@
         }
       } catch (err) {
         isRefreshing = false;
-        currentAccessToken = null;
-        await supabaseClient.auth.signOut();
-        onUserSignedOut();
+        if (currentSessionEpoch === startEpoch && isAuthenticated) {
+          currentAccessToken = null;
+          await supabaseClient.auth.signOut();
+          onUserSignedOut();
+        }
       }
       return;
     }
@@ -241,9 +272,11 @@
 
   // Load organizations list for current user
   async function loadOrgSwitcher(preferredOrgId) {
-    if (!currentAccessToken) return;
+    if (!currentAccessToken || !isAuthenticated) return;
+    const startEpoch = currentSessionEpoch;
     try {
       const resp = await authenticatedFetch('/orgs');
+      if (currentSessionEpoch !== startEpoch || !isAuthenticated || !currentAccessToken) return;
       // 401: signed out. 403 on /orgs only means a suspended account; the notice is
       // already shown by authenticatedFetch, so no generic error is added.
       if (resp.status === 401 || resp.status === 403) return;
@@ -251,6 +284,7 @@
         throw new Error('Failed to fetch organizations');
       }
       const orgs = await resp.json();
+      if (currentSessionEpoch !== startEpoch || !isAuthenticated || !currentAccessToken) return;
       const orgSelect = document.getElementById('org-switcher-select');
       if (!orgSelect) return;
 
@@ -279,6 +313,7 @@
       orgSelect.value = String(selectedOrgId);
       loadDomainsList(selectedOrgId);
     } catch (err) {
+      if (currentSessionEpoch !== startEpoch || !isAuthenticated || !currentAccessToken) return;
       showError('Failed to load organizations: ' + err.message);
     }
   }
@@ -356,13 +391,21 @@
     if (currentAccessToken) {
       opts.headers['Authorization'] = 'Bearer ' + currentAccessToken;
     }
+    const startEpoch = currentSessionEpoch;
     let resp = await fetch(url, opts);
     if (resp.status === 401 && supabaseClient && !isRefreshing) {
+      if (currentSessionEpoch !== startEpoch || !isAuthenticated) {
+        return resp;
+      }
       isRefreshing = true;
       try {
         const { data, error } = await supabaseClient.auth.refreshSession();
         if (error || !data || !data.session) {
           throw error || new Error('Refresh failed');
+        }
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) {
+          isRefreshing = false;
+          return resp;
         }
         currentAccessToken = data.session.access_token;
         isRefreshing = false;
@@ -370,10 +413,12 @@
         resp = await fetch(url, opts);
       } catch (err) {
         isRefreshing = false;
-        currentAccessToken = null;
-        isAuthenticated = false;
-        await supabaseClient.auth.signOut();
-        onUserSignedOut();
+        if (currentSessionEpoch === startEpoch && isAuthenticated) {
+          currentAccessToken = null;
+          isAuthenticated = false;
+          await supabaseClient.auth.signOut();
+          onUserSignedOut();
+        }
       }
     }
     if (resp.status === 403) {
@@ -461,6 +506,7 @@
     if (form && form.id === 'create-org-form') {
       evt.preventDefault();
       clearError();
+      const startEpoch = currentSessionEpoch;
       const nameInput = form.querySelector('input[name="name"]');
       const name = nameInput ? nameInput.value.trim() : '';
       if (!name) {
@@ -475,15 +521,20 @@
           body: JSON.stringify({ name: name }),
         });
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
           showError(errData.detail || 'Failed to create organization.');
           return;
         }
 
         const newOrg = await resp.json();
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
         await loadOrgSwitcher();
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
         showError('Error creating organization: ' + err.message);
       }
       return;
@@ -493,6 +544,7 @@
     if (form && form.id === 'accept-invite-form') {
       evt.preventDefault();
       clearError();
+      const startEpoch = currentSessionEpoch;
       const tokenInput = form.querySelector('input[name="token"]');
       const token = tokenInput ? tokenInput.value.trim() : '';
       if (!token) {
@@ -507,15 +559,20 @@
           body: JSON.stringify({ token: token }),
         });
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
           showError(errData.detail, 'Could not accept the invite.');
           return;
         }
 
         const joined = await resp.json();
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
         await loadOrgSwitcher(joined.id);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated) return;
         showError('Error accepting invite: ' + err.message);
       }
       return;
@@ -526,6 +583,8 @@
       evt.preventDefault();
       clearError();
       const orgId = form.getAttribute('data-org-id');
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
       const nameInput = form.querySelector('input[name="name"]');
       const name = nameInput ? nameInput.value.trim() : '';
 
@@ -541,14 +600,24 @@
           body: JSON.stringify({ name: name }),
         });
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(errData.detail || 'Failed to add domain.');
           return;
         }
 
         loadDomainsList(orgId);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         showError('Error adding domain: ' + err.message);
       }
       return;
@@ -559,6 +628,8 @@
       evt.preventDefault();
       clearError();
       const orgId = form.getAttribute('data-org-id');
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
       const domainId = form.getAttribute('data-domain-id');
       const intervalSelect = form.querySelector('select[name="interval_hours"]');
       const intervalVal = intervalSelect ? intervalSelect.value : '';
@@ -574,14 +645,24 @@
           }
         );
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(formatErrorMessage(errData.detail, 'Failed to update scan schedule.'));
           return;
         }
 
         loadDomainDetail(orgId, domainId);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         showError('Error updating schedule: ' + err.message);
       }
       return;
@@ -592,6 +673,8 @@
       evt.preventDefault();
       clearError();
       const orgId = form.getAttribute('data-org-id');
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
       const domainId = form.getAttribute('data-domain-id');
       const enabledCheckbox = form.querySelector('#alerts-enabled-checkbox');
       const alertsEnabled = enabledCheckbox ? enabledCheckbox.checked : false;
@@ -617,14 +700,24 @@
           }
         );
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(formatErrorMessage(errData.detail, 'Failed to update alert settings.'));
           return;
         }
 
         loadDomainDetail(orgId, domainId);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         showError('Error updating alert settings: ' + err.message);
       }
       return;
@@ -703,6 +796,8 @@
       clearError();
       const orgId = target.getAttribute('data-org-id');
       const domainId = target.getAttribute('data-domain-id');
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
 
       target.disabled = true;
       const originalBtnText = target.textContent;
@@ -717,22 +812,38 @@
         target.disabled = false;
         target.textContent = originalBtnText;
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         if (resp.status === 429) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(errData.detail || 'Verification check is on cooldown.');
           return;
         }
 
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(errData.detail || 'Verification check failed.');
           return;
         }
 
         const data = await resp.json();
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
 
         // Refresh domain detail FIRST, then render check_outcome/check_detail into #verification-check-result AFTER swap finishes
         loadDomainDetail(orgId, domainId).then(function () {
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           const freshResultContainer = document.getElementById('verification-check-result');
           if (freshResultContainer) {
             while (freshResultContainer.firstChild) {
@@ -759,6 +870,9 @@
       } catch (err) {
         target.disabled = false;
         target.textContent = originalBtnText;
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         showError('Verification check error: ' + err.message);
       }
       return;
@@ -770,6 +884,8 @@
       clearError();
       const orgId = target.getAttribute('data-org-id');
       const domainId = target.getAttribute('data-domain-id');
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
 
       if (!window.confirm('Rotating the token will invalidate the current DNS verification record. Continue?')) {
         return;
@@ -781,8 +897,15 @@
           { method: 'POST' }
         );
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+            return;
+          }
           showError(errData.detail || 'Token rotation failed.');
           return;
         }
@@ -790,6 +913,9 @@
         // Refresh domain detail
         loadDomainDetail(orgId, domainId);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         showError('Token rotation error: ' + err.message);
       }
       return;
@@ -852,6 +978,9 @@
       const orgId = target.getAttribute('data-org-id');
       const domainId = target.getAttribute('data-domain-id');
 
+      const startEpoch = currentSessionEpoch;
+      const startOrgId = orgId;
+
       target.disabled = true;
       const originalBtnText = target.textContent;
       target.textContent = 'Starting scan...';
@@ -871,30 +1000,43 @@
           }
         );
 
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
+
         target.disabled = false;
         target.textContent = originalBtnText;
 
         if (resp.status === 409) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) return;
           showError(errData.detail || 'A scan is already active for this domain.');
           return;
         }
 
         if (resp.status === 422) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) return;
           showError(errData.detail || 'Domain ownership verification required before scanning.');
           return;
         }
 
         if (!resp.ok) {
           const errData = await resp.json().catch(function () { return {}; });
+          if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) return;
           showError(errData.detail || 'Failed to start scan.');
           return;
         }
 
         const scanData = await resp.json();
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         loadScanDetail(orgId, scanData.id);
       } catch (err) {
+        if (currentSessionEpoch !== startEpoch || !isAuthenticated || String(currentSelectedOrgId) !== String(startOrgId)) {
+          return;
+        }
         target.disabled = false;
         target.textContent = originalBtnText;
         showError('Run scan error: ' + err.message);
