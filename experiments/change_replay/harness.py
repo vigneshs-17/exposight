@@ -28,7 +28,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from asm.changes import detect_changes, evaluate_removal_eligibility
+from asm.changes import (
+    bootstrap_persistent_inventory,
+    detect_changes,
+    evaluate_removal_eligibility,
+)
 from asm.headers_inspect import extract_header_info
 from asm.models import (
     CertInfo,
@@ -437,32 +441,114 @@ def replay_candidate(
     seed: int,
     n_scans: int = N_SCANS,
     noise_scans: set[int] | None = None,
+    max_active: int = 5000,
+    max_tombstones: int = 1000,
 ) -> RunResult:
-    """Replay n_scans consecutive scans; classify changes using candidate multi-scan lookback."""
+    """Replay n_scans consecutive scans using production persistent discovery inventory."""
     noise = Noise(probs, seed)
     truths = [truth_at(t) for t in range(n_scans)]
     clean = [observe(truths[t], t, Noise({}, seed)) for t in range(n_scans)]
     quiet = Noise({}, seed)
-    noisy = [observe(truths[t], t, noise if noise_scans is None or t in noise_scans else quiet)
-             for t in range(n_scans)]
+    noisy = [
+        observe(truths[t], t, noise if noise_scans is None or t in noise_scans else quiet)
+        for t in range(n_scans)
+    ]
+
+    clean_inv: dict[str, dict[str, Any]] = {}
+    noisy_inv: dict[str, dict[str, Any]] = {}
+
+    bootstrap_persistent_inventory(
+        [{"scan_run_id": 0, "reports": clean[0]}],
+        persisted_inventory=clean_inv,
+        max_active_subdomains=max_active,
+        max_tombstones=max_tombstones,
+    )
+    bootstrap_persistent_inventory(
+        [{"scan_run_id": 0, "reports": noisy[0]}],
+        persisted_inventory=noisy_inv,
+        max_active_subdomains=max_active,
+        max_tombstones=max_tombstones,
+    )
+
     detected: dict[str, int | None] = {ev.name: None for ev in EVENTS if ev.scan < n_scans}
     false_changes: list[dict[str, Any]] = []
     asset_scans = 0
+
     for t in range(1, n_scans):
         asset_scans += sum(h.in_ct for h in truths[t].values())
         clean_history = [clean[i] for i in range(t - 1, max(-1, t - 4), -1)]
         noisy_history = [noisy[i] for i in range(t - 1, max(-1, t - 4), -1)]
-        clean_keys = {change_key(c) for c in candidate_compare(clean_history, clean[t])}
-        for c in candidate_compare(noisy_history, noisy[t]):
+
+        clean_hist_entries = [
+            {"scan_run_id": t - 1 - idx, "reports": rep}
+            for idx, rep in enumerate(clean_history[:3])
+        ]
+        noisy_hist_entries = [
+            {"scan_run_id": t - 1 - idx, "reports": rep}
+            for idx, rep in enumerate(noisy_history[:3])
+        ]
+
+        clean_disc = clean[t].get("discover") or {}
+        clean_trunc = bool(clean_disc.get("truncated", False))
+        clean_empty = not bool(clean_disc.get("results"))
+        clean_allow_rem = not clean_trunc and not clean_empty
+
+        noisy_disc = noisy[t].get("discover") or {}
+        noisy_trunc = bool(noisy_disc.get("truncated", False))
+        noisy_empty = not bool(noisy_disc.get("results"))
+        noisy_allow_rem = not noisy_trunc and not noisy_empty
+
+        all_clean = detect_changes(
+            clean_history[0],
+            clean[t],
+            allow_removal=clean_allow_rem,
+            historical_baselines=clean_hist_entries,
+            baseline_scan_run_id=t - 1,
+            persisted_inventory=clean_inv,
+            current_scan_run_id=t,
+            max_active_subdomains=max_active,
+            max_tombstones=max_tombstones,
+        )
+        all_noisy = detect_changes(
+            noisy_history[0],
+            noisy[t],
+            allow_removal=noisy_allow_rem,
+            historical_baselines=noisy_hist_entries,
+            baseline_scan_run_id=t - 1,
+            persisted_inventory=noisy_inv,
+            current_scan_run_id=t,
+            max_active_subdomains=max_active,
+            max_tombstones=max_tombstones,
+        )
+
+        clean_keys = {change_key(c) for c in all_clean}
+        for c in all_noisy:
             k = change_key(c)
-            ev = next((e for e in EVENTS if e.key == k and e.scan <= t
-                       and e.name in detected and detected[e.name] is None), None)
+            ev = next(
+                (
+                    e
+                    for e in EVENTS
+                    if e.key == k
+                    and e.scan <= t
+                    and e.name in detected
+                    and detected[e.name] is None
+                ),
+                None,
+            )
             if ev is not None:
                 detected[ev.name] = t
             elif k not in clean_keys:
-                false_changes.append({"scan": t, "change_type": c["change_type"],
-                                      "asset": c["asset"], "detail": c["detail"],
-                                      "severity": c["severity"], "category": c["category"],
-                                      "alert_eligible": alert_eligible(c)})
+                false_changes.append(
+                    {
+                        "scan": t,
+                        "change_type": c["change_type"],
+                        "asset": c["asset"],
+                        "detail": c["detail"],
+                        "severity": c["severity"],
+                        "category": c["category"],
+                        "alert_eligible": alert_eligible(c),
+                    }
+                )
+
     false_changes.sort(key=lambda c: (c["scan"], c["change_type"], c["asset"], c["detail"]))
     return RunResult(seed, asset_scans, false_changes, detected, noise.fired)

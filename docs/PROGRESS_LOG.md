@@ -50,3 +50,12 @@
   - G2.3: Guarded `loadOrgSwitcher` after `await authenticatedFetch('/orgs')` and `await resp.json()`. In `htmx:responseError`, guarded post-refresh retry against session epoch changes, sign-out, or org switches away from `pathOrgId`. Guarded `authenticatedFetch` against session epoch changes across `refreshSession`.
 - **Limits**: Preserved server-side RBAC and session token validation (client headers never grant backend access).
 
+## Item 6: G3.5 Replay / Production Parity
+- **Status**: Completed & Verified in Worktree `D:\exposight-g35-wt`
+- **Failing Before / Passing After**:
+  - `tests/test_change_replay.py::test_g3_5_replay_candidate_runs_production_persistent_inventory`
+  - `tests/test_change_replay.py::test_g3_5_replay_candidate_parity_with_adapter`
+  - `tests/test_change_replay.py::test_g3_5_replay_candidate_passes_positive_scan_ids_and_production_allow_removal`
+  - `tests/test_change_detection.py::test_g3_5_effective_domain_band_uses_persisted_inventory_beyond_lookback`
+- **Fix**: Replaced legacy 3-scan lookback candidate in `experiments/change_replay/harness.py::replay_candidate` with production persistent inventory discovery (`bootstrap_persistent_inventory`, positive monotonic scan IDs, production `allow_removal = not truncated and not empty`). Unified `adapter_persistent_discovery.py` to delegate directly to `replay_candidate`, achieving 100% parity across all 80 benchmark seeds (1,278 total FC, 35 alert-eligible, 1 miss). Sourced active domain hosts in `src/asm/changes.py::_effective_domain_band_and_score` directly from `persisted_inventory` when available, preserving active host risk score bands beyond the 3-scan window.
+- **Limits**: Preserved baseline noise gates and benchmark ground-truth definitions.

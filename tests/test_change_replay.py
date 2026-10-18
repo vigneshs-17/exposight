@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 from collections import Counter
+from typing import Any
 
 import pytest
 
@@ -230,3 +231,78 @@ def test_candidate_sustained_https_loss_detected_with_deliberate_delay():
     c3 = harness.candidate_compare([s2, s1, s0], s3)
     lost3 = [c for c in c3 if c["change_type"] == "HTTPS_LOST"]
     assert len(lost3) == 0
+
+
+def test_g3_5_replay_candidate_runs_production_persistent_inventory():
+    """G3.5: replay_candidate must run production persistent discovery inventory.
+
+    Before G3.5, replay_candidate invoked candidate_compare without persisted_inventory,
+    which evicted historical hosts after 3 scans and missed Seed 43's subdomain_removed.
+    With production persistent inventory, Seed 43's subdomain_removed is detected at scan 14.
+    """
+    res = harness.replay_candidate(harness.REALISTIC, seed=43)
+    assert res.detected["subdomain_removed"] == 14
+
+
+def test_g3_5_replay_candidate_parity_with_adapter():
+    """G3.5: replay_candidate and adapter_persistent_discovery produce identical results."""
+    from experiments.change_replay.adapter_persistent_discovery import (
+        run_persistent_discovery_replay,
+    )
+
+    for seed in (1, 2, 43, 79):
+        res_cand = harness.replay_candidate(harness.REALISTIC, seed=seed)
+        res_adap = run_persistent_discovery_replay(harness.REALISTIC, seed=seed)
+        assert res_cand.asset_scans == res_adap.asset_scans
+        assert res_cand.detected == res_adap.detected
+        assert res_cand.false_changes == res_adap.false_changes
+
+
+def test_g3_5_replay_candidate_passes_positive_scan_ids_and_production_allow_removal(
+    monkeypatch,
+):
+    """G3.5: replay_candidate passes positive monotonic scan IDs and production allow_removal."""
+    recorded_calls: list[dict[str, Any]] = []
+    orig_detect = asm.changes.detect_changes
+
+    def spy_detect(*args, **kwargs):
+        recorded_calls.append(
+            {
+                "allow_removal": kwargs.get("allow_removal"),
+                "baseline_scan_run_id": kwargs.get("baseline_scan_run_id"),
+                "current_scan_run_id": kwargs.get("current_scan_run_id"),
+                "hist_ids": [
+                    h.get("scan_run_id")
+                    for h in (kwargs.get("historical_baselines") or [])
+                ],
+            }
+        )
+        return orig_detect(*args, **kwargs)
+
+    monkeypatch.setattr(harness, "detect_changes", spy_detect)
+
+    # Replay 3 scans with ct_truncated in scan 2
+    harness.replay_candidate(
+        {"ct_truncated": 1.0},
+        seed=1,
+        n_scans=4,
+        noise_scans={2},
+    )
+
+    # Check that historical scan IDs are non-negative and match baseline_scan_run_id
+    for call in recorded_calls:
+        b_id = call["baseline_scan_run_id"]
+        c_id = call["current_scan_run_id"]
+        hist_ids = call["hist_ids"]
+        assert c_id > b_id >= 0, f"Expected c_id ({c_id}) > b_id ({b_id}) >= 0"
+        for hid in hist_ids:
+            assert hid >= 0, f"Expected non-negative historical ID, got: {hid}"
+        if hist_ids:
+            assert hist_ids[0] == b_id, f"Expected hist_ids[0] ({hist_ids[0]}) == b_id ({b_id})"
+
+    # Check scan 2 (noise_scans={2}): noisy call has allow_removal == False
+    scan2_calls = [c for c in recorded_calls if c["current_scan_run_id"] == 2]
+    assert len(scan2_calls) == 2  # clean and noisy
+    assert False in [c["allow_removal"] for c in scan2_calls]
+
+
