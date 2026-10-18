@@ -96,7 +96,11 @@ def test_schedule_enable_from_null_sets_next_scan_at_now(
     assert data["scan_interval_hours"] == 24
     assert data["next_scan_at"] is not None
 
-    next_dt = datetime.fromisoformat(data["next_scan_at"]).replace(tzinfo=UTC)
+    next_dt = datetime.fromisoformat(data["next_scan_at"])
+    if next_dt.tzinfo is None:
+        next_dt = next_dt.replace(tzinfo=UTC)
+    else:
+        next_dt = next_dt.astimezone(UTC)
     assert t_before <= next_dt <= t_after
 
 
@@ -128,7 +132,11 @@ def test_schedule_change_existing_interval_advances_next_scan_at(
     assert data["scan_interval_hours"] == 48
     assert data["next_scan_at"] is not None
 
-    next_dt = datetime.fromisoformat(data["next_scan_at"]).replace(tzinfo=UTC)
+    next_dt = datetime.fromisoformat(data["next_scan_at"])
+    if next_dt.tzinfo is None:
+        next_dt = next_dt.replace(tzinfo=UTC)
+    else:
+        next_dt = next_dt.astimezone(UTC)
     # Proves interval change does NOT trigger an immediate scan
     assert t_before <= next_dt <= t_after
 
