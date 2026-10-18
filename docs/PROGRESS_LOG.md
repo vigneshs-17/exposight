@@ -25,8 +25,14 @@
   - G4.4: Removed broad exception swallowing around `domain_subdomains` `SELECT`; DB errors propagate and fail the scan attempt instead of fabricating absence or corrupting inventory.
 
 ## Item 3: G5.1 Operator Verification Reasons Privacy
-- **Status**: Completed & Verified in Worktree `D:\exposight-g51-wt`
+- **Status**: Completed & Merged (PR #29 merged into `main` at `3131020f0654259bdac154ae353874c3e2c537d5`)
 - **Failing Before / Passing After**: `tests/test_viewer_privacy_db.py::test_g5_1_operator_verification_reasons_redacted_for_viewers_and_notifications_db`.
 - **Fix**: Redacted/hid operator verification reasons from viewer roles in `_domain_to_read` and `_domain_to_verification_read` (returning `None` for viewers while keeping raw reasons for owner/admin). Applied `redact_sensitive_text` to operator reason in `admin.py` `cancel_queued_scans_for_domain` and `queue_domain_alert` outbox notifications, and added defense-in-depth body redaction in `_notification_to_read` for viewers. Updated OpenAPI schema descriptions in `DomainRead`, `DomainVerificationRead`, and `AlertNotificationRead`.
 - **Limits**: Kept raw reasons for owner/admin in DB and API responses; preserved audit log role isolation (viewers receive HTTP 403 on `/audit-events`).
+
+## Item 4: G3.4 Capacity Check Ordering & Truncation Separation
+- **Status**: Completed & Verified in Worktree `D:\exposight-g34-wt`
+- **Failing Before / Passing After**: `tests/test_change_detection.py::test_g3_4_capacity_check_ordering_vs_same_scan_removals_and_separate_truncation_metadata`.
+- **Fix**: Reordered change detection in `src/asm/changes.py` so Section 2b removals run before Section 2a additions, immediately freeing active slots for new hosts or reappearances occurring within the same scan. Separated inventory capacity metadata (`inventory_capacity_exceeded = True`, `untracked_subdomains_count = len(untracked_subdomains)`) from upstream CT provider truncation, eliminating mutation of provider `truncated=True` or `truncation_reason` so downstream absence tracking is not corrupted. Updated `routes_ui.py` to display inventory cap warnings independently from provider truncation, and updated `worker.py` persistence check.
+- **Limits**: Preserved `max_active_subdomains = 5000` limit, deterministic tombstone retention, and provider truncation semantics.
 

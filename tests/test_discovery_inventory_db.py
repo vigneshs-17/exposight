@@ -680,8 +680,8 @@ def test_active_host_capacity_boundary_and_reporting_db(clean_db, db_engine):
 
     # 3. Report exposes the coverage limitation accurately
     disc = rep["discover"]
-    assert disc["truncated"] is True
-    assert disc["truncation_reason"] == "inventory_capacity_exceeded"
+    assert disc.get("inventory_capacity_exceeded") is True
+    assert disc.get("truncated") is False
     assert disc["untracked_subdomains_count"] == 2
 
     # 4. Subsequent scan where untracked host disappears: NO REMOVED_SUBDOMAIN fabricated
@@ -1346,8 +1346,8 @@ def test_capacity_limit_persisted_to_scan_results_and_rendered_in_html_db(clean_
         # 1. Assert metadata persisted to scan_results under the lock
         sr = session.query(ScanResult).filter_by(scan_run_id=run_id, stage="discover").first()
         assert sr is not None
-        assert sr.report.get("truncated") is True
-        assert sr.report.get("truncation_reason") == "inventory_capacity_exceeded"
+        assert sr.report.get("inventory_capacity_exceeded") is True
+        assert sr.report.get("truncated") is False
         assert sr.report.get("untracked_subdomains_count") == 1
 
         # 2. Assert HTML rendering via TestClient with session dependency override

@@ -1377,11 +1377,14 @@ class ASMWorker:
                         change_detection = None
                         changes = None
 
-                    # Persist discover report capacity metadata if truncated
+                    # Persist discover report capacity metadata if inventory capacity was exceeded
                     disc_rep = reports.get("discover")
                     if (
                         isinstance(disc_rep, dict)
-                        and disc_rep.get("truncation_reason") == "inventory_capacity_exceeded"
+                        and (
+                            disc_rep.get("inventory_capacity_exceeded")
+                            or disc_rep.get("truncation_reason") == "inventory_capacity_exceeded"
+                        )
                     ):
                         session.execute(
                             text(

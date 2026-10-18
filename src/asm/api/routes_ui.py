@@ -333,7 +333,7 @@ def get_org_scan_detail_ui(
 
     discover_result = result_map.get("discover")
     discover_report = discover_result.report if discover_result else None
-    truncation_notice: str | None = None
+    truncation_notices: list[str] = []
     if discover_report and discover_report.get("truncated"):
         reason = discover_report.get("truncation_reason")
         counts = discover_report.get("counts", {})
@@ -342,29 +342,46 @@ def get_org_scan_detail_ui(
         source = discover_report.get("source", "CT logs")
 
         if reason == "hostname_cap_exceeded":
-            truncation_notice = (
+            truncation_notices.append(
                 f"Discovery capped at {selected_count} hostnames ({observed_count} observed). "
                 "Remaining hostnames were excluded from scanning."
             )
         elif reason == "provider_entry_limit":
-            truncation_notice = (
+            truncation_notices.append(
                 f"Provider ({source}) entry or page limit reached. Discovery may be incomplete."
             )
         elif reason == "provider_and_hostname_cap_exceeded":
-            truncation_notice = (
+            truncation_notices.append(
                 f"Provider ({source}) limit reached and host cap applied "
                 f"({selected_count} selected from {observed_count} observed)."
             )
         elif reason == "inventory_capacity_exceeded":
             untracked = discover_report.get("untracked_subdomains_count", 0)
-            truncation_notice = (
+            truncation_notices.append(
                 f"Active inventory cap reached. {untracked} observed subdomain(s) "
                 "could not be retained in discovery inventory."
             )
         else:
-            truncation_notice = (
+            truncation_notices.append(
                 "Discovery results were truncated due to resource or provider limits."
             )
+
+    _cap_exceeded = (
+        discover_report.get("inventory_capacity_exceeded")
+        or (
+            not discover_report.get("truncated")
+            and discover_report.get("truncation_reason") == "inventory_capacity_exceeded"
+        )
+    ) if discover_report else False
+    if _cap_exceeded:
+        if not any("Active inventory cap reached" in n for n in truncation_notices):
+            untracked = discover_report.get("untracked_subdomains_count", 0)
+            truncation_notices.append(
+                f"Active inventory cap reached. {untracked} observed subdomain(s) "
+                "could not be retained in discovery inventory."
+            )
+
+    truncation_notice: str | None = " ".join(truncation_notices) if truncation_notices else None
 
     changes_stmt = (
         select(ScanChange)

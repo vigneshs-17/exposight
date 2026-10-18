@@ -5205,3 +5205,105 @@ def test_bootstrap_persistent_inventory_empty_history_returns_empty():
     res = bootstrap_persistent_inventory([], persisted_inventory=inv)
     assert res == {}
     assert inv == {}
+
+
+def test_g3_4_capacity_check_ordering_vs_same_scan_removals_and_separate_truncation_metadata():
+    """G3.4: Section 2b removals run before Section 2a additions.
+
+    Also verifies capacity metadata is separate from provider truncation.
+    """
+    # 1. Capacity starvation before removals:
+    # Inventory has 2 active hosts at max_active_subdomains=2.
+    # old.example.com has 1 qualifying absence.
+    inv: dict[str, dict[str, Any]] = {
+        "anchor.example.com": {
+            "subdomain": "anchor.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 0,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 2,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+        },
+        "old.example.com": {
+            "subdomain": "old.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 1,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 1,
+            "last_qualifying_absence_scan_run_id": 2,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+        },
+    }
+
+    # Scan 3: old.example.com is absent (qualifying absence #2 -> removed),
+    # replacement.example.com is present. Provider did NOT truncate.
+    rep3 = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": False,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": "replacement.example.com", "status": "RESOLVED", "resolved": True},
+            ],
+        }
+    }
+
+    changes = detect_changes(
+        {},
+        rep3,
+        persisted_inventory=inv,
+        current_scan_run_id=3,
+        max_active_subdomains=2,
+    )
+
+    change_types = {(c["change_type"], c["asset"]) for c in changes}
+    # old.example.com was removed in Section 2b
+    assert ("REMOVED_SUBDOMAIN", "old.example.com") in change_types
+    assert inv["old.example.com"]["status"] == "removed"
+
+    # Because Section 2b ran before Section 2a, replacement.example.com is admitted
+    assert "replacement.example.com" in inv
+    assert inv["replacement.example.com"]["status"] == "active"
+    assert ("NEW_SUBDOMAIN", "replacement.example.com") in change_types
+    assert sum(1 for v in inv.values() if v["status"] == "active") == 2
+
+    # Provider truncation must remain False (not mutated in-place)
+    assert rep3["discover"]["truncated"] is False
+    assert rep3["discover"].get("inventory_capacity_exceeded", False) is False
+
+    # 2. Genuine capacity overflow:
+    # Inventory now has 2 active hosts. Scan 4 has 2 existing + 1 overflow host.
+    rep4 = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": False,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": "replacement.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": "overflow.example.com", "status": "RESOLVED", "resolved": True},
+            ],
+        }
+    }
+
+    changes4 = detect_changes(
+        {},
+        rep4,
+        persisted_inventory=inv,
+        current_scan_run_id=4,
+        max_active_subdomains=2,
+    )
+
+    # overflow.example.com not admitted
+    assert "overflow.example.com" not in inv
+    assert not any(c["asset"] == "overflow.example.com" for c in changes4)
+    assert sum(1 for v in inv.values() if v["status"] == "active") == 2
+
+    # Provider truncated remains False; separate inventory capacity metadata is recorded
+    assert rep4["discover"]["truncated"] is False
+    assert rep4["discover"].get("inventory_capacity_exceeded") is True
+    assert rep4["discover"].get("untracked_subdomains_count") == 1
+
