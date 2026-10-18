@@ -460,14 +460,48 @@ def _find_latest_definite_port_observation(
     return None
 
 
+def _tombstone_retention_sort_key(
+    sub: str, item: dict[str, Any]
+) -> tuple[int, int, float, str, int]:
+    """Deterministic retention sort key for removed tombstones (higher values = newer).
+
+    Matches the SQL retention order in ASMWorker._mark_run_final:
+    1. removed_at_scan_run_id DESC NULLS LAST
+    2. last_applied_scan_run_id DESC NULLS LAST
+    3. updated_at DESC NULLS LAST
+    4. subdomain DESC (intrinsic tie-breaker independent of DB row-return/insertion order)
+    5. id DESC NULLS LAST
+    """
+    rem_id = item.get("removed_at_scan_run_id")
+    app_id = item.get("last_applied_scan_run_id")
+    upd = item.get("updated_at")
+    if isinstance(upd, datetime):
+        upd_ts = (
+            upd.timestamp() if upd.tzinfo is not None else upd.replace(tzinfo=UTC).timestamp()
+        )
+    elif isinstance(upd, (int, float)):
+        upd_ts = float(upd)
+    else:
+        upd_ts = -1.0
+    row_id = item.get("id")
+    return (
+        int(rem_id) if isinstance(rem_id, int) else -1,
+        int(app_id) if isinstance(app_id, int) else -1,
+        upd_ts,
+        sub,
+        int(row_id) if isinstance(row_id, int) else -1,
+    )
+
+
 def detect_changes(
     baseline_reports: dict[str, dict[str, Any]],
     new_reports: dict[str, dict[str, Any]],
-    allow_removal: bool = True,
     *,
+    allow_removal: bool = True,
     historical_baselines: list[dict[str, Any]] | None = None,
     baseline_scan_run_id: int | None = None,
     persisted_inventory: dict[str, dict[str, Any]] | None = None,
+    persisted_transitions: dict[str, dict[str, Any]] | None = None,
     current_scan_run_id: int | None = None,
     max_active_subdomains: int = 5000,
     max_tombstones: int = 1000,
@@ -482,6 +516,9 @@ def detect_changes(
         historical_baselines: Optional list of up to 3 previous successful scans
             (ordered newest to oldest) with their reports and scan IDs.
         baseline_scan_run_id: Optional ID of the immediate baseline scan run.
+        persisted_inventory: Optional mutable inventory map retained across scans.
+        persisted_transitions: Optional out-map populated with every inventory row
+            created or mutated during this scan before tombstone pruning.
 
     Returns:
         List of structured change dictionaries.
@@ -578,6 +615,10 @@ def detect_changes(
     if persisted_inventory is not None:
         untracked_subdomains: list[str] = []
 
+        def _record_transition(sub_key: str, entry: dict[str, Any]) -> None:
+            if persisted_transitions is not None:
+                persisted_transitions[sub_key] = dict(entry)
+
         # 2a. Additions, Reappearances, and DNS Resolution Transitions
         for sub, n_entry in new_subs.items():
             n_stat = n_entry.get("status")
@@ -602,6 +643,7 @@ def detect_changes(
                             "last_resolved": n_res,
                             "last_applied_scan_run_id": current_scan_run_id,
                         }
+                        _record_transition(sub, persisted_inventory[sub])
                     else:
                         untracked_subdomains.append(sub)
                 else:
@@ -619,6 +661,7 @@ def detect_changes(
                             "last_resolved": n_res,
                             "last_applied_scan_run_id": current_scan_run_id,
                         }
+                        _record_transition(sub, persisted_inventory[sub])
                         change_dict = {
                             "change_type": "NEW_SUBDOMAIN",
                             "category": "exposure",
@@ -651,6 +694,7 @@ def detect_changes(
                         item["last_resolved"] = n_res
                         item["removed_at_scan_run_id"] = None
                         item["last_applied_scan_run_id"] = current_scan_run_id
+                        _record_transition(sub, item)
                         change_dict = {
                             "change_type": "NEW_SUBDOMAIN",
                             "category": "exposure",
@@ -680,6 +724,7 @@ def detect_changes(
                     item["last_status"] = n_stat
                     item["last_resolved"] = n_res
                     item["last_applied_scan_run_id"] = current_scan_run_id
+                    _record_transition(sub, item)
 
                     if b_stat == "NXDOMAIN" and n_stat == "RESOLVED" and n_res:
                         change_dict = {
@@ -721,9 +766,10 @@ def detect_changes(
             new_reports["discover"]["truncation_reason"] = "inventory_capacity_exceeded"
             new_reports["discover"]["untracked_subdomains_count"] = len(untracked_subdomains)
 
-        # 2b. Removals
+        # 2b. Removals (iterate in deterministic subdomain order independent of DB row order)
         if not is_first_baseline:
-            for sub, item in list(persisted_inventory.items()):
+            for sub in sorted(persisted_inventory.keys()):
+                item = persisted_inventory[sub]
                 if item.get("status") != "active":
                     continue
                 if sub in new_subs:
@@ -736,7 +782,9 @@ def detect_changes(
                 if obs != "QUALIFYING_ABSENCE":
                     # An unknown observation (provider switch, truncated scan, or empty scan)
                     # retains the host's presence anchor but breaks the consecutive absence streak.
-                    item["consecutive_qualifying_absences"] = 0
+                    if item.get("consecutive_qualifying_absences", 0) != 0:
+                        item["consecutive_qualifying_absences"] = 0
+                        _record_transition(sub, item)
                     continue
 
                 if allow_removal:
@@ -769,10 +817,17 @@ def detect_changes(
                             change_dict["baseline_scan_run_id"] = base_id
                         changes.append(change_dict)
 
-        # 2c. Tombstone pruning
+                    _record_transition(sub, item)
+
+        # 2c. Tombstone pruning (retain newest max_tombstones deterministically)
         tombstones = [k for k, v in persisted_inventory.items() if v.get("status") == "removed"]
         if len(tombstones) > max_tombstones:
-            for k in tombstones[: len(tombstones) - max_tombstones]:
+            tombstones_newest_first = sorted(
+                tombstones,
+                key=lambda k: _tombstone_retention_sort_key(k, persisted_inventory[k]),
+                reverse=True,
+            )
+            for k in tombstones_newest_first[max_tombstones:]:
                 del persisted_inventory[k]
     else:
         # 2a. Additions (NEW_SUBDOMAIN) and DNS Resolution Changes

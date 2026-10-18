@@ -4373,3 +4373,130 @@ def test_domain_inventory_empty_discovery_distinguishes_empty_missing_and_confir
     assert dom_dec[0]["previous_state"] == {"band": "HIGH", "score": 17}
     assert dom_dec[0]["new_state"] == {"band": "LOW", "score": 9}
 
+
+def test_detect_changes_tombstone_pruning_preserves_newest_and_records_transitions():
+    """In-memory tombstone pruning retains newest tombstones regardless of dict insertion order
+    and records all active->removed transitions before evicting excess tombstones.
+    """
+    rep = {
+        "discover": {
+            "domain": "example.com",
+            "source": "crt.sh",
+            "truncated": False,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+            ],
+        }
+    }
+
+    # Victim inserted BEFORE 3 older tombstones (max_tombstones=3)
+    inv_forward = {
+        "victim.example.com": {
+            "subdomain": "victim.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 1,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 1,
+            "last_qualifying_absence_scan_run_id": 2,
+            "removed_at_scan_run_id": None,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+            "last_applied_scan_run_id": 2,
+        },
+        "anchor.example.com": {
+            "subdomain": "anchor.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 0,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 2,
+            "last_qualifying_absence_scan_run_id": None,
+            "removed_at_scan_run_id": None,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+            "last_applied_scan_run_id": 2,
+        },
+        "tomb-1.example.com": {
+            "subdomain": "tomb-1.example.com",
+            "status": "removed",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 2,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 1,
+            "last_qualifying_absence_scan_run_id": 2,
+            "removed_at_scan_run_id": 2,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+            "last_applied_scan_run_id": 2,
+        },
+        "tomb-2.example.com": {
+            "subdomain": "tomb-2.example.com",
+            "status": "removed",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 2,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 1,
+            "last_qualifying_absence_scan_run_id": 2,
+            "removed_at_scan_run_id": 2,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+            "last_applied_scan_run_id": 2,
+        },
+        "tomb-3.example.com": {
+            "subdomain": "tomb-3.example.com",
+            "status": "removed",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 2,
+            "first_seen_scan_run_id": 1,
+            "last_seen_scan_run_id": 1,
+            "last_qualifying_absence_scan_run_id": 2,
+            "removed_at_scan_run_id": 2,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+            "last_applied_scan_run_id": 2,
+        },
+    }
+    inv_reverse = {k: dict(v) for k, v in reversed(list(inv_forward.items()))}
+
+    transitions_f: dict[str, dict] = {}
+    transitions_r: dict[str, dict] = {}
+
+    ch_f = detect_changes(
+        rep,
+        rep,
+        allow_removal=True,
+        persisted_inventory=inv_forward,
+        persisted_transitions=transitions_f,
+        current_scan_run_id=3,
+        max_tombstones=3,
+    )
+    ch_r = detect_changes(
+        rep,
+        rep,
+        allow_removal=True,
+        persisted_inventory=inv_reverse,
+        persisted_transitions=transitions_r,
+        current_scan_run_id=3,
+        max_tombstones=3,
+    )
+
+    assert [c["asset"] for c in ch_f if c["change_type"] == "REMOVED_SUBDOMAIN"] == [
+        "victim.example.com"
+    ]
+    assert [c["asset"] for c in ch_r if c["change_type"] == "REMOVED_SUBDOMAIN"] == [
+        "victim.example.com"
+    ]
+    # Victim (removed at scan 3) must be retained in both forward and reverse dicts;
+    # oldest/lowest tie-breaker (tomb-1, removed at scan 2) must be evicted.
+    assert set(inv_forward.keys()) == set(inv_reverse.keys())
+    assert set(inv_forward.keys()) == {
+        "anchor.example.com",
+        "victim.example.com",
+        "tomb-2.example.com",
+        "tomb-3.example.com",
+    }
+    assert inv_forward["victim.example.com"]["status"] == "removed"
+    assert transitions_f["victim.example.com"]["status"] == "removed"
+    assert "tomb-1.example.com" not in transitions_f
+

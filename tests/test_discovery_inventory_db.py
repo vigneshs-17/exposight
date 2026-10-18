@@ -1360,3 +1360,463 @@ def test_capacity_limit_persisted_to_scan_results_and_rendered_in_html_db(clean_
             )
         finally:
             app.dependency_overrides.clear()
+
+
+def test_tombstone_at_capacity_newly_removed_host_persisted_and_retained_db(
+    clean_db, db_engine
+):
+    """G3.1 regression: when tombstones are at capacity and an earlier-inserted active host
+    reaches its 2nd qualifying absence, finalization must persist active->removed, retain the
+    newest tombstone, and never emit duplicate REMOVED_SUBDOMAIN on subsequent scans.
+    """
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "g31-cap.example.com")
+
+    p_victim = {"subdomain": "victim.g31-cap.example.com", "status": "RESOLVED", "resolved": True}
+    p_anchor = {"subdomain": "anchor.g31-cap.example.com", "status": "RESOLVED", "resolved": True}
+
+    rep_1 = _make_report([p_victim, p_anchor], source="crt.sh", truncated=False)
+    rep_2 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_3 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_4 = _make_report([p_anchor], source="crt.sh", truncated=False)
+
+    runner = ScriptedRunner([rep_1, rep_2, rep_3, rep_4])
+    worker = ASMWorker(db_engine, runner=runner)
+
+    # Scan 1: victim and anchor discovered (victim inserted first in domain_subdomains)
+    with Session(db_engine) as session:
+        r1 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    # Scan 2: victim reaches 1st qualifying absence
+    with Session(db_engine) as session:
+        r2 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    # Seed 1,000 existing tombstones AFTER victim so victim is first in table scan order
+    with Session(db_engine) as session:
+        for i in range(1000):
+            session.add(
+                DomainSubdomain(
+                    domain_id=domain_id,
+                    subdomain=f"tomb-{i:04d}.g31-cap.example.com",
+                    status="removed",
+                    anchor_source="crt.sh",
+                    consecutive_qualifying_absences=2,
+                    first_seen_scan_run_id=r1,
+                    last_seen_scan_run_id=r1,
+                    removed_at_scan_run_id=r2,
+                    last_applied_scan_run_id=r2,
+                )
+            )
+        session.commit()
+
+    # Scan 3: victim reaches 2nd qualifying absence -> REMOVED_SUBDOMAIN
+    with Session(db_engine) as session:
+        r3 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes_r3 = session.query(ScanChange).filter_by(scan_run_id=r3).all()
+        removals_r3 = [
+            c
+            for c in changes_r3
+            if c.change_type == "REMOVED_SUBDOMAIN" and c.asset == "victim.g31-cap.example.com"
+        ]
+        assert len(removals_r3) == 1
+
+        victim_row = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="victim.g31-cap.example.com")
+            .first()
+        )
+        assert victim_row is not None, "Newly removed host must be retained as newest tombstone"
+        assert victim_row.status == "removed", "Removed host must not remain active in PostgreSQL"
+        assert victim_row.removed_at_scan_run_id == r3
+        assert victim_row.last_applied_scan_run_id == r3
+
+        tombstone_count = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, status="removed")
+            .count()
+        )
+        assert tombstone_count == 1000
+
+    # Scan 4: subsequent qualifying-absence scan must NOT emit duplicate REMOVED_SUBDOMAIN
+    with Session(db_engine) as session:
+        r4 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes_r4 = session.query(ScanChange).filter_by(scan_run_id=r4).all()
+        removals_r4 = [c for c in changes_r4 if c.change_type == "REMOVED_SUBDOMAIN"]
+        assert removals_r4 == [], (
+            f"Expected 0 duplicate REMOVED_SUBDOMAIN events on Scan 4, got {len(removals_r4)}"
+        )
+
+
+def test_tombstone_pruning_independent_of_row_return_order_and_ties_db(clean_db, db_engine):
+    """Tombstone pruning and active->removed persistence produce identical results
+    regardless of database row-return order and under tied retention timestamps.
+    """
+    with Session(db_engine) as session:
+        _, dom_a = _setup_domain(session, "order-a.example.com")
+        _, dom_b = _setup_domain(session, "order-b.example.com")
+
+    def _run_scenario(
+        domain_id: int, dom_name: str, reverse_seed_order: bool
+    ) -> tuple[list[str], dict[str, str]]:
+        p_anchor = {"subdomain": f"anchor.{dom_name}", "status": "RESOLVED", "resolved": True}
+        p_v1 = {"subdomain": f"victim-1.{dom_name}", "status": "RESOLVED", "resolved": True}
+        p_v2 = {"subdomain": f"victim-2.{dom_name}", "status": "RESOLVED", "resolved": True}
+
+        rep_1 = _make_report([p_anchor, p_v1, p_v2], source="crt.sh", truncated=False)
+        rep_2 = _make_report([p_anchor], source="crt.sh", truncated=False)
+        rep_3 = _make_report([p_anchor], source="crt.sh", truncated=False)
+
+        runner = ScriptedRunner([rep_1, rep_2, rep_3])
+        worker = ASMWorker(db_engine, runner=runner)
+        worker.max_tombstones = 3
+
+        with Session(db_engine) as session:
+            r1 = _queue_scan(session, domain_id)
+        worker.run_poll_cycle()
+
+        with Session(db_engine) as session:
+            r2 = _queue_scan(session, domain_id)
+        worker.run_poll_cycle()
+
+        # Rewrite domain_subdomains rows in explicit forward vs reverse insertion order
+        # with identical timestamps to verify row-order independence and tie-breaking.
+        with Session(db_engine) as session:
+            session.query(DomainSubdomain).filter_by(domain_id=domain_id).delete()
+            session.flush()
+
+            seed_specs = [
+                (f"victim-1.{dom_name}", "active", 1, r1, r1, None, r2),
+                (f"victim-2.{dom_name}", "active", 1, r1, r1, None, r2),
+                (f"anchor.{dom_name}", "active", 0, r1, r2, None, r2),
+                (f"tomb-a.{dom_name}", "removed", 2, r1, r1, r2, r2),
+                (f"tomb-b.{dom_name}", "removed", 2, r1, r1, r2, r2),
+                (f"tomb-c.{dom_name}", "removed", 2, r1, r1, r2, r2),
+            ]
+            if reverse_seed_order:
+                seed_specs = list(reversed(seed_specs))
+
+            for sub, st, abs_cnt, fs, ls, rem_id, app_id in seed_specs:
+                session.add(
+                    DomainSubdomain(
+                        domain_id=domain_id,
+                        subdomain=sub,
+                        status=st,
+                        anchor_source="crt.sh",
+                        consecutive_qualifying_absences=abs_cnt,
+                        first_seen_scan_run_id=fs,
+                        last_seen_scan_run_id=ls,
+                        removed_at_scan_run_id=rem_id,
+                        last_applied_scan_run_id=app_id,
+                    )
+                )
+            session.commit()
+            session.execute(
+                text(
+                    "UPDATE domain_subdomains SET updated_at = '2026-10-17 00:00:00+00' "
+                    "WHERE domain_id = :d"
+                ),
+                {"d": domain_id},
+            )
+            session.commit()
+
+        with Session(db_engine) as session:
+            r3 = _queue_scan(session, domain_id)
+        worker.run_poll_cycle()
+
+        with Session(db_engine) as session:
+            changes = (
+                session.query(ScanChange)
+                .filter_by(scan_run_id=r3, change_type="REMOVED_SUBDOMAIN")
+                .all()
+            )
+            emitted = sorted(c.asset.removesuffix(f".{dom_name}") for c in changes)
+            rows = session.query(DomainSubdomain).filter_by(domain_id=domain_id).all()
+            persisted = {
+                r.subdomain.removesuffix(f".{dom_name}"): r.status for r in rows
+            }
+            return emitted, persisted
+
+    emitted_a, persisted_a = _run_scenario(dom_a, "order-a.example.com", reverse_seed_order=False)
+    emitted_b, persisted_b = _run_scenario(dom_b, "order-b.example.com", reverse_seed_order=True)
+
+    assert emitted_a == ["victim-1", "victim-2"]
+    assert emitted_b == ["victim-1", "victim-2"]
+    assert persisted_a == persisted_b
+    # Both newly-removed victims (r3) plus the highest tie-breaker from r2 (tomb-c) are retained
+    assert persisted_a == {
+        "anchor": "active",
+        "victim-1": "removed",
+        "victim-2": "removed",
+        "tomb-c": "removed",
+    }
+
+
+def test_multiple_simultaneous_removals_exceeding_tombstone_cap_db(clean_db, db_engine):
+    """When more active hosts transition to removed in a single scan than max_tombstones,
+    every removed host must transition out of active status (never remain active in DB),
+    only max_tombstones newest tombstones are retained, and the next scan emits no duplicates.
+    """
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "multi-rem.example.com")
+
+    p_anchor = {"subdomain": "anchor.multi-rem.example.com", "status": "RESOLVED", "resolved": True}
+    victims = [
+        {"subdomain": f"rem-{ch}.multi-rem.example.com", "status": "RESOLVED", "resolved": True}
+        for ch in ("a", "b", "c", "d", "e")
+    ]
+
+    rep_1 = _make_report([p_anchor, *victims], source="crt.sh", truncated=False)
+    rep_2 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_3 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_4 = _make_report([p_anchor], source="crt.sh", truncated=False)
+
+    runner = ScriptedRunner([rep_1, rep_2, rep_3, rep_4])
+    worker = ASMWorker(db_engine, runner=runner)
+    worker.max_tombstones = 3
+
+    # Scan 1 (present), Scan 2 (1st absence), Scan 3 (2nd absence -> 5 simultaneous removals)
+    for _ in range(3):
+        with Session(db_engine) as session:
+            r_id = _queue_scan(session, domain_id)
+        worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes_r3 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r_id, change_type="REMOVED_SUBDOMAIN")
+            .all()
+        )
+        assert sorted(c.asset for c in changes_r3) == [
+            f"rem-{ch}.multi-rem.example.com" for ch in ("a", "b", "c", "d", "e")
+        ]
+
+        rows = session.query(DomainSubdomain).filter_by(domain_id=domain_id).all()
+        active_subs = [r.subdomain for r in rows if r.status == "active"]
+        removed_subs = sorted(r.subdomain for r in rows if r.status == "removed")
+
+        # Only anchor may remain active! None of the 5 removed hosts may stay active.
+        assert active_subs == ["anchor.multi-rem.example.com"]
+        assert len(removed_subs) == 3
+        assert removed_subs == [
+            "rem-c.multi-rem.example.com",
+            "rem-d.multi-rem.example.com",
+            "rem-e.multi-rem.example.com",
+        ]
+
+    # Scan 4: next qualifying-absence scan must emit 0 REMOVED_SUBDOMAIN events
+    with Session(db_engine) as session:
+        r4 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes_r4 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r4, change_type="REMOVED_SUBDOMAIN")
+            .all()
+        )
+        assert changes_r4 == []
+
+
+def test_tombstone_pruning_rollback_and_repeated_finalization_db(
+    clean_db, db_engine, monkeypatch
+):
+    """Transaction rollback during finalization leaves pre-existing active rows and tombstones
+    untouched; subsequent retry succeeds cleanly and repeated finalization is rejected.
+    """
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "rollback-g31.example.com")
+
+    p_anchor = {
+        "subdomain": "anchor.rollback-g31.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+    }
+    p_victim = {
+        "subdomain": "victim.rollback-g31.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+    }
+
+    rep_1 = _make_report([p_victim, p_anchor], source="crt.sh", truncated=False)
+    rep_2 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_3 = _make_report([p_anchor], source="crt.sh", truncated=False)
+
+    runner = ScriptedRunner([rep_1, rep_2, rep_3])
+    worker = ASMWorker(db_engine, runner=runner)
+    worker.max_tombstones = 2
+
+    with Session(db_engine) as session:
+        r1 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        r2 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        for i in range(2):
+            session.add(
+                DomainSubdomain(
+                    domain_id=domain_id,
+                    subdomain=f"tomb-{i}.rollback-g31.example.com",
+                    status="removed",
+                    anchor_source="crt.sh",
+                    consecutive_qualifying_absences=2,
+                    first_seen_scan_run_id=r1,
+                    last_seen_scan_run_id=r1,
+                    removed_at_scan_run_id=r2,
+                    last_applied_scan_run_id=r2,
+                )
+            )
+        session.commit()
+
+    # Queue Scan 3 and inject a failure right after inventory updates/pruning inside _mark_run_final
+    with Session(db_engine) as session:
+        r3 = _queue_scan(session, domain_id)
+
+    orig_perform = worker._perform_change_detection
+
+    def _corrupt_changes_after_inventory(*args: Any, **kwargs: Any) -> Any:
+        summary, changes, baseline_id = orig_perform(*args, **kwargs)
+        # Append a malformed change entry so _mark_run_final fails AFTER executing
+        # the domain_subdomains upserts and tombstone DELETE statements.
+        changes = [*changes, {"change_type": "BROKEN_FOR_ROLLBACK_TEST"}]
+        return summary, changes, baseline_id
+
+    monkeypatch.setattr(worker, "_perform_change_detection", _corrupt_changes_after_inventory)
+    worker.run_poll_cycle()
+
+    # Verify rollback: victim is still active with absences=1, both tombstones still exist
+    with Session(db_engine) as session:
+        victim = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="victim.rollback-g31.example.com")
+            .one()
+        )
+        assert victim.status == "active"
+        assert victim.consecutive_qualifying_absences == 1
+        tombs = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, status="removed")
+            .all()
+        )
+        assert sorted(t.subdomain for t in tombs) == [
+            "tomb-0.rollback-g31.example.com",
+            "tomb-1.rollback-g31.example.com",
+        ]
+
+    # Restore change detection and allow immediate retry of Scan 3
+    monkeypatch.undo()
+    with Session(db_engine) as session:
+        run_row = session.get(ScanRun, r3)
+        assert run_row is not None
+        assert run_row.status == "queued"
+        run_row.next_attempt_at = None
+        session.commit()
+
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        victim_after = (
+            session.query(DomainSubdomain)
+            .filter_by(domain_id=domain_id, subdomain="victim.rollback-g31.example.com")
+            .one()
+        )
+        assert victim_after.status == "removed"
+        assert victim_after.removed_at_scan_run_id == r3
+
+    # Repeated finalization attempt must raise LostLeaseError and not alter inventory
+    with pytest.raises(LostLeaseError):
+        worker._mark_run_final(
+            r3,
+            uuid.uuid4(),
+            status="succeeded",
+            error_msg=None,
+            change_detection={"total_changes": 0, "_inventory_transitions": {}},
+            domain_id=domain_id,
+        )
+
+
+def test_reappearance_after_retained_or_evicted_tombstone_db(clean_db, db_engine):
+    """Both a host with a retained tombstone and a host whose tombstone was evicted
+    by capacity pruning cleanly return to active status and emit NEW_SUBDOMAIN on reappearance.
+    """
+    with Session(db_engine) as session:
+        _, domain_id = _setup_domain(session, "reappear-g31.example.com")
+
+    p_anchor = {
+        "subdomain": "anchor.reappear-g31.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+    }
+    p_evicted = {
+        "subdomain": "a-evicted.reappear-g31.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+    }
+    p_retained = {
+        "subdomain": "z-retained.reappear-g31.example.com",
+        "status": "RESOLVED",
+        "resolved": True,
+    }
+
+    rep_1 = _make_report([p_anchor, p_evicted, p_retained], source="crt.sh", truncated=False)
+    rep_2 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_3 = _make_report([p_anchor], source="crt.sh", truncated=False)
+    rep_4 = _make_report([p_anchor, p_evicted, p_retained], source="crt.sh", truncated=False)
+
+    runner = ScriptedRunner([rep_1, rep_2, rep_3, rep_4])
+    worker = ASMWorker(db_engine, runner=runner)
+    worker.max_tombstones = 1
+
+    # Scan 1 (present), Scan 2 (1st absence),
+    # Scan 3 (both removed, max_tombstones=1 retains z-retained)
+    for _ in range(3):
+        with Session(db_engine) as session:
+            _queue_scan(session, domain_id)
+        worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        rows_after_r3 = session.query(DomainSubdomain).filter_by(domain_id=domain_id).all()
+        by_sub = {r.subdomain: r.status for r in rows_after_r3}
+        assert by_sub == {
+            "anchor.reappear-g31.example.com": "active",
+            "z-retained.reappear-g31.example.com": "removed",
+        }
+
+    # Scan 4: both a-evicted and z-retained reappear
+    with Session(db_engine) as session:
+        r4 = _queue_scan(session, domain_id)
+    worker.run_poll_cycle()
+
+    with Session(db_engine) as session:
+        changes_r4 = (
+            session.query(ScanChange)
+            .filter_by(scan_run_id=r4, change_type="NEW_SUBDOMAIN")
+            .all()
+        )
+        assert sorted(c.asset for c in changes_r4) == [
+            "a-evicted.reappear-g31.example.com",
+            "z-retained.reappear-g31.example.com",
+        ]
+        for sub_name in (
+            "a-evicted.reappear-g31.example.com",
+            "z-retained.reappear-g31.example.com",
+        ):
+            row = (
+                session.query(DomainSubdomain)
+                .filter_by(domain_id=domain_id, subdomain=sub_name)
+                .one()
+            )
+            assert row.status == "active"
+            assert row.consecutive_qualifying_absences == 0
+            assert row.removed_at_scan_run_id is None
+            assert row.last_seen_scan_run_id == r4
