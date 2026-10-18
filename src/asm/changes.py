@@ -1941,51 +1941,69 @@ def detect_changes(
             return sc.get("domain_band"), sc.get("domain_score"), raw_esc
 
         candidate_hosts = set(curr_map.keys())
-        # Inspect older scans within the history window (target_idx + 1 .. len(score_scans) - 1)
-        # to determine which historical hosts should be retained in domain inventory.
-        # A historical host is retained unless it underwent confirmed removal (2 consecutive
-        # qualifying absences under discovery observation-validity rules) before or at target_idx.
-        for idx in range(target_idx + 1, len(score_scans)):
-            for h_name in raw_score_hosts_by_scan[idx]:
-                if h_name in candidate_hosts:
-                    continue
-                if target_idx == 0 and h_name in removed_assets:
-                    continue
+        if persisted_inventory is not None:
+            # Under persistent inventory, Section 2 discovery transitions are the source of truth
+            # for active host membership.
+            for h_name, h_info in persisted_inventory.items():
+                if h_info.get("status") == "active":
+                    if target_idx == 0:
+                        candidate_hosts.add(h_name)
+                    elif target_idx == 1:
+                        # Baseline had this host active unless it was newly added in current scan
+                        if not any(
+                            c.get("change_type") == "NEW_SUBDOMAIN" and c.get("asset") == h_name
+                            for c in changes
+                        ):
+                            candidate_hosts.add(h_name)
+            if target_idx == 1:
+                # Baseline also included hosts removed in this scan
+                for c in changes:
+                    if c.get("change_type") == "REMOVED_SUBDOMAIN":
+                        candidate_hosts.add(c["asset"])
+        else:
+            # Fallback when persisted_inventory is not provided: inspect older scans within the
+            # history window (target_idx + 1 .. len(score_scans) - 1)
+            for idx in range(target_idx + 1, len(score_scans)):
+                for h_name in raw_score_hosts_by_scan[idx]:
+                    if h_name in candidate_hosts:
+                        continue
+                    if target_idx == 0 and h_name in removed_assets:
+                        continue
 
-                # Find the most recent historical scan where h_name was PRESENT
-                # (which is the earliest p_idx in target_idx + 1 .. len(score_scans) - 1)
-                pres_idx = None
-                for p_idx in range(target_idx + 1, len(score_scans)):
-                    if h_name in disc_meta_by_scan[p_idx][3]:
-                        pres_idx = p_idx
-                        break
-                if pres_idx is None:
-                    pres_idx = idx
-
-                anchor_src = disc_meta_by_scan[pres_idx][0]
-
-                # Check intervening scans from pres_idx - 1 down to target_idx
-                # (in chronological order) for 2 consecutive qualifying absences
-                consecutive_qa = 0
-                confirmed_removed = False
-                for k in range(pres_idx - 1, target_idx - 1, -1):
-                    k_src, k_trunc, k_empty, k_subs = disc_meta_by_scan[k]
-                    obs = classify_discovery_observation(
-                        h_name, k_src, k_trunc, k_empty, k_subs, anchor_src
-                    )
-                    if obs == "PRESENT":
-                        consecutive_qa = 0
-                    elif obs == "QUALIFYING_ABSENCE":
-                        consecutive_qa += 1
-                        if consecutive_qa >= 2:
-                            confirmed_removed = True
+                    # Find the most recent historical scan where h_name was PRESENT
+                    # (which is the earliest p_idx in target_idx + 1 .. len(score_scans) - 1)
+                    pres_idx = None
+                    for p_idx in range(target_idx + 1, len(score_scans)):
+                        if h_name in disc_meta_by_scan[p_idx][3]:
+                            pres_idx = p_idx
                             break
-                    else:
-                        # UNKNOWN (truncated, empty, provider switch) resets QA streak
-                        consecutive_qa = 0
+                    if pres_idx is None:
+                        pres_idx = idx
 
-                if not confirmed_removed:
-                    candidate_hosts.add(h_name)
+                    anchor_src = disc_meta_by_scan[pres_idx][0]
+
+                    # Check intervening scans from pres_idx - 1 down to target_idx
+                    # (in chronological order) for 2 consecutive qualifying absences
+                    consecutive_qa = 0
+                    confirmed_removed = False
+                    for k in range(pres_idx - 1, target_idx - 1, -1):
+                        k_src, k_trunc, k_empty, k_subs = disc_meta_by_scan[k]
+                        obs = classify_discovery_observation(
+                            h_name, k_src, k_trunc, k_empty, k_subs, anchor_src
+                        )
+                        if obs == "PRESENT":
+                            consecutive_qa = 0
+                        elif obs == "QUALIFYING_ABSENCE":
+                            consecutive_qa += 1
+                            if consecutive_qa >= 2:
+                                confirmed_removed = True
+                                break
+                        else:
+                            # UNKNOWN (truncated, empty, provider switch) resets QA streak
+                            consecutive_qa = 0
+
+                    if not confirmed_removed:
+                        candidate_hosts.add(h_name)
 
         effective_hosts: dict[str, dict[str, Any]] = {}
         any_substituted = False

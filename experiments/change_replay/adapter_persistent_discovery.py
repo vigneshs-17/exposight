@@ -16,21 +16,11 @@ from typing import Any
 
 sys.path.insert(0, ".")
 
-from asm.changes import (
-    bootstrap_persistent_inventory,
-    detect_changes,
-)  # noqa: E402
 from experiments.change_replay.harness import (  # noqa: E402
-    EVENTS,
     N_SCANS,
     REALISTIC,
-    Noise,
     RunResult,
-    alert_eligible,
-    change_key,
-    observe,
     replay_candidate,
-    truth_at,
 )
 
 
@@ -42,98 +32,13 @@ def run_persistent_discovery_replay(
     max_tombstones: int = 1000,
 ) -> RunResult:
     """Run benchmark simulation using persistent discovery inventory change detection."""
-    noise = Noise(probs, seed)
-    truths = [truth_at(t) for t in range(n_scans)]
-    clean = [observe(truths[t], t, Noise({}, seed)) for t in range(n_scans)]
-    noisy = [observe(truths[t], t, noise) for t in range(n_scans)]
-
-    clean_inv: dict[str, dict[str, Any]] = {}
-    noisy_inv: dict[str, dict[str, Any]] = {}
-
-    # Scan t=0 baseline bootstrap using shared helper
-    bootstrap_persistent_inventory(
-        [{"scan_run_id": 0, "reports": clean[0]}],
-        persisted_inventory=clean_inv,
-        max_active_subdomains=max_active,
+    return replay_candidate(
+        probs,
+        seed,
+        n_scans=n_scans,
+        max_active=max_active,
         max_tombstones=max_tombstones,
     )
-    bootstrap_persistent_inventory(
-        [{"scan_run_id": 0, "reports": noisy[0]}],
-        persisted_inventory=noisy_inv,
-        max_active_subdomains=max_active,
-        max_tombstones=max_tombstones,
-    )
-
-    detected: dict[str, int | None] = {ev.name: None for ev in EVENTS if ev.scan < n_scans}
-    false_changes: list[dict[str, Any]] = []
-    asset_scans = 0
-
-    for t in range(1, n_scans):
-        asset_scans += sum(h.in_ct for h in truths[t].values())
-        clean_history = [clean[i] for i in range(t - 1, max(-1, t - 4), -1)]
-        noisy_history = [noisy[i] for i in range(t - 1, max(-1, t - 4), -1)]
-
-        clean_hist_entries = [
-            {"scan_run_id": -(idx + 1), "reports": rep} for idx, rep in enumerate(clean_history[:3])
-        ]
-        noisy_hist_entries = [
-            {"scan_run_id": -(idx + 1), "reports": rep} for idx, rep in enumerate(noisy_history[:3])
-        ]
-
-        all_clean = detect_changes(
-            clean_history[0],
-            clean[t],
-            allow_removal=True,
-            historical_baselines=clean_hist_entries,
-            baseline_scan_run_id=t - 1,
-            persisted_inventory=clean_inv,
-            current_scan_run_id=t,
-            max_active_subdomains=max_active,
-            max_tombstones=max_tombstones,
-        )
-        all_noisy = detect_changes(
-            noisy_history[0],
-            noisy[t],
-            allow_removal=True,
-            historical_baselines=noisy_hist_entries,
-            baseline_scan_run_id=t - 1,
-            persisted_inventory=noisy_inv,
-            current_scan_run_id=t,
-            max_active_subdomains=max_active,
-            max_tombstones=max_tombstones,
-        )
-
-        clean_keys = {change_key(c) for c in all_clean}
-        for c in all_noisy:
-            k = change_key(c)
-            ev = next(
-                (
-                    e
-                    for e in EVENTS
-                    if e.key == k
-                    and e.scan <= t
-                    and e.name in detected
-                    and detected[e.name] is None
-                ),
-                None,
-            )
-            if ev is not None:
-                detected[ev.name] = t
-            elif k not in clean_keys:
-                false_changes.append(
-                    {
-                        "scan": t,
-                        "change_type": c["change_type"],
-                        "asset": c["asset"],
-                        "detail": c["detail"],
-                        "severity": c["severity"],
-                        "category": c["category"],
-                        "alert_eligible": alert_eligible(c),
-                    }
-                )
-
-    false_changes.sort(key=lambda c: (c["scan"], c["change_type"], c["asset"], c["detail"]))
-    return RunResult(seed, asset_scans, false_changes, detected, noise.fired)
 
 
 def evaluate_cohort(start_seed: int, end_seed: int) -> dict[str, Any]:

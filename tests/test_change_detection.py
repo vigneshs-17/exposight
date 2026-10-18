@@ -5307,3 +5307,127 @@ def test_g3_4_capacity_check_ordering_vs_same_scan_removals_and_separate_truncat
     assert rep4["discover"].get("inventory_capacity_exceeded") is True
     assert rep4["discover"].get("untracked_subdomains_count") == 1
 
+
+def test_g3_5_effective_domain_band_uses_persisted_inventory_beyond_lookback():
+    """G3.5: Section 4 effective domain band uses persisted_inventory when available.
+
+    When an active host is maintained in persisted_inventory (status='active',
+    consecutive_qualifying_absences=1 because intermediate scans were UNKNOWN/truncated),
+    its active membership in the domain is preserved even if its original discovery
+    was beyond the immediate historical lookback window.
+    """
+    inv: dict[str, dict[str, Any]] = {
+        "anchor.example.com": {
+            "subdomain": "anchor.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 0,
+            "first_seen_scan_run_id": 0,
+            "last_seen_scan_run_id": 3,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+        },
+        "crit.example.com": {
+            "subdomain": "crit.example.com",
+            "status": "active",
+            "anchor_source": "crt.sh",
+            "consecutive_qualifying_absences": 0,
+            "first_seen_scan_run_id": 0,
+            "last_seen_scan_run_id": 0,
+            "last_qualifying_absence_scan_run_id": 1,
+            "last_status": "RESOLVED",
+            "last_resolved": True,
+        },
+    }
+
+    # Historical baselines: S3 (baseline), S2, S1.
+    # crit.example.com was scored in S1 (within score_scans), but its CT discovery was in S0.
+    # In S3 (baseline): anchor present, CT truncated. Domain band was CRITICAL.
+    # In S2: provider switch (certspotter), UNKNOWN.
+    # In S1: crit.example.com scored with CRITICAL band (score=100).
+    s1_rep = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": True,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+            ],
+        },
+        "score": {
+            "domain": "example.com",
+            "domain_band": "CRITICAL",
+            "domain_score": 100,
+            "hosts": [
+                {"subdomain": "anchor.example.com", "band": "INFO", "score": 0},
+                {"subdomain": "crit.example.com", "band": "CRITICAL", "score": 100},
+            ],
+        },
+    }
+    s2_rep = {
+        "discover": {
+            "source": "certspotter",
+            "truncated": False,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+            ],
+        },
+        "score": {
+            "domain": "example.com",
+            "domain_band": "CRITICAL",
+            "domain_score": 100,
+            "hosts": [{"subdomain": "anchor.example.com", "band": "INFO", "score": 0}],
+        },
+    }
+    s3_rep = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": True,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+            ],
+        },
+        "score": {
+            "domain": "example.com",
+            "domain_band": "CRITICAL",
+            "domain_score": 100,
+            "hosts": [{"subdomain": "anchor.example.com", "band": "INFO", "score": 0}],
+        },
+    }
+    new_rep = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": False,
+            "results": [
+                {"subdomain": "anchor.example.com", "status": "RESOLVED", "resolved": True}
+            ],
+        },
+        "score": {
+            "domain": "example.com",
+            "domain_band": "INFO",
+            "domain_score": 0,
+            "hosts": [{"subdomain": "anchor.example.com", "band": "INFO", "score": 0}],
+        },
+    }
+
+    hist = [
+        {"scan_run_id": 3, "reports": s3_rep},
+        {"scan_run_id": 2, "reports": s2_rep},
+        {"scan_run_id": 1, "reports": s1_rep},
+    ]
+
+    changes = detect_changes(
+        s3_rep,
+        new_rep,
+        allow_removal=True,
+        historical_baselines=hist,
+        baseline_scan_run_id=3,
+        persisted_inventory=inv,
+        current_scan_run_id=4,
+    )
+
+    # crit.example.com has QA=1 (not confirmed removed, still active in inv).
+    assert inv["crit.example.com"]["status"] == "active"
+    # Therefore, domain risk band must NOT prematurely drop to INFO!
+    assert not any(c["change_type"] == "DOMAIN_RISK_BAND_DECREASED" for c in changes)
+
+
