@@ -32,7 +32,12 @@ from asm.api.schemas import (
     ScanRunDetail,
     ScanRunRead,
 )
-from asm.audit import build_audit_query, recipients_changed, record_event
+from asm.audit import (
+    build_audit_query,
+    recipients_changed,
+    record_event,
+    redact_sensitive_text,
+)
 from asm.db.models import (
     AlertNotification,
     Domain,
@@ -99,7 +104,7 @@ def _domain_to_read(domain: Domain, role: str) -> DomainRead:
         verified_at=domain.verified_at,
         last_checked_at=domain.last_checked_at,
         consecutive_misses=domain.consecutive_misses,
-        verification_reason=domain.verification_reason,
+        verification_reason=domain.verification_reason if is_privileged else None,
         verification_expires_at=domain.verification_expires_at,
         scan_interval_hours=domain.scan_interval_hours,
         next_scan_at=domain.next_scan_at,
@@ -125,7 +130,7 @@ def _notification_to_read(
         scan_run_id=notification.scan_run_id,
         recipient=notification.recipient if is_privileged else None,
         subject=notification.subject,
-        body=notification.body,
+        body=notification.body if is_privileged else redact_sensitive_text(notification.body),
         status=notification.status,
         attempts=notification.attempts,
         max_attempts=notification.max_attempts,
@@ -285,7 +290,9 @@ def _domain_to_verification_read(
     domain: Domain,
     check_outcome: Literal["match", "absent", "unknown"] | None = None,
     check_detail: str | None = None,
+    role: str = "viewer",
 ) -> DomainVerificationRead:
+    is_privileged = role in ("admin", "owner")
     return DomainVerificationRead(
         domain_id=domain.id,
         domain_name=domain.name,
@@ -298,7 +305,7 @@ def _domain_to_verification_read(
         verified_at=domain.verified_at,
         last_checked_at=domain.last_checked_at,
         consecutive_misses=domain.consecutive_misses,
-        verification_reason=domain.verification_reason,
+        verification_reason=domain.verification_reason if is_privileged else None,
         verification_expires_at=domain.verification_expires_at,
         is_verified=domain.is_verified,
         check_outcome=check_outcome,
@@ -323,7 +330,8 @@ def get_domain_verification(
 ) -> DomainVerificationRead:
     """Retrieve current verification status and the exact DNS TXT record to publish."""
     domain = get_domain_for_org(db, org_id, domain_id)
-    return _domain_to_verification_read(domain)
+    _, caller_membership = auth_context
+    return _domain_to_verification_read(domain, role=caller_membership.role)
 
 
 @router.post(
@@ -423,6 +431,7 @@ def check_domain_verification(
         domain,
         check_outcome=outcome.value,  # type: ignore[arg-type]
         check_detail=detail,
+        role=caller_membership.role,
     )
 
 
@@ -483,7 +492,7 @@ def rotate_domain_verification(
         domain.name,
         domain.id,
     )
-    return _domain_to_verification_read(domain)
+    return _domain_to_verification_read(domain, role=caller_membership.role)
 
 
 @router.post(

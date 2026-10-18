@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
-from asm.audit import record_event
+from asm.audit import record_event, redact_sensitive_text
 from asm.db.models import Domain, Membership, Organization, ScanRun, ScanStage, User
 from asm.db.scans import cancel_queued_scans_for_domain
 from asm.db.session import get_session_factory
@@ -240,10 +240,11 @@ def revoke_verification(
     domain.consecutive_misses = 0
     domain.next_reverification_at = None
 
+    redacted_reason = redact_sensitive_text(cleaned_reason)
     cancel_queued_scans_for_domain(
         session,
         domain.id,
-        reason=f"Domain verification revoked by operator: {cleaned_reason}",
+        reason=f"Domain verification revoked by operator: {redacted_reason}",
     )
 
     queue_domain_alert(
@@ -252,7 +253,7 @@ def revoke_verification(
         subject="Domain verification lapsed: monitoring paused",
         body=(
             f"Domain verification for '{domain.name}' has been revoked by an operator. "
-            f"Reason: {cleaned_reason}. Automated scheduled monitoring is paused "
+            f"Reason: {redacted_reason}. Automated scheduled monitoring is paused "
             "until ownership is verified."
         ),
     )

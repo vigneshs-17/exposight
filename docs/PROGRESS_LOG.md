@@ -23,3 +23,10 @@
   - G4.2: Joined `User` and filtered `User.suspended_at.is_(None)` in `update_member_role`, `remove_organization_member`, and `delete_my_account` to prevent last-active-owner bypass. Added `cancel_queued_scans_for_domain` during operator revocation, override expiry, and DNS reverification lapse to prevent stranding `uq_scan_runs_active_domain`.
   - G4.3: Checked domain verification and active owner status under domain lock in `_mark_run_final`. When authorization is lost, marked `failed`, preserved already-collected stage evidence in `scan_results`, and suppressed inventory transitions and alert rows.
   - G4.4: Removed broad exception swallowing around `domain_subdomains` `SELECT`; DB errors propagate and fail the scan attempt instead of fabricating absence or corrupting inventory.
+
+## Item 3: G5.1 Operator Verification Reasons Privacy
+- **Status**: Completed & Verified in Worktree `D:\exposight-g51-wt`
+- **Failing Before / Passing After**: `tests/test_viewer_privacy_db.py::test_g5_1_operator_verification_reasons_redacted_for_viewers_and_notifications_db`.
+- **Fix**: Redacted/hid operator verification reasons from viewer roles in `_domain_to_read` and `_domain_to_verification_read` (returning `None` for viewers while keeping raw reasons for owner/admin). Applied `redact_sensitive_text` to operator reason in `admin.py` `cancel_queued_scans_for_domain` and `queue_domain_alert` outbox notifications, and added defense-in-depth body redaction in `_notification_to_read` for viewers. Updated OpenAPI schema descriptions in `DomainRead`, `DomainVerificationRead`, and `AlertNotificationRead`.
+- **Limits**: Kept raw reasons for owner/admin in DB and API responses; preserved audit log role isolation (viewers receive HTTP 403 on `/audit-events`).
+
