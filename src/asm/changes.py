@@ -632,8 +632,63 @@ def detect_changes(
             if persisted_transitions is not None:
                 persisted_transitions[sub_key] = dict(entry)
 
-        # 2a. Additions, Reappearances, and DNS Resolution Transitions
-        for sub, n_entry in new_subs.items():
+        # 2a. Removals (iterate in deterministic subdomain order independent of DB row order)
+        # Evaluated before additions so slots freed by confirmed removals in the current scan
+        # are immediately available for new or reappearing subdomains.
+        if not is_first_baseline:
+            for sub in sorted(persisted_inventory.keys()):
+                item = persisted_inventory[sub]
+                if item.get("status") != "active":
+                    continue
+                if sub in new_subs:
+                    continue
+
+                anchor_src = item.get("anchor_source", "crt.sh")
+                obs = classify_discovery_observation(
+                    sub, new_src, new_trunc, new_empty, new_subs, anchor_src
+                )
+                if obs != "QUALIFYING_ABSENCE":
+                    # An unknown observation (provider switch, truncated scan, or empty scan)
+                    # retains the host's presence anchor but breaks the consecutive absence streak.
+                    if item.get("consecutive_qualifying_absences", 0) != 0:
+                        item["consecutive_qualifying_absences"] = 0
+                        _record_transition(sub, item)
+                    continue
+
+                if allow_removal:
+                    item["last_applied_scan_run_id"] = current_scan_run_id
+                    if item.get("last_qualifying_absence_scan_run_id") != current_scan_run_id:
+                        item["consecutive_qualifying_absences"] = (
+                            item.get("consecutive_qualifying_absences", 0) + 1
+                        )
+                        item["last_qualifying_absence_scan_run_id"] = current_scan_run_id
+
+                    if item["consecutive_qualifying_absences"] == 2:
+                        item["status"] = "removed"
+                        item["removed_at_scan_run_id"] = current_scan_run_id
+                        base_id = item.get("last_seen_scan_run_id") or baseline_scan_run_id
+                        change_dict = {
+                            "change_type": "REMOVED_SUBDOMAIN",
+                            "category": "exposure",
+                            "severity": "INFO",
+                            "asset": sub,
+                            "detail": "",
+                            "evidence": "discover",
+                            "previous_state": {
+                                "status": item.get("last_status"),
+                                "resolved": item.get("last_resolved"),
+                            },
+                            "new_state": None,
+                            "observed_at": observed_at,
+                        }
+                        if base_id is not None:
+                            change_dict["baseline_scan_run_id"] = base_id
+                        changes.append(change_dict)
+
+                    _record_transition(sub, item)
+
+        # 2b. Additions, Reappearances, and DNS Resolution Transitions
+        for sub, n_entry in sorted(new_subs.items()):
             n_stat = n_entry.get("status")
             n_res = n_entry.get("resolved", False) is True
 
@@ -795,62 +850,8 @@ def detect_changes(
             and "discover" in new_reports
             and isinstance(new_reports["discover"], dict)
         ):
-            new_reports["discover"]["truncated"] = True
-            new_reports["discover"]["truncation_reason"] = "inventory_capacity_exceeded"
+            new_reports["discover"]["inventory_capacity_exceeded"] = True
             new_reports["discover"]["untracked_subdomains_count"] = len(untracked_subdomains)
-
-        # 2b. Removals (iterate in deterministic subdomain order independent of DB row order)
-        if not is_first_baseline:
-            for sub in sorted(persisted_inventory.keys()):
-                item = persisted_inventory[sub]
-                if item.get("status") != "active":
-                    continue
-                if sub in new_subs:
-                    continue
-
-                anchor_src = item.get("anchor_source", "crt.sh")
-                obs = classify_discovery_observation(
-                    sub, new_src, new_trunc, new_empty, new_subs, anchor_src
-                )
-                if obs != "QUALIFYING_ABSENCE":
-                    # An unknown observation (provider switch, truncated scan, or empty scan)
-                    # retains the host's presence anchor but breaks the consecutive absence streak.
-                    if item.get("consecutive_qualifying_absences", 0) != 0:
-                        item["consecutive_qualifying_absences"] = 0
-                        _record_transition(sub, item)
-                    continue
-
-                if allow_removal:
-                    item["last_applied_scan_run_id"] = current_scan_run_id
-                    if item.get("last_qualifying_absence_scan_run_id") != current_scan_run_id:
-                        item["consecutive_qualifying_absences"] = (
-                            item.get("consecutive_qualifying_absences", 0) + 1
-                        )
-                        item["last_qualifying_absence_scan_run_id"] = current_scan_run_id
-
-                    if item["consecutive_qualifying_absences"] == 2:
-                        item["status"] = "removed"
-                        item["removed_at_scan_run_id"] = current_scan_run_id
-                        base_id = item.get("last_seen_scan_run_id") or baseline_scan_run_id
-                        change_dict = {
-                            "change_type": "REMOVED_SUBDOMAIN",
-                            "category": "exposure",
-                            "severity": "INFO",
-                            "asset": sub,
-                            "detail": "",
-                            "evidence": "discover",
-                            "previous_state": {
-                                "status": item.get("last_status"),
-                                "resolved": item.get("last_resolved"),
-                            },
-                            "new_state": None,
-                            "observed_at": observed_at,
-                        }
-                        if base_id is not None:
-                            change_dict["baseline_scan_run_id"] = base_id
-                        changes.append(change_dict)
-
-                    _record_transition(sub, item)
 
         # 2c. Tombstone pruning (retain newest max_tombstones deterministically)
         tombstones = [k for k, v in persisted_inventory.items() if v.get("status") == "removed"]
