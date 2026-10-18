@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import ssl
 import time
+import zlib
 from unittest.mock import MagicMock, patch
 
 import dns.resolver
@@ -13,8 +15,9 @@ import pytest
 from asm.models import HostProbeStatus, ProbeErrorType
 from asm.prober import (
     CONNECT_TIMEOUT,
-    MAX_BODY_BYTES,
+     MAX_BODY_BYTES,
     TOTAL_URL_TIMEOUT,
+    DeadlineExceeded,
     _stream_and_read_body,
     check_host_for_ssrf,
     extract_title,
@@ -190,16 +193,30 @@ class TestStreamingBodyLimit:
     """Test suite for the 64 KB streaming limit."""
 
     def test_stream_caps_at_64kb(self):
-        """Verify response body streaming terminates at exactly 64 KB."""
-        # 100 KB payload
+        """Verify response body streaming terminates at exactly 64 KB and closes stream."""
         chunk = b"X" * 1024
-        stream_chunks = [chunk for _ in range(100)]
 
-        response_mock = MagicMock(spec=httpx.Response)
-        response_mock.iter_bytes.return_value = iter(stream_chunks)
+        class HundredKilobyteStream(httpx.SyncByteStream):
+            def __init__(self) -> None:
+                self.closed = False
+                self.chunks_emitted = 0
 
-        body = _stream_and_read_body(response_mock, deadline=time.perf_counter() + 10.0)
+            def __iter__(self):
+                for _ in range(100):
+                    self.chunks_emitted += 1
+                    yield chunk
+
+            def close(self) -> None:
+                self.closed = True
+
+        stream = HundredKilobyteStream()
+        response = httpx.Response(200, stream=stream)
+
+        body = _stream_and_read_body(response, deadline=time.perf_counter() + 10.0)
         assert len(body) == MAX_BODY_BYTES
+        assert stream.chunks_emitted == 64
+        assert stream.closed is True
+        assert response.is_closed is True
 
 
 class TestProberNetworkingAndTLS:
@@ -533,3 +550,445 @@ class TestDeadlineCoversConnectAndHeaders:
 
         assert len(calls) == 1
         assert result.reachable is False
+
+
+class TestContentEncodingAndBoundedBodyPolicy:
+    """Regressions for bounded response-body policy and Content-Encoding handling."""
+
+    def test_gzip_response_prevents_automatic_decompression_before_body_limit(self):
+        """A small gzip payload expanding past MAX_BODY_BYTES must not be decompressed."""
+        uncompressed_html = (
+            b"<html><head><title>Compressed Secret</title></head><body>"
+            + (b"A" * (MAX_BODY_BYTES + 16384))
+            + b"</body></html>"
+        )
+        compressed_payload = gzip.compress(uncompressed_html)
+        assert len(compressed_payload) < 512
+
+        decompressed_bytes = 0
+        stream_chunks_read = 0
+
+        class RecordingStream(httpx.SyncByteStream):
+            def __init__(self) -> None:
+                self.closed = False
+
+            def __iter__(self):
+                nonlocal stream_chunks_read
+                stream_chunks_read += 1
+                yield compressed_payload
+
+            def close(self) -> None:
+                self.closed = True
+
+        stream = RecordingStream()
+        response = httpx.Response(
+            status_code=200,
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Encoding": "gzip",
+                "Content-Length": str(len(compressed_payload)),
+            },
+            stream=stream,
+        )
+
+        decoder = response._get_content_decoder()
+        orig_decode = decoder.decode
+
+        def tracking_decode(data: bytes) -> bytes:
+            nonlocal decompressed_bytes
+            out = orig_decode(data)
+            decompressed_bytes += len(out)
+            return out
+
+        decoder.decode = tracking_decode  # type: ignore[method-assign]
+
+        body = _stream_and_read_body(response, deadline=time.perf_counter() + 10.0)
+        assert body == b""
+        assert decompressed_bytes == 0
+        assert stream_chunks_read == 0
+        assert stream.closed is True
+        assert response.is_closed is True
+
+    @pytest.mark.parametrize(
+        "content_encoding",
+        [
+            "gzip",
+            "GZIP",
+            "x-gzip",
+            "deflate",
+            "br",
+            "zstd",
+            "identity, gzip",
+            "gzip, deflate",
+            "custom-encoding",
+        ],
+    )
+    def test_non_identity_encoding_preserves_reachability_and_headers_without_parsing_html(
+        self, content_encoding: str
+    ):
+        """Unsupported Content-Encoding keeps reachable=True/headers, title=None, and closes."""
+        raw_html_or_compressed = (
+            gzip.compress(b"<html><title>Gzip Title</title></html>" + b"X" * 70000)
+            if "gzip" in content_encoding.lower()
+            else zlib.compress(b"<html><title>Deflate Title</title></html>" + b"X" * 70000)
+            if "deflate" in content_encoding.lower()
+            else b"<html><title>Raw Misclassified HTML</title></html>"
+        )
+        tracked_responses: list[httpx.Response] = []
+        sent_accept_encoding: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent_accept_encoding.append(request.headers.get("accept-encoding", ""))
+            resp = httpx.Response(
+                200,
+                headers={
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Content-Encoding": content_encoding,
+                    "Server": "nginx/1.26",
+                    "X-Powered-By": "Express",
+                },
+                stream=httpx.ByteStream(raw_html_or_compressed),
+            )
+            tracked_responses.append(resp)
+            return resp
+
+        transport = httpx.MockTransport(handler)
+        resolver = _resolver_returning({"app.example.com": "93.184.216.34"})
+        real_client = httpx.Client
+        with patch(
+            "asm.prober.httpx.Client",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ):
+            host_res = probe_host("app.example.com", "example.com", resolver=resolver)
+
+        assert sent_accept_encoding == ["identity", "identity"]
+        assert host_res.status == HostProbeStatus.PROBED.value
+        assert host_res.live is True
+        assert host_res.preferred_url == "https://app.example.com/"
+        for url_res in (host_res.https, host_res.http):
+            assert url_res is not None
+            assert url_res.reachable is True
+            assert url_res.status_code == 200
+            assert url_res.title is None
+            assert url_res.server == "nginx/1.26"
+            assert url_res.x_powered_by == "Express"
+            assert url_res.content_type == "text/html; charset=utf-8"
+            assert url_res.error_type is None
+        assert len(tracked_responses) == 2
+        assert all(r.is_closed for r in tracked_responses)
+
+    @pytest.mark.parametrize(
+        "repeated_headers",
+        [
+            [("Content-Encoding", "identity"), ("Content-Encoding", "gzip")],
+            [("Content-Encoding", "gzip"), ("Content-Encoding", "identity")],
+            [("Content-Encoding", ""), ("Content-Encoding", "br")],
+            [("Content-Encoding", "identity, deflate"), ("Content-Encoding", "gzip")],
+        ],
+    )
+    def test_repeated_content_encoding_headers_with_non_identity_token_rejected(
+        self, repeated_headers: list[tuple[str, str]]
+    ):
+        """Repeated Content-Encoding headers containing any non-identity token are rejected."""
+        tracked_response: httpx.Response | None = None
+        payload = gzip.compress(b"<html><title>Hidden Title</title></html>" + b"X" * 70000)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal tracked_response
+            tracked_response = httpx.Response(
+                200,
+                headers=[("Content-Type", "text/html; charset=utf-8"), *repeated_headers],
+                stream=httpx.ByteStream(payload),
+            )
+            return tracked_response
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        res = probe_url("https://multi.example.com/", "example.com", client)
+
+        assert res.reachable is True
+        assert res.status_code == 200
+        assert res.title is None
+        assert tracked_response is not None and tracked_response.is_closed is True
+
+    @pytest.mark.parametrize(
+        "identity_headers",
+        [
+            [],
+            [("Content-Encoding", "")],
+            [("Content-Encoding", "identity")],
+            [("Content-Encoding", "IDENTITY")],
+            [("Content-Encoding", "identity, identity")],
+            [("Content-Encoding", "identity"), ("Content-Encoding", "IDENTITY")],
+            [("Content-Encoding", "identity"), ("Content-Encoding", "")],
+        ],
+    )
+    def test_identity_and_omitted_encoding_extracts_title_and_closes(
+        self, identity_headers: list[tuple[str, str]]
+    ):
+        """Omitted or identity Content-Encoding (including repeated headers) extracts title."""
+        tracked_response: httpx.Response | None = None
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal tracked_response
+            headers = [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Server", "Caddy"),
+                *identity_headers,
+            ]
+            tracked_response = httpx.Response(
+                200,
+                headers=headers,
+                stream=httpx.ByteStream(
+                    b"<html><head><title>Identity Dashboard</title></head></html>"
+                ),
+            )
+            return tracked_response
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        res = probe_url("https://portal.example.com/", "example.com", client)
+
+        assert res.reachable is True
+        assert res.status_code == 200
+        assert res.title == "Identity Dashboard"
+        assert tracked_response is not None and tracked_response.is_closed is True
+
+    def test_real_streaming_body_limit_stops_at_64kb_and_closes_stream(self):
+        """Real httpx.Response streaming stops after MAX_BODY_BYTES and closes the stream."""
+        chunks_yielded = 0
+
+        class LargeUncompressedStream(httpx.SyncByteStream):
+            def __init__(self) -> None:
+                self.closed = False
+
+            def __iter__(self):
+                nonlocal chunks_yielded
+                for i in range(100):  # 100 * 1024 = 100 KB
+                    chunks_yielded += 1
+                    if i == 0:
+                        yield b"<html><title>Early Title</title>" + b"B" * (1024 - 32)
+                    else:
+                        yield b"B" * 1024
+
+            def close(self) -> None:
+                self.closed = True
+
+        stream = LargeUncompressedStream()
+        response = httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=stream,
+        )
+
+        body = _stream_and_read_body(response, deadline=time.perf_counter() + 10.0)
+        assert len(body) == MAX_BODY_BYTES
+        assert chunks_yielded == 64
+        assert stream.closed is True
+        assert response.is_closed is True
+        assert extract_title(body, "text/html") == "Early Title"
+
+    def test_single_oversized_chunk_retains_at_most_64kb_and_closes(self):
+        """A single transport chunk larger than 64 KB is sliced to MAX_BODY_BYTES and closed."""
+        stream_closed = False
+
+        class SingleGiantChunkStream(httpx.SyncByteStream):
+            def __iter__(self):
+                prefix = b"<html><title>Single Chunk</title></html>"
+                yield prefix + (b"Z" * (MAX_BODY_BYTES + 20000))
+
+            def close(self) -> None:
+                nonlocal stream_closed
+                stream_closed = True
+
+        response = httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=SingleGiantChunkStream(),
+        )
+        body = _stream_and_read_body(response, deadline=time.perf_counter() + 10.0)
+        assert len(body) == MAX_BODY_BYTES
+        assert stream_closed is True
+        assert response.is_closed is True
+
+    def test_deadline_exceeded_mid_stream_closes_response(self):
+        """Raising DeadlineExceeded while streaming still closes the response."""
+        stream_closed = False
+
+        class SlowStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"chunk-1"
+                yield b"chunk-2"
+
+            def close(self) -> None:
+                nonlocal stream_closed
+                stream_closed = True
+
+        response = httpx.Response(200, stream=SlowStream())
+        with pytest.raises(DeadlineExceeded):
+            _stream_and_read_body(response, deadline=time.perf_counter() - 1.0)
+
+        assert stream_closed is True
+        assert response.is_closed is True
+
+    def test_stream_exception_closes_response(self):
+        """Raising a transport error mid-stream still closes the response and stream."""
+        stream_closed = False
+
+        class FailingStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield b"partial-data"
+                raise httpx.ReadError("socket reset mid-body")
+
+            def close(self) -> None:
+                nonlocal stream_closed
+                stream_closed = True
+
+        response = httpx.Response(200, stream=FailingStream())
+        with pytest.raises(httpx.ReadError):
+            _stream_and_read_body(response, deadline=time.perf_counter() + 10.0)
+
+        assert stream_closed is True
+        assert response.is_closed is True
+
+    def test_already_consumed_response_contract_is_bounded_and_closed(self):
+        """Already-consumed responses enforce Content-Encoding, deadline, cap, and closure."""
+        oversized_html = (
+            b"<html><title>Preloaded Title</title></html>" + b"P" * (MAX_BODY_BYTES + 4096)
+        )
+        resp_identity = httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            content=oversized_html,
+        )
+        assert resp_identity.is_stream_consumed is True
+        body = _stream_and_read_body(resp_identity, deadline=time.perf_counter() + 10.0)
+        assert len(body) == MAX_BODY_BYTES
+        assert extract_title(body, "text/html") == "Preloaded Title"
+        assert resp_identity.is_closed is True
+
+        resp_encoded = httpx.Response(
+            200,
+            headers={"Content-Type": "text/html", "Content-Encoding": "br"},
+            content=b"<html><title>Should Ignore</title></html>",
+        )
+        assert resp_encoded.is_stream_consumed is True
+        assert _stream_and_read_body(resp_encoded, deadline=time.perf_counter() + 10.0) == b""
+        assert resp_encoded.is_closed is True
+
+        resp_expired = httpx.Response(200, text="expired")
+        assert resp_expired.is_stream_consumed is True
+        with pytest.raises(DeadlineExceeded):
+            _stream_and_read_body(resp_expired, deadline=time.perf_counter() - 1.0)
+        assert resp_expired.is_closed is True
+
+    def test_compressed_redirect_hop_followed_to_uncompressed_final_response(self):
+        """A 302 redirect with gzip is not decompressed, closes, and follows Location."""
+        hop_responses: list[httpx.Response] = []
+        compressed_redirect_body = gzip.compress(
+            b"<html><title>Redirecting</title></html>" + (b"R" * (MAX_BODY_BYTES + 8192))
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/":
+                resp = httpx.Response(
+                    302,
+                    headers={
+                        "Location": "https://app.example.com/login",
+                        "Content-Encoding": "gzip",
+                        "Content-Type": "text/html",
+                    },
+                    stream=httpx.ByteStream(compressed_redirect_body),
+                )
+            else:
+                resp = httpx.Response(
+                    200,
+                    headers={"Content-Type": "text/html", "Server": "envoy"},
+                    stream=httpx.ByteStream(b"<html><title>Sign In</title></html>"),
+                )
+            hop_responses.append(resp)
+            return resp
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        res = probe_url("https://app.example.com/", "example.com", client)
+
+        assert res.reachable is True
+        assert res.status_code == 200
+        assert res.final_url == "https://app.example.com/login"
+        assert res.title == "Sign In"
+        assert len(res.redirect_chain) == 1
+        assert res.redirect_chain[0].status_code == 302
+        assert len(hop_responses) == 2
+        assert all(r.is_closed for r in hop_responses)
+
+    @pytest.mark.parametrize("status_code", [301, 404, 500])
+    def test_compressed_error_and_redirect_without_location_preserve_status_and_close(
+        self, status_code: int
+    ):
+        """Compressed 404/500 and 301-without-Location preserve status/headers and close."""
+        tracked_response: httpx.Response | None = None
+        compressed_body = gzip.compress(
+            b"<html><title>Error Page Title</title></html>" + (b"E" * (MAX_BODY_BYTES + 8192))
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal tracked_response
+            tracked_response = httpx.Response(
+                status_code,
+                headers={
+                    "Content-Type": "text/html",
+                    "Content-Encoding": "gzip",
+                    "Server": "cloudflare",
+                },
+                stream=httpx.ByteStream(compressed_body),
+            )
+            return tracked_response
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        res = probe_url("https://err.example.com/", "example.com", client)
+
+        assert res.reachable is True
+        assert res.status_code == status_code
+        assert res.title is None
+        assert res.server == "cloudflare"
+        assert tracked_response is not None and tracked_response.is_closed is True
+
+    def test_tls_verify_retry_with_compressed_response_preserves_reachability_without_decompression(
+        self,
+    ):
+        """When verify=True fails with cert error and verify=False returns gzip, no decode runs."""
+        attempt = 0
+        retry_response: httpx.Response | None = None
+        compressed_body = gzip.compress(
+            b"<html><title>Self Signed Gzip</title></html>" + (b"S" * (MAX_BODY_BYTES + 8192))
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempt, retry_response
+            attempt += 1
+            if attempt == 1:
+                cert_err = ssl.SSLCertVerificationError("self-signed certificate")
+                conn_err = httpx.ConnectError("TLS verify failed")
+                conn_err.__cause__ = cert_err
+                raise conn_err
+            retry_response = httpx.Response(
+                200,
+                headers={
+                    "Content-Type": "text/html",
+                    "Content-Encoding": "gzip",
+                    "Server": "Apache",
+                },
+                stream=httpx.ByteStream(compressed_body),
+            )
+            return retry_response
+
+        mock_transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=mock_transport)
+        with patch("asm.prober.httpx.Client", return_value=client):
+            res = probe_url("https://selfsigned.example.com/", "example.com", client)
+
+        assert res.reachable is True
+        assert res.tls_valid is False
+        assert res.status_code == 200
+        assert res.title is None
+        assert res.server == "Apache"
+        assert res.error_type == ProbeErrorType.TLS_ERROR.value
+        assert retry_response is not None and retry_response.is_closed is True
