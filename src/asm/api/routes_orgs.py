@@ -573,10 +573,13 @@ def update_member_role(
         db.execute(lock_stmt).scalar_one()
 
         remaining_owners = db.scalar(
-            select(func.count(Membership.id)).where(
+            select(func.count(Membership.id))
+            .join(User, Membership.user_id == User.id)
+            .where(
                 Membership.org_id == org_id,
                 Membership.role == "owner",
                 Membership.user_id != user_id,
+                User.suspended_at.is_(None),
             )
         )
         if (remaining_owners or 0) == 0:
@@ -676,10 +679,13 @@ def remove_organization_member(
         db.execute(lock_stmt).scalar_one()
 
         remaining_owners = db.scalar(
-            select(func.count(Membership.id)).where(
+            select(func.count(Membership.id))
+            .join(User, Membership.user_id == User.id)
+            .where(
                 Membership.org_id == org_id,
                 Membership.role == "owner",
                 Membership.user_id != user_id,
+                User.suspended_at.is_(None),
             )
         )
         if (remaining_owners or 0) == 0:
@@ -746,10 +752,12 @@ def delete_my_account(current_user: CurrentUser, db: DbSession) -> Response:
         .where(Organization.id.in_(owned_org_ids))
         .where(
             ~select(Membership.id)
+            .join(User, Membership.user_id == User.id)
             .where(
                 Membership.org_id == Organization.id,
                 Membership.role == "owner",
                 Membership.user_id != user.id,
+                User.suspended_at.is_(None),
             )
             .exists()
         )

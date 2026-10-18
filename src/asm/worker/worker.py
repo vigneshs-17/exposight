@@ -561,6 +561,51 @@ class ASMWorker:
                     {"id": p_run.id},
                 )
 
+            # Stale lease recovery for unverified domains: cancel permanently
+            unverified_stale = session.execute(
+                text(
+                    """
+                    UPDATE scan_runs
+                    SET status = 'cancelled',
+                        finished_at = now(),
+                        claimed_by = NULL,
+                        claim_token = NULL,
+                        lease_expires_at = NULL,
+                        error = 'Execution aborted: domain verification is not active.'
+                    FROM domains
+                    WHERE scan_runs.domain_id = domains.id
+                      AND scan_runs.status = 'running'
+                      AND scan_runs.lease_expires_at < now()
+                      AND scan_runs.attempts < scan_runs.max_attempts
+                      AND (
+                          domains.verification_status != 'verified'
+                          OR (
+                              domains.verification_method = 'operator'
+                              AND domains.verification_expires_at IS NOT NULL
+                              AND domains.verification_expires_at <= now()
+                          )
+                      )
+                    RETURNING scan_runs.id
+                    """
+                )
+            ).fetchall()
+            for u_run in unverified_stale:
+                session.execute(
+                    text(
+                        """
+                        UPDATE scan_stages
+                        SET status = 'skipped',
+                            started_at = coalesce(started_at, now()),
+                            finished_at = now(),
+                            duration_ms = 0,
+                            error = 'Skipped: domain verification is not active'
+                        WHERE scan_run_id = :id AND status = 'pending'
+                        """
+                    ),
+                    {"id": u_run[0]},
+                )
+
+
             # Stale lease recovery: attempts < max_attempts with expired lease
             # Backoff is computed dynamically per-row in SQL from its own attempts count:
             # base 10s, doubling, capped at 120s, plus random jitter up to 5s.
@@ -1149,40 +1194,37 @@ class ASMWorker:
             {"scan_run_id": bid, "reports": reports_by_id[bid]} for bid in baseline_ids
         ]
 
-        try:
-            sub_rows = session.execute(
-                text(
-                    """
-                    SELECT subdomain, status, anchor_source, consecutive_qualifying_absences,
-                           first_seen_scan_run_id, last_seen_scan_run_id,
-                           last_qualifying_absence_scan_run_id, removed_at_scan_run_id,
-                           last_status, last_resolved, last_applied_scan_run_id,
-                           updated_at, id
-                    FROM domain_subdomains
-                    WHERE domain_id = :domain_id
-                    ORDER BY subdomain ASC
-                    """
-                ),
-                {"domain_id": domain_id},
-            ).fetchall()
-            for r in sub_rows:
-                inventory[r[0]] = {
-                    "subdomain": r[0],
-                    "status": r[1],
-                    "anchor_source": r[2],
-                    "consecutive_qualifying_absences": r[3],
-                    "first_seen_scan_run_id": r[4],
-                    "last_seen_scan_run_id": r[5],
-                    "last_qualifying_absence_scan_run_id": r[6],
-                    "removed_at_scan_run_id": r[7],
-                    "last_status": r[8],
-                    "last_resolved": r[9],
-                    "last_applied_scan_run_id": r[10],
-                    "updated_at": r[11],
-                    "id": r[12],
-                }
-        except Exception:
-            inventory = {}
+        sub_rows = session.execute(
+            text(
+                """
+                SELECT subdomain, status, anchor_source, consecutive_qualifying_absences,
+                       first_seen_scan_run_id, last_seen_scan_run_id,
+                       last_qualifying_absence_scan_run_id, removed_at_scan_run_id,
+                       last_status, last_resolved, last_applied_scan_run_id,
+                       updated_at, id
+                FROM domain_subdomains
+                WHERE domain_id = :domain_id
+                ORDER BY subdomain ASC
+                """
+            ),
+            {"domain_id": domain_id},
+        ).fetchall()
+        for r in sub_rows:
+            inventory[r[0]] = {
+                "subdomain": r[0],
+                "status": r[1],
+                "anchor_source": r[2],
+                "consecutive_qualifying_absences": r[3],
+                "first_seen_scan_run_id": r[4],
+                "last_seen_scan_run_id": r[5],
+                "last_qualifying_absence_scan_run_id": r[6],
+                "removed_at_scan_run_id": r[7],
+                "last_status": r[8],
+                "last_resolved": r[9],
+                "last_applied_scan_run_id": r[10],
+                "updated_at": r[11],
+                "id": r[12],
+            }
 
         base_disc = baseline_reports.get("discover") or {}
         new_disc = new_reports.get("discover") or {}
@@ -1294,6 +1336,14 @@ class ASMWorker:
                     text("SELECT id FROM domains WHERE id = :domain_id FOR UPDATE"),
                     {"domain_id": domain_id},
                 )
+                domain_obj = session.get(Domain, domain_id)
+                if status == "succeeded" and isinstance(domain_obj, Domain):
+                    if not domain_obj.is_verified:
+                        status = "failed"
+                        sanitized_error = "Target domain verification is not active."
+                    elif all_owners_suspended(session, domain_obj.org_id):
+                        status = "failed"
+                        sanitized_error = "Scanning is paused for this organization."
 
                 # Ordering guard: check if a newer scan has already succeeded for this domain
                 newer_succeeded = session.execute(
@@ -1311,11 +1361,21 @@ class ASMWorker:
 
                 if reports is not None and status == "succeeded":
                     # Compute change detection against committed domain inventory under the lock
-                    change_detection, changes, baseline_scan_run_id = (
-                        self._perform_change_detection(
-                            scan_run_id, domain_id, reports, session=session
+                    try:
+                        change_detection, changes, baseline_scan_run_id = (
+                            self._perform_change_detection(
+                                scan_run_id, domain_id, reports, session=session
+                            )
                         )
-                    )
+                    except Exception as cd_exc:
+                        logger.exception(
+                            "Change detection failed for scan_run_id=%d: %s", scan_run_id, cd_exc
+                        )
+                        status = "failed"
+                        err_str = sanitize_error_text(str(cd_exc))
+                        sanitized_error = f"Change detection failed: {err_str}"
+                        change_detection = None
+                        changes = None
 
                     # Persist discover report capacity metadata if truncated
                     disc_rep = reports.get("discover")
@@ -1689,6 +1749,15 @@ class ASMWorker:
                 domain = session.get(Domain, domain_id) if domain_id else None
                 if domain and all_owners_suspended(session, domain.org_id):
                     sanitized_error = "Scanning is paused for this organization."
+                    skip_msg = "Skipped: organization scanning paused"
+                elif not domain or not domain.is_verified:
+                    sanitized_error = "Target domain verification is not active."
+                    skip_msg = "Skipped: domain verification not active"
+                else:
+                    sanitized_error = None
+                    skip_msg = None
+
+                if sanitized_error is not None:
                     res = session.execute(
                         text(
                             """
@@ -1729,11 +1798,11 @@ class ASMWorker:
                                     started_at = coalesce(started_at, now()),
                                     finished_at = now(),
                                     duration_ms = 0,
-                                    error = 'Skipped: organization scanning paused'
+                                    error = :reason
                                 WHERE scan_run_id = :id AND status = 'pending'
                                 """
                             ),
-                            {"id": scan_run_id},
+                            {"id": scan_run_id, "reason": skip_msg},
                         )
                     session.commit()
                     return

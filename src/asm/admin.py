@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from asm.audit import record_event
 from asm.db.models import Domain, Membership, Organization, ScanRun, ScanStage, User
+from asm.db.scans import cancel_queued_scans_for_domain
 from asm.db.session import get_session_factory
 from asm.logredact import install_log_redaction
 from asm.retention import purge_expired
@@ -238,6 +239,12 @@ def revoke_verification(
     domain.verified_at = None
     domain.consecutive_misses = 0
     domain.next_reverification_at = None
+
+    cancel_queued_scans_for_domain(
+        session,
+        domain.id,
+        reason=f"Domain verification revoked by operator: {cleaned_reason}",
+    )
 
     queue_domain_alert(
         session,

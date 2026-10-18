@@ -1288,6 +1288,8 @@ def test_worker_change_detection_history_ordering_and_grouping():
                 ]
             )
         ),
+        # Query 3: domain_subdomains inventory
+        MagicMock(fetchall=MagicMock(return_value=[])),
     ]
 
     new_reports = {"discover": {"results": []}, "portscan": {"results": []}}
