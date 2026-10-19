@@ -176,6 +176,25 @@ strong {
   padding: 0 1.5rem;
 }
 
+.app-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.5rem;
+  padding: 1.5rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.app-footer-link {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.app-footer-link:hover,
+.app-footer-link:focus-visible {
+  color: var(--accent);
+}
+
 .surface-panel {
   background-color: var(--surface-2);
   border: 1px solid var(--border);
