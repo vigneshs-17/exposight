@@ -37,6 +37,7 @@ from asm.db.models import (
     ScanRun,
     ScanStage,
 )
+from asm.retention import INVITE_RETENTION, NOTIFICATION_RETENTION, SCAN_RETENTION
 from asm.ui_views import (
     STATUS_DISPLAY_NAMES,
     check_polling_status,
@@ -176,6 +177,29 @@ def get_security_txt() -> str:
         f"Expires: {expires.isoformat().replace('+00:00', 'Z')}\n"
         "Preferred-Languages: en\n"
         "Canonical: https://exposight.dev/.well-known/security.txt\n"
+    )
+
+
+PRIVACY_LAST_UPDATED = "2026-10-19"
+
+
+@ui_router.get(
+    "/privacy",
+    response_class=HTMLResponse,
+    summary="Privacy notice",
+)
+def get_privacy_page(
+    response: Response,
+    auth_settings: Annotated[AuthSettings, Depends(get_current_auth_settings)],
+) -> str:
+    """Serve the public privacy notice; retention periods come from the purge code."""
+    apply_security_headers(response, auth_settings, is_fragment=False)
+    template = templates_env.get_template("privacy.html")
+    return template.render(
+        last_updated=PRIVACY_LAST_UPDATED,
+        scan_days=SCAN_RETENTION.days,
+        notification_days=NOTIFICATION_RETENTION.days,
+        invite_days=INVITE_RETENTION.days,
     )
 
 

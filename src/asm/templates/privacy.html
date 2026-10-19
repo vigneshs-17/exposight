@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy — Exposight</title>
+  <meta name="description" content="What Exposight stores, which services process it, and how long it is kept.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Privacy — Exposight">
+  <meta property="og:description" content="What Exposight stores, which services process it, and how long it is kept.">
+  <meta property="og:site_name" content="Exposight">
+  <meta property="og:image" content="https://exposight.dev/static/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Exposight: Know every host you expose. Scan only what you own.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://exposight.dev/static/og-image.png">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/landing.css">
+</head>
+<body class="landing-body">
+  <header class="landing-header">
+    <div class="landing-header-inner">
+      <a href="/" class="brand" aria-label="Exposight home">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><circle cx="12" cy="12" r="1.6"/></svg>
+        <span>Exposight</span>
+      </a>
+      <nav class="landing-nav" aria-label="Main navigation">
+        <a href="/" class="landing-nav-link">Home</a>
+        <a href="/app" class="btn btn-primary landing-signin-btn">Sign in</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="landing-main">
+    <section class="landing-section">
+      <article class="landing-container terms-content" aria-labelledby="privacy-title">
+        <h1 id="privacy-title" class="section-title">Privacy</h1>
+        <p class="terms-updated">Last updated: {{ last_updated }}</p>
+
+        <h2>1. Who runs Exposight</h2>
+        <p>Exposight is an invite-only beta built and run by a student as an independent portfolio project. It is not a company and has no paid plans. Accounts and organisations exist only for people who were invited.</p>
+
+        <h2>2. What Exposight stores</h2>
+        <ul>
+          <li>Your account: the user ID and email address from Supabase Auth (the sign-in provider), when you were first and last seen, and, if the account is suspended, when and why. Exposight never sees or stores your password.</li>
+          <li>Organisations, memberships and roles, and invites (the invited email address, the role, and a hash of the invite token, never the token itself).</li>
+          <li>Domains you add: the name, the domain verification records (the expected DNS TXT value, the verification state and the results of verification checks), the scan schedule and the alert settings.</li>
+          <li>Alert recipient email addresses that an owner or admin configures, and the alert notifications sent to them (recipient, subject, body, delivery status and the last delivery error).</li>
+          <li>Scan results: discovered subdomains, hosts, open ports, TLS certificate and HTTP header findings, risk scores and detected changes.</li>
+          <li>An append-only audit log of security-relevant actions: which account did what, to which object, and when. Audit log entries do not contain email addresses.</li>
+          <li>Server logs (container output) with requests, client IP addresses and paths. Email addresses, tokens and other secrets are masked before they are written. Each container keeps at most about 30 MB of logs; older lines are overwritten.</li>
+        </ul>
+        <p>There are no analytics, advertising or tracking cookies. The dashboard keeps your sign-in session in your browser's storage only.</p>
+
+        <h2>3. Services that process data</h2>
+        <ul>
+          <li><strong>Supabase</strong> (Supabase Auth): your email address, password and sign-in sessions.</li>
+          <li><strong>Microsoft Azure</strong>: the virtual machine that runs the application and its database, in India. All stored data above lives there, plus database backups.</li>
+          <li><strong>crt.sh</strong> and <strong>Cert Spotter</strong>: public certificate-transparency search services. They receive the names of the domains being scanned, never account data.</li>
+          <li><strong>Public DNS resolvers</strong> (Cloudflare 1.1.1.1 and Quad9 9.9.9.9): the names of domains and subdomains being checked.</li>
+          <li><strong>The email provider</strong> that delivers alert emails: the recipient address, subject and body of each alert.</li>
+        </ul>
+        <p>Scans connect to the hosts of verified domains; those hosts see connections from the Exposight server's IP address.</p>
+
+        <h2>4. How long data is kept</h2>
+        <p>An automatic purge exists, but it is off unless the operator turns it on. When it is on, it deletes finished scans older than {{ scan_days }} days (each domain's latest successful scan, and any scan that a stored change is compared against, are always kept), sent or failed alert notifications older than {{ notification_days }} days, and invites {{ invite_days }} days after they were accepted, revoked or expired. Audit log entries are never purged. Everything else is kept until it is deleted.</p>
+        <p>You can delete your own account (<code>DELETE /me</code>), and an owner can delete an organisation (<code>DELETE /orgs/&lt;id&gt;</code>); the <a href="/terms" class="footer-link">terms</a> describe exactly what each removes and what is kept. Your Supabase sign-in account is not deleted with it; ask the operator to remove it. Database backups on the server are kept for 7 days; copies kept off the server can be older.</p>
+
+        <h2>5. Contact</h2>
+        <p>Report security vulnerabilities privately through <a href="https://github.com/vigneshs-17/exposight/security/advisories/new" class="footer-link" rel="noopener noreferrer">GitHub private vulnerability reporting</a>. Use the same link for privacy questions and deletion requests you do not want to post publicly. Do not include personal data in a public issue.</p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="landing-footer">
+    <div class="landing-container footer-container">
+      <p class="footer-copy">Exposight — External Attack Surface Management</p>
+      <div class="footer-links">
+        <a href="/" class="footer-link">Home</a>
+        <a href="/app" class="footer-link">Dashboard</a>
+        <a href="/terms" class="footer-link">Terms &amp; acceptable use</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

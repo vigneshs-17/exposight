@@ -46,6 +46,7 @@ ROUTES: dict[tuple[str, str], tuple[str, str]] = {
     ("GET", "/"): (PUBLIC, "public landing page, static content"),
     ("GET", "/terms"): (PUBLIC, "public terms page, static content"),
     ("GET", "/.well-known/security.txt"): (PUBLIC, "RFC 9116 security contact, static content"),
+    ("GET", "/privacy"): (PUBLIC, "public privacy notice, static content"),
     ("GET", "/app"): (PUBLIC, "dashboard shell; only public Supabase URL and publishable key"),
     ("GET", "/ui/empty-org"): (PUBLIC, "create-organization form, no data"),
     ("GET", "/ui/orgs/{org_id}/domains"): (LIST, ""),

@@ -74,3 +74,8 @@
 - **Failing Before / Passing After**: `tests/test_security_txt.py` (2 of 3 failed with 404 before the route existed).
 - **Fix**: `GET /.well-known/security.txt` in `src/asm/api/routes_ui.py`, `text/plain`, Contact = GitHub private advisory URL, rolling `Expires` 180 days ahead (always under the RFC one-year limit), `Preferred-Languages: en`, `Canonical`. Route classified PUBLIC in the route-isolation registry.
 - **Limits**: no PGP signature; Canonical is the fixed `https://exposight.dev` URL.
+
+## Final batch Item 4: /privacy Page
+- **Failing Before / Passing After**: `tests/test_privacy_page.py` (6 tests; all failed before: 404 and missing footer links).
+- **Fix**: `templates/privacy.html` on the landing theme (only `landing.css`, no scripts or inline styles): stored data, processors (Supabase, Microsoft Azure, crt.sh, Cert Spotter, public DNS resolvers, the email provider), invite-only student beta, GitHub advisory contact. Retention days are rendered from `asm.retention` constants, so the page cannot drift from the purge code. Footer links on landing, terms and the dashboard (`.app-footer` in `app.css`). Route classified PUBLIC.
+- **Limits**: the page says the purge is off unless the operator enables it; whether production enabled it is not visible to the app.
