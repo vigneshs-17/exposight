@@ -51,7 +51,7 @@ def test_compose_prod_structure_and_ports():
     # Database image must be pinned
     assert services["db"]["image"] == "postgres:18.6-alpine"
     # Caddy image must be pinned
-    assert services["caddy"]["image"] == "caddy:2.11.4-alpine"
+    assert services["caddy"]["image"] == "caddy:2.11.7-alpine"
 
 
 def test_compose_prod_api_healthcheck_and_proxy_headers():
