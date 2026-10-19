@@ -79,3 +79,10 @@
 - **Failing Before / Passing After**: `tests/test_privacy_page.py` (6 tests; all failed before: 404 and missing footer links).
 - **Fix**: `templates/privacy.html` on the landing theme (only `landing.css`, no scripts or inline styles): stored data, processors (Supabase, Microsoft Azure, crt.sh, Cert Spotter, public DNS resolvers, the email provider), invite-only student beta, GitHub advisory contact. Retention days are rendered from `asm.retention` constants, so the page cannot drift from the purge code. Footer links on landing, terms and the dashboard (`.app-footer` in `app.css`). Route classified PUBLIC.
 - **Limits**: the page says the purge is off unless the operator enables it; whether production enabled it is not visible to the app.
+
+## Final batch Items 5-9: Owner Setup Docs
+- **Item 5** `docs/EMAIL_SETUP.md`: confirmed the worker reads `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS`, `SMTP_SSL`, `SMTP_TIMEOUT` (`src/asm/worker/worker.py`). Brevo on `notify.exposight.dev`, port 587 STARTTLS, credentials only in the VM `.env`, one test send through `send_smtp_email` inside the worker container.
+- **Item 6** `docs/DNS_RECORDS.md`: apex CAA (`letsencrypt.org`, `issuewild ";"`), SPF `-all`, DMARC `p=reject`; `notify` keeps its own SPF/DKIM/DMARC so the apex policy does not block it.
+- **Item 7** `docs/BACKUP_SETUP.md`: age key on the laptop, public key at `/etc/exposight/backup_age_recipient.pub`, root cron 03:30 UTC, weekly PowerShell `scp`, restore test into a throwaway container. Restore commands drilled locally against PostgreSQL 18.6 with the production role layout.
+- **Item 8** `docs/MONITORING_SETUP.md`: UptimeRobot HTTP(s) check on `/health` with email alert; notes that `/health` does not cover the worker.
+- **Item 9**: `CERTSPOTTER_API_KEY` Bearer support was already on `main` (`tests/test_discovery.py::test_certspotter_api_key_sent_as_bearer_and_not_leaked`); no code change. Terms question recorded as P-1 in `docs/DECISIONS_PENDING.md`.
