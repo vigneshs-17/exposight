@@ -125,6 +125,8 @@ def apply_security_headers(
     response_class=HTMLResponse,
     summary="Public Landing Page",
 )
+# HEAD (uptime monitors, link checkers) gets the same status and headers, no body (IC-1, F2).
+@ui_router.head("/", response_class=HTMLResponse, include_in_schema=False)
 def get_landing_page(
     response: Response,
     auth_settings: Annotated[AuthSettings, Depends(get_current_auth_settings)],
@@ -178,6 +180,19 @@ def get_security_txt() -> str:
         "Preferred-Languages: en\n"
         "Canonical: https://exposight.dev/.well-known/security.txt\n"
     )
+
+
+ROBOTS_TXT = "User-agent: *\nAllow: /\nDisallow: /app\n"
+
+
+@ui_router.get(
+    "/robots.txt",
+    response_class=PlainTextResponse,
+    summary="Crawler rules",
+)
+def get_robots_txt() -> str:
+    """Public pages may be crawled; the signed-in dashboard may not."""
+    return ROBOTS_TXT
 
 
 PRIVACY_LAST_UPDATED = "2026-10-19"

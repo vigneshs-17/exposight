@@ -67,29 +67,49 @@ app = FastAPI(
 RATE_LIMIT_EXEMPT_PREFIXES = ("/static/", "/health")
 
 
+def _too_many_requests(retry_after: float) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": "Too many requests"},
+        headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+    )
+
+
 @app.middleware("http")
 async def unauthenticated_rate_limit_middleware(request: Request, call_next):
-    """Limit requests without an Authorization header per client IP.
+    """Limit every request without a verified identity per client IP (IC-1, D-IC2).
 
-    Requests that carry a token are limited in get_current_user instead (per
-    user, or per IP when the token is rejected).
+    No Authorization header: charged before the handler runs. With a header, the
+    handler runs first: get_active_user marks a verified identity (limited per user
+    instead) and get_current_user marks a rejected token it already charged. A request
+    that is neither (a public route given any header) is charged afterwards and its
+    response replaced with 429 when the limit is used up; only side-effect-free public
+    routes can reach that point.
     """
     path = request.url.path
-    if "authorization" not in request.headers and not path.startswith(
-        RATE_LIMIT_EXEMPT_PREFIXES
-    ):
-        ip = request.client.host if request.client else "unknown"
-        retry_after = limiter.hit(f"ip:{ip}", UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP)
+    if path.startswith(RATE_LIMIT_EXEMPT_PREFIXES):
+        return await call_next(request)
+    ip_key = f"ip:{request.client.host if request.client else 'unknown'}"
+    if "authorization" not in request.headers:
+        retry_after = limiter.hit(ip_key, UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP)
         if retry_after is not None:
-            return JSONResponse(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"detail": "Too many requests"},
-                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
-            )
-    return await call_next(request)
+            return _too_many_requests(retry_after)
+        return await call_next(request)
+
+    response = await call_next(request)
+    if getattr(request.state, "identity_verified", False) or getattr(
+        request.state, "ip_rate_charged", False
+    ):
+        return response
+    retry_after = limiter.hit(ip_key, UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP)
+    if retry_after is not None:
+        return _too_many_requests(retry_after)
+    return response
 
 
 PAGE_PATH_PREFIXES = ("/app", "/ui", "/static")
+# No page uses these browser features; deny them to the page and any frame (IC-1, F5).
+PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=()"
 
 # First path segment of every JSON API, HTMX partial, static or docs route. Requests under
 # these never get an HTML error page, whatever their Accept header says (C-UI-4).
@@ -124,6 +144,7 @@ def apply_response_security_headers(path: str, response: Response) -> None:
         headers.setdefault("Cache-Control", "no-store")  # error responses are never cached
     headers.setdefault("X-Content-Type-Options", "nosniff")
     headers.setdefault("Referrer-Policy", "no-referrer")
+    headers.setdefault("Permissions-Policy", PERMISSIONS_POLICY)
     # Clickjacking: legacy header for browsers without CSP frame-ancestors (H-Hdr-1).
     headers["X-Frame-Options"] = "DENY"
 

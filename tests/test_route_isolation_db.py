@@ -44,6 +44,8 @@ ROUTES: dict[tuple[str, str], tuple[str, str]] = {
     ("MOUNT", "/static"): (PUBLIC, "static CSS/JS files shipped with the app"),
     # routes_ui.py
     ("GET", "/"): (PUBLIC, "public landing page, static content"),
+    ("HEAD", "/"): (PUBLIC, "landing page headers only, static content"),
+    ("GET", "/robots.txt"): (PUBLIC, "crawler rules, static content"),
     ("GET", "/terms"): (PUBLIC, "public terms page, static content"),
     ("GET", "/.well-known/security.txt"): (PUBLIC, "RFC 9116 security contact, static content"),
     ("GET", "/privacy"): (PUBLIC, "public privacy notice, static content"),
@@ -57,6 +59,7 @@ ROUTES: dict[tuple[str, str], tuple[str, str]] = {
     ("GET", "/ui/orgs/{org_id}/audit-events"): (LIST, ""),
     # routes.py
     ("GET", "/health"): (PUBLIC, "database liveness only"),
+    ("HEAD", "/health"): (PUBLIC, "database liveness only, headers only"),
     ("POST", "/orgs/{org_id}/domains"): (TENANT, ""),
     ("GET", "/orgs/{org_id}/domains"): (LIST, ""),
     ("GET", "/orgs/{org_id}/domains/{domain_id}"): (TENANT, ""),

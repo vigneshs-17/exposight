@@ -103,6 +103,8 @@ def get_current_user(
         user = _authenticate(db, authorization, settings, jwks_manager)
     except HTTPException as exc:
         if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            # Tell the middleware this request was charged, so it is not charged twice.
+            request.state.ip_rate_charged = True
             enforce_rate_limit(
                 f"ip:{client_ip(request)}", UNAUTHENTICATED_REQUESTS_PER_MINUTE_PER_IP
             )
@@ -184,6 +186,7 @@ SUSPENDED_DETAIL = "Account suspended"
 
 
 def get_active_user(
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
     db: DbSession,
 ) -> User:
@@ -194,6 +197,8 @@ def get_active_user(
     from a cached user object), so a suspension takes effect on the very next request.
     The operator's reason is never included in the response.
     """
+    # The identity is verified: the middleware leaves this request to the per-user limit.
+    request.state.identity_verified = True
     suspended_at = db.scalar(select(User.suspended_at).where(User.id == current_user.id))
     if suspended_at is not None:
         logger.warning("Refused request from suspended user %s", current_user.id)

@@ -63,6 +63,16 @@ def reset_rate_limiter():
     limiter.reset()
 
 
+@pytest.fixture(autouse=True)
+def reset_health_cache():
+    """Give every test a fresh /health database check (the result is cached for 2 s)."""
+    from asm.api.routes import reset_health_cache as _reset
+
+    _reset()
+    yield
+    _reset()
+
+
 def validate_test_database_url(test_db_url: str) -> None:
     """Ensure TEST_DATABASE_URL strictly points to a database name ending with '_test'."""
     parsed = urlsplit(test_db_url)

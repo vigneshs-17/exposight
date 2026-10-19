@@ -1,6 +1,8 @@
 """REST API routes for Exposight (multi-tenant scoped)."""
 
 import logging
+import threading
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -69,6 +71,21 @@ public_router = APIRouter()
 router = APIRouter(prefix="/orgs/{org_id}", dependencies=[Depends(get_active_user)])
 
 
+# /health answers from a cached database check, so a flood of unauthenticated health
+# requests (exempt from rate limiting) costs at most one query per this many seconds.
+HEALTH_CACHE_SECONDS = 2.0
+_health_lock = threading.Lock()
+_health_cache: tuple[float, bool] | None = None  # (monotonic time checked, database ok)
+
+
+def reset_health_cache() -> None:
+    """Forget the cached database check (used by tests)."""
+    global _health_cache
+    with _health_lock:
+        _health_cache = None
+
+
+@public_router.head("/health", include_in_schema=False)  # same answer, no body (IC-1, F2)
 @public_router.get(
     "/health",
     response_model=HealthResponse,
@@ -79,16 +96,25 @@ router = APIRouter(prefix="/orgs/{org_id}", dependencies=[Depends(get_active_use
     },
 )
 def health_check(db: DbSession) -> HealthResponse:
-    """Verify application health and database reachability."""
-    try:
-        db.execute(text("SELECT 1"))
+    """Verify application health and database reachability (result cached for 2 s)."""
+    global _health_cache
+    with _health_lock:
+        now = time.monotonic()
+        if _health_cache is None or now - _health_cache[0] >= HEALTH_CACHE_SECONDS:
+            try:
+                db.execute(text("SELECT 1"))
+                database_ok = True
+            except Exception:
+                logger.exception("Database health check ping failed")
+                database_ok = False
+            _health_cache = (now, database_ok)
+        database_ok = _health_cache[1]
+    if database_ok:
         return HealthResponse(status="ok", database="connected")
-    except Exception:
-        logger.exception("Database health check ping failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"status": "error", "database": "disconnected"},
-        ) from None
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={"status": "error", "database": "disconnected"},
+    )
 
 
 def _domain_to_read(domain: Domain, role: str) -> DomainRead:

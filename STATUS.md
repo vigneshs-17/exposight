@@ -109,6 +109,22 @@
 ## Plans & Decisions
 Plans are written here and approved before coding starts.
 
+### IC-1 plan: fixes from the independent check (requested 2026-10-19, report `D:\exposight-reports\independent-check-2026-10-19.md`)
+Branch `fix/independent-check-1` from `origin/main` `389901f`, one PR, test-first for every behaviour change, no migration.
+- F1 (D-IC1): `uv.lock` is the source of truth. `requirements/runtime.lock.txt` and `requirements/dev.lock.txt` are exported from it with hashes (`uv export --frozen --no-emit-project`). The Docker image installs `runtime.lock.txt` with `pip install --require-hashes --no-deps`, then the project wheel with `--no-deps`. CI test jobs install `dev.lock.txt` the same way, then `pip install --no-deps -e .`. The pip-audit job audits `dev.lock.txt` (a superset of runtime) and fails if `uv.lock` or the exports are out of date with `pyproject.toml`.
+- F2: `/` and `/health` answer GET and HEAD; HEAD has the same status and headers and no body. The HEAD routes are separate decorators with `include_in_schema=False` (one route with both methods gave duplicate OpenAPI operation ids), and both are in the isolation registry as public.
+- F3 (D-IC2): the per-IP limit covers every request without a verified identity. `get_active_user` marks the request as verified; `get_current_user` marks a rejected token as already charged. After the handler runs, the middleware charges the IP for any request that carried an `Authorization` header but was neither verified nor charged, and answers 429 when the limit is used up. Only side-effect-free public routes reach that point, so replacing their response is safe.
+- F4: `/health` caches the database check result for 2 s (injectable clock, lock).
+- F5: `Permissions-Policy: camera=(), microphone=(), geolocation=()` on every response, from `apply_response_security_headers`.
+- F7: the redactor also masks `scheme://user:password@`, `password: value`, JSON `"access_token": "..."` (and refresh/id tokens, password, secret), and bare `token=value`.
+- F8: a cached JWKS key is served during an outage only while the last successful fetch is under 24 h old; after that the request fails closed (503).
+- F9: the worker claim log uses `lease=<first 8 chars>` instead of `token=<uuid>`.
+- F10: Caddyfile drops `Via` (`header -Via`) and serves the HTTP-to-HTTPS 308 from an explicit `http://` site that drops `Server`.
+- F11: dated DEPLOY_NEXT checklist item for Supabase "Confirm email" ON and "Allow new users to sign up" OFF.
+- F13: `GET /robots.txt` (`Allow: /`, `Disallow: /app`), public in the registry.
+- F6 (digest/SHA pinning) and F12 (HSTS includeSubDomains/preload): deferred, recorded in `docs/DECISIONS_PENDING.md`.
+- Result (2026-10-19, local, deps installed from `requirements/dev.lock.txt` with `--require-hashes`, Python 3.12.12): 1260 passed, 40 deselected, 91.37% line+branch; 38 browser passed; `ruff check .` and bandit clean; pip-audit on the lock: no known vulnerabilities. 20 revert proofs failed with their expected messages. Docker image built from `runtime.lock.txt` (fastapi 0.146.0, starlette 1.9.0, pip removed). Caddyfile checked with real `caddy:2.11.7-alpine`: HTTP 308 has no `Server`, HTTPS has no `Via`/`Server`, HSTS kept. No migration.
+
 ### Final build batch plan (requested 2026-10-19, Claude Code sole builder)
 Worktree `D:\exposight-final-wt` from `origin/main` `2534056`. One PR per item; related doc items may share one.
 1. Fix `docs/DEPLOY_NEXT.md`: target = current main SHA, VM `Standard_B2als_v2` (x86_64), pre-deploy `backup_db.sh` + PowerShell `scp` to `D:\exposight-backups\`, `git pull --ff-only` + `up -d --build` (migrate is a service), alembic_version via `$POSTGRES_USER`/`$POSTGRES_DB`, egress check / headers / `/health` / worker / one manual scan, rollback restores into a dropped and recreated database, 0015 populated downgrade blocked by design.

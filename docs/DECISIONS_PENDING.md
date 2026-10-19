@@ -13,3 +13,19 @@
 3. **Drop Cert Spotter as a source.** Discovery then depends on crt.sh only; when crt.sh is down, scans fail at the discovery stage instead of falling back. This needs a small code change (remove the fallback) with tests.
 
 Until decided, production uses the unauthenticated tier as today.
+
+## P-2: Pin images by digest and actions by commit SHA (independent check F6, deferred)
+
+**State.** Container images are pinned by patch tag (`postgres:18.6-alpine`, `caddy:2.11.7-alpine`, `python:3.12.15-slim-trixie`, `alpine:3.24.2`) and GitHub Actions by major tag (`actions/checkout@v7`, ...). A tag can be re-pointed by its publisher; a digest or commit SHA cannot.
+
+**Why deferred (2026-10-19, IC-1).** Python dependencies, the larger supply-chain gap, are now locked with hashes (F1). Digest/SHA pinning needs Dependabot configured to update digests so pins do not go stale, and it touches every workflow and compose file; it is a separate change.
+
+**When to do it.** Before the beta opens beyond invited users, or together with the next Dependabot configuration change: pin images as `tag@sha256:...` and actions by full SHA with the tag in a comment.
+
+## P-3: HSTS includeSubDomains / preload (independent check F12, deferred)
+
+**State.** Caddy sends `Strict-Transport-Security: max-age=31536000` without `includeSubDomains` or `preload` (Caddyfile comment).
+
+**Why deferred (2026-10-19, IC-1).** `includeSubDomains` makes browsers refuse plain HTTP on every subdomain of `exposight.dev` (for example the email subdomain `notify.exposight.dev`, see `docs/DNS_RECORDS.md`), and preload is hard to undo. It needs an inventory of every subdomain and confirmation that each serves HTTPS or nothing.
+
+**When to do it.** After that inventory: add `includeSubDomains` first, wait a full `max-age`, and only then consider `preload`.

@@ -161,8 +161,16 @@ source .venv/bin/activate
 ```
 
 ### 3. Install Package with Development Tools
+Dependencies come from the hashed lock (exported from `uv.lock`), the same set CI and the Docker image use:
 ```bash
-pip install -e ".[dev]"
+pip install --require-hashes --no-deps -r requirements/dev.lock.txt
+pip install --no-deps -e .
+```
+After changing dependencies in `pyproject.toml`, refresh the lock and both exports (CI fails if they are stale):
+```bash
+uv lock
+uv export --frozen --no-emit-project --no-dev --format requirements-txt -o requirements/runtime.lock.txt
+uv export --frozen --no-emit-project --no-dev --extra dev --format requirements-txt -o requirements/dev.lock.txt
 ```
 
 ---
@@ -600,7 +608,8 @@ End-to-end browser integration tests executed with Playwright in headless Chromi
 
 ##### How to Run (Windows PowerShell)
 ```powershell
-.\.venv\Scripts\pip install -e ".[dev]"
+.\.venv\Scripts\pip install --require-hashes --no-deps -r requirements/dev.lock.txt
+.\.venv\Scripts\pip install --no-deps -e .
 .\.venv\Scripts\playwright install chromium
 docker start asm-test-db
 $env:TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5433/asm_test"

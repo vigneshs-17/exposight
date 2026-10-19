@@ -256,13 +256,15 @@ class ASMWorker:
             return False
 
         scan_run_id, domain_id, claim_token, attempts, max_attempts = claimed
+        # lease= is a short id for correlating log lines; the full claim token stays out of
+        # logs (IC-1, F9).
         logger.info(
-            "Claimed scan_run_id=%d domain_id=%d attempt=%d/%d token=%s",
+            "Claimed scan_run_id=%d domain_id=%d attempt=%d/%d lease=%s",
             scan_run_id,
             domain_id,
             attempts,
             max_attempts,
-            claim_token,
+            str(claim_token)[:8],
         )
 
         self.execute_scan_run(scan_run_id, domain_id, claim_token, attempts, max_attempts)

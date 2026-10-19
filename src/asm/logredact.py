@@ -8,6 +8,8 @@ Redacted:
 - email addresses -> [email]
 - secret-looking URL query parameters (token, code, access_token, ...) -> [redacted]
 - JWT-shaped strings (three base64url parts starting with eyJ) -> [jwt]
+- the password in a connection URL, JSON "access_token"/"password"-style values, and
+  password:/password=/token= pairs -> [redacted] (IC-1, F7)
 
 Message arguments are redacted one by one and keep their position, because
 uvicorn's AccessFormatter unpacks record.args as a tuple.
@@ -23,6 +25,20 @@ SECRET_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")
+# IC-1 (F7): the password in a connection URL (postgresql+psycopg://user:password@host).
+URL_PASSWORD_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:)[^/\s@]+(@)")
+# JSON-style "access_token": "value" (also refresh/id tokens, password, secret).
+JSON_SECRET_RE = re.compile(
+    r'("(?:access_token|refresh_token|id_token|password|secret)"\s*:\s*")[^"]*(")',
+    re.IGNORECASE,
+)
+# password: value, password=value, SMTP_PASSWORD=value, token=value. A value starting with
+# ':' (an SQL placeholder) or '%' (a log argument not yet formatted) is left alone.
+KEY_VALUE_SECRET_RE = re.compile(
+    r"(\b(?:[A-Za-z0-9]+_)*(?:password|passwd|secret|token)\b\s*[:=]\s*)(?![:%]|\[redacted\])"
+    r"[^\s&;,\"']+",
+    re.IGNORECASE,
+)
 
 _installed = False
 
@@ -30,7 +46,10 @@ _installed = False
 def redact(text: str) -> str:
     """Return text with emails, secret query parameters and JWTs masked."""
     text = JWT_RE.sub("[jwt]", text)
+    text = URL_PASSWORD_RE.sub(r"\1[redacted]\2", text)
+    text = JSON_SECRET_RE.sub(r"\1[redacted]\2", text)
     text = SECRET_QUERY_RE.sub(r"\1[redacted]", text)
+    text = KEY_VALUE_SECRET_RE.sub(r"\1[redacted]", text)
     return EMAIL_RE.sub("[email]", text)
 
 

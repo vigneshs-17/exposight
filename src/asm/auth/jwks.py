@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 # Upper bound for the wait between JWKS fetch attempts after repeated failures.
 MAX_FAILURE_BACKOFF_SECONDS = 300.0
+# During a JWKS outage a cached key is served only while the last successful fetch is
+# younger than this; after that sign-in fails closed (IC-1, F8). A key Supabase revoked
+# cannot stay usable for the length of an arbitrarily long outage.
+MAX_STALE_KEY_AGE_SECONDS = 24 * 3600.0
 
 
 class JWKSUnavailableError(Exception):
@@ -145,9 +149,18 @@ class JWKSManager:
         """Serve a previously fetched key while JWKS is unavailable, else raise.
 
         Keys are only ever replaced by a successful fetch, so a cached key was
-        valid when last seen; serving it keeps sign-in working during an outage.
+        valid when last seen; serving it keeps sign-in working during an outage,
+        for at most MAX_STALE_KEY_AGE_SECONDS after that fetch.
         """
         key = self._keys.get(kid)
+        age = time.monotonic() - self._last_fetch_time
+        if key is not None and age > MAX_STALE_KEY_AGE_SECONDS:
+            logger.error(
+                "JWKS unavailable and cached keys are %.0fs old (limit %.0fs); failing closed",
+                age,
+                MAX_STALE_KEY_AGE_SECONDS,
+            )
+            raise JWKSUnavailableError(reason)
         if key is not None:
             logger.warning("Serving cached JWKS key while the endpoint is unavailable")
             return key

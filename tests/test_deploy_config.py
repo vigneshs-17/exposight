@@ -180,14 +180,17 @@ def test_caddyfile_content_invariants():
     assert "content-security-policy" not in lower_content
     # The app does NOT set HSTS, so Caddy (the HTTPS edge) must add it.
     assert 'header strict-transport-security "max-age=31536000"' in lower_content
-    # Caddy only adds HSTS and removes the Server header (H-Hdr-1); nothing else.
+    # Caddy only adds HSTS and removes Server (H-Hdr-1) and Via (IC-1, F10): Server on the
+    # HTTP redirect site, then HSTS, Server and Via on the HTTPS site. Nothing else.
     header_lines = [
         ln.strip() for ln in lower_content.splitlines() if ln.strip().startswith("header ")
     ]
     assert header_lines == [
+        "header -server",
         'header strict-transport-security "max-age=31536000"',
         "header -server",
-    ], f"Caddy must only add HSTS and drop Server, found: {header_lines}"
+        "header -via",
+    ], f"Caddy must only add HSTS and drop Server/Via, found: {header_lines}"
 
 
 def test_compose_prod_least_privilege_database_roles():
