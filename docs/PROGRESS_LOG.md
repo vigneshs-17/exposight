@@ -65,3 +65,12 @@
 - **Failing Before / Passing After**: `tests/test_change_replay.py::test_scanner_benchmark_gates_adr_alignment`.
 - **Fix**: Reverted the improper gate relaxation introduced in PR #33. Restored invariant owner stop-rule gates: `MAX_ALERT_FALSE_PER_1000 = 0.1` and `MAX_MISSED = 0`. Removed the hard failure gate on informational (non-alert) false changes, reporting the rate honestly as diagnostic telemetry. Documented the owner's decision word-for-word in `docs/adr/0001-scanner-benchmark-gates.md` and `docs/decisions/0001-scanner-benchmark-gates.md`. Preserved prober resource-safety hardening (G1.1 streaming 64 KB body cap via `response.iter_raw(chunk_size=4096)`, non-identity `Content-Encoding` rejection, G1.2 TLS timeout alignment within 10s deadline, G1.3 deterministic `response.close()` cleanup in `finally:`).
 - **Limits**: Honest reporting without relaxing quality gates; real event recall and alert-eligible false change thresholds remain strictly invariant.
+
+## Final batch Item 2: Docker Log Rotation
+- **Status**: Already on `main` before this batch; no change needed.
+- **Evidence**: every service in `compose.prod.yml` uses the `x-logging` anchor (json-file, `max-size: 10m`, `max-file: 3`); `tests/test_deploy_config.py::test_every_service_has_log_rotation` enforces it.
+
+## Final batch Item 3: RFC 9116 security.txt
+- **Failing Before / Passing After**: `tests/test_security_txt.py` (2 of 3 failed with 404 before the route existed).
+- **Fix**: `GET /.well-known/security.txt` in `src/asm/api/routes_ui.py`, `text/plain`, Contact = GitHub private advisory URL, rolling `Expires` 180 days ahead (always under the RFC one-year limit), `Preferred-Languages: en`, `Canonical`. Route classified PUBLIC in the route-isolation registry.
+- **Limits**: no PGP signature; Canonical is the fixed `https://exposight.dev` URL.

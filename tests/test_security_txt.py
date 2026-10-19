@@ -20,7 +20,8 @@ def _get(path: str):
 
 
 def _fields(body: str) -> dict[str, str]:
-    return dict(line.split(": ", 1) for line in body.splitlines() if line and not line.startswith("#"))
+    lines = [line for line in body.splitlines() if line and not line.startswith("#")]
+    return dict(line.split(": ", 1) for line in lines)
 
 
 def test_security_txt_served_as_plain_text_with_required_fields():
