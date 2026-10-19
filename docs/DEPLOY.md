@@ -214,13 +214,13 @@ command:
   - "--workers"
   - "1"
   - "--proxy-headers"
-  - "--forwarded-allow-ips=10.89.0.0/24"
+  - "--forwarded-allow-ips=10.89.0.20"
 ```
-*Rationale*: request rate limits (60 requests/minute per user; 20/minute per IP for unauthenticated requests and failed sign-ins; `429` with `Retry-After`) are kept **in memory** in `src/asm/ratelimit.py`. Running several worker processes would give each its own counters and multiply the effective limit; that would need a shared store such as Redis, which is not used. Counters reset when the api restarts. The client IP comes from `X-Forwarded-For` only because uvicorn trusts that header from the Caddy subnet (`--forwarded-allow-ips=10.89.0.0/24`).
+*Rationale*: request rate limits (60 requests/minute per user; 20/minute per IP for unauthenticated requests and failed sign-ins; `429` with `Retry-After`) are kept **in memory** in `src/asm/ratelimit.py`. Running several worker processes would give each its own counters and multiply the effective limit; that would need a shared store such as Redis, which is not used. Counters reset when the api restarts. The client IP comes from `X-Forwarded-For` only because uvicorn trusts that header from Caddy's fixed IP (`--forwarded-allow-ips=10.89.0.20`).
 
 Quotas are counted in PostgreSQL and survive restarts: 10 domains per organization, 5 owned organizations per user (`403`), 3 manual scans per domain per hour (`429` with `Retry-After`), and 20 alert emails per domain per 24 hours (further alerts are delayed, not dropped).
 
-Additionally, `--proxy-headers` and `--forwarded-allow-ips=10.89.0.0/24` ensure that Uvicorn trusts `X-Forwarded-For` and `X-Forwarded-Proto` only when delivered from Caddy running on the fixed `10.89.0.0/24` Docker network subnet, preventing spoofed IP injection by direct clients.
+Additionally, `--proxy-headers` and `--forwarded-allow-ips=10.89.0.20` ensure that Uvicorn trusts `X-Forwarded-For` and `X-Forwarded-Proto` only when delivered from Caddy running on its fixed `10.89.0.20` IP on the `app-tier` Docker network, preventing spoofed IP injection by direct clients or other containers.
 
 ### Launching the Stack
 ```bash
@@ -312,28 +312,54 @@ Always deploy tagged Git releases in production:
 ## 6. Database Backups, Off-Site Sync & Disaster Recovery
 
 ### Automated Daily Backups
-The backup script at `scripts/backup_db.sh` runs `pg_dump` within the running database container, applies `umask 077` (owner-only permissions), compresses with gzip, and automatically deletes backups older than 7 days.
+Exposight provides two backup scripts:
+1. `scripts/backup_db.sh`: Standard compressed backup (`.sql.gz`) with owner-only permissions (077 umask, 0600 file modes) and 7-day retention.
+2. `scripts/backup_encrypted.sh`: Encrypted compressed backup (`.sql.gz.age`) using `age` (G6.1).
 
-Configure a daily cron job:
+### Encrypted Backups with `age` (Recommended for Off-Host Storage)
+To ensure backups cannot be read if off-host storage or transport is intercepted, use `scripts/backup_encrypted.sh`.
+
+#### 1. Generate Key Pair (Off-Host Only)
+On a secure operator workstation (NOT the production VM):
+```bash
+# Install age (e.g. brew install age, apt install age)
+age-keygen -o exposight_backup_key.txt
+# Output displays the public recipient key: age1...
+```
+**CRITICAL SECURITY RULE**: The private key (`exposight_backup_key.txt`) must NEVER be copied to or stored on the production VM. Only the public recipient key is placed on the host.
+
+#### 2. Configure Public Key on Production Host
+Extract or copy the public recipient key to the host:
+```bash
+# On the production VM:
+sudo mkdir -p /etc/exposight
+echo "age1..." | sudo tee /etc/exposight/backup_age_recipient.pub
+sudo chmod 644 /etc/exposight/backup_age_recipient.pub
+```
+Alternatively, configure `BACKUP_AGE_RECIPIENT="age1..."` in the environment.
+`scripts/backup_encrypted.sh` strictly enforces that any recipient key starting with `AGE-SECRET-KEY-` is rejected.
+
+#### 3. Configure Automated Daily Cron Job
 ```bash
 sudo crontab -e
 ```
 Add entry (runs at 03:00 UTC daily):
 ```cron
-0 3 * * * bash /opt/exposight/scripts/backup_db.sh /var/backups/exposight >> /var/log/exposight_backup.log 2>&1
+0 3 * * * bash /opt/exposight/scripts/backup_encrypted.sh /var/backups/exposight >> /var/log/exposight_backup.log 2>&1
 ```
-Calling it through `bash` works even if the checkout lost the script's executable bit (it is tracked as `100755`; `tests/test_deploy_config.py` checks every `scripts/*.sh`).
+(Both scripts are tracked as `100755` executable in git; `tests/test_deploy_config.py` verifies all `scripts/*.sh`).
 
 ### Off-Site Backup Sync (Off-Host Storage)
 Backups stored on the same VM will be lost if the instance is terminated or corrupted. Copy backup archives off the host to a remote server or local backup machine using `scp` / `rsync`:
 
 Example off-site sync command (run from backup storage server or pull machine):
 ```bash
-scp -i ~/.ssh/backup_key deployer@<VM_PUBLIC_IPV4_ADDRESS>:/var/backups/exposight/*.sql.gz /local/safe/backup/storage/
+scp -i ~/.ssh/backup_key deployer@<VM_PUBLIC_IPV4_ADDRESS>:/var/backups/exposight/*.sql.gz.age /local/safe/backup/storage/
 ```
 
 ### Database Restore Procedure
-In disaster recovery or database recreation:
+
+#### For Standard Backups (`.sql.gz`):
 0. Stop writers first so nothing changes during the restore:
    ```bash
    docker compose -f compose.prod.yml stop api worker
@@ -348,6 +374,23 @@ In disaster recovery or database recreation:
      docker compose -f compose.prod.yml exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
    ```
 3. Verify restored data and run migrations check:
+   ```bash
+   docker compose -f compose.prod.yml run --rm migrate check
+   docker compose -f compose.prod.yml start api worker
+   ```
+
+#### For Encrypted Backups (`.sql.gz.age`):
+0. Stop writers first:
+   ```bash
+   docker compose -f compose.prod.yml stop api worker
+   ```
+1. Decrypt using the off-host private key (`exposight_backup_key.txt`), decompress, and pipe into PostgreSQL:
+   ```bash
+   age --decrypt -i /path/to/exposight_backup_key.txt /var/backups/exposight/exposight_db_YYYYMMDD_HHMMSSZ.sql.gz.age | \
+     gunzip -c | \
+     docker compose -f compose.prod.yml exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+   ```
+2. Verify restored data and restart services:
    ```bash
    docker compose -f compose.prod.yml run --rm migrate check
    docker compose -f compose.prod.yml start api worker

@@ -77,15 +77,21 @@ def test_compose_prod_api_healthcheck_and_proxy_headers():
     )
     assert "--proxy-headers" in command_str, "api must include --proxy-headers"
 
-    # Forwarded allow ips check
+    # Forwarded allow ips check: must be strictly Caddy's fixed IP (10.89.0.20)
     assert "--forwarded-allow-ips" in command_str, "api must specify --forwarded-allow-ips"
     assert "--forwarded-allow-ips=*" not in command_str, (
         "api --forwarded-allow-ips must NOT be wildcard '*'"
     )
-    assert "10.89.0.0/24" in command_str, "api --forwarded-allow-ips must match the app-tier subnet"
+    assert "10.89.0.20" in command_str, (
+        "api --forwarded-allow-ips must strictly match Caddy's IP 10.89.0.20"
+    )
+    assert "10.89.0.0/24" not in command_str, (
+        "api --forwarded-allow-ips must not be the entire subnet"
+    )
 
-    # Caddy depends on api being healthy
+    # Caddy depends on api being healthy and has fixed IP 10.89.0.20
     caddy_svc = config["services"]["caddy"]
+    assert caddy_svc["networks"]["app-tier"]["ipv4_address"] == "10.89.0.20"
     depends_on = caddy_svc.get("depends_on", {})
     assert "api" in depends_on, "caddy must depend on api"
     assert depends_on["api"].get("condition") == "service_healthy", (
@@ -376,5 +382,6 @@ def test_shell_scripts_are_executable_in_git():
     ).stdout.splitlines()
     modes = {line.split("\t", 1)[1]: line.split()[0] for line in listing}
     assert "scripts/backup_db.sh" in modes, "scripts/backup_db.sh must be tracked"
+    assert "scripts/backup_encrypted.sh" in modes, "scripts/backup_encrypted.sh must be tracked"
     not_executable = {path: mode for path, mode in modes.items() if mode != "100755"}
     assert not not_executable, f"run git update-index --chmod=+x on: {not_executable}"
