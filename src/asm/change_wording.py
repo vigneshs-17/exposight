@@ -22,6 +22,10 @@ CHANGE_DESCRIPTIONS: dict[str, str] = {
         "did not establish it as open. This does not establish when the service "
         "became reachable."
     ),
+    "PORT_REOPENED": "port observed open again after a single closed observation",
+    "PORT_OBSERVED_OPEN": (
+        "port observed open; no earlier definite observation for comparison"
+    ),
     "PORT_NO_LONGER_OPEN": (
         "This port refused the scanner's connection in this scan. An earlier scan "
         "observed it open. This records the scanner's connection result only; it does "

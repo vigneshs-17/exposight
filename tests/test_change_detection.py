@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from asm.change_wording import describe_change
 from asm.changes import (
     bootstrap_persistent_inventory,
     detect_changes,
@@ -421,9 +422,9 @@ def test_port_opened_and_closed_severities():
     )
     assert p3306["severity"] == "CRITICAL"
 
-    # Port 443 -> INFO (Standard port)
+    # Port 443 -> INFO (Standard port without prior definite observation -> PORT_OBSERVED_OPEN)
     p443 = next(
-        c for c in changes if c["change_type"] == "PORT_NEWLY_OPEN" and c["detail"] == "443"
+        c for c in changes if c["change_type"] == "PORT_OBSERVED_OPEN" and c["detail"] == "443"
     )
     assert p443["severity"] == "INFO"
 
@@ -888,8 +889,8 @@ def test_port_closed_filtered_open_emits_newly_open_with_correct_baseline_id():
     assert ch["previous_state"] == {"port": 80, "state": "CLOSED"}
 
 
-def test_port_filtered_repeated_beyond_window_recovers_as_newly_open():
-    """Prolonged uncertainty beyond the 3-scan window recovers as PORT_NEWLY_OPEN."""
+def test_port_filtered_repeated_beyond_window_emits_observed_open():
+    """Prolonged uncertainty beyond the 3-scan window emits PORT_OBSERVED_OPEN (Option A)."""
     host = "api.example.com"
     _s1 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
     s2 = _make_port_scan(host, filtered_ports=[80])
@@ -907,10 +908,15 @@ def test_port_filtered_repeated_beyond_window_recovers_as_newly_open():
     port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
     assert len(port_changes) == 1
     ch = port_changes[0]
-    assert ch["change_type"] == "PORT_NEWLY_OPEN"
+    assert ch["change_type"] == "PORT_OBSERVED_OPEN"
+    assert ch["severity"] == "INFO"
+    assert ch["category"] == "exposure"
     assert ch["detail"] == "80"
     assert ch["baseline_scan_run_id"] == 304  # Fallback to immediate baseline
     assert ch["previous_state"] is None  # Distinguishes no definite prior evidence
+    assert describe_change(ch["change_type"], ch["detail"]) == (
+        "port observed open; no earlier definite observation for comparison"
+    )
 
 
 def test_port_missing_stage_data_treated_as_unknown():
@@ -930,13 +936,13 @@ def test_port_missing_stage_data_treated_as_unknown():
 
 
 def test_port_genuine_close_reopen_cycle():
-    """OPEN -> CLOSED -> OPEN emits PORT_NO_LONGER_OPEN then PORT_NEWLY_OPEN."""
+    """OPEN -> CLOSED (1 scan) -> OPEN emits PORT_NO_LONGER_OPEN then PORT_REOPENED (INFO)."""
     host = "api.example.com"
     s1 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
     s2 = _make_port_scan(host, closed_ports=[80])
     s3 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
 
-    # s1 -> s2
+    # s1 -> s2: emits PORT_NO_LONGER_OPEN
     ch12 = detect_changes(
         s1,
         s2,
@@ -948,7 +954,7 @@ def test_port_genuine_close_reopen_cycle():
     assert port_ch12[0]["change_type"] == "PORT_NO_LONGER_OPEN"
     assert port_ch12[0]["baseline_scan_run_id"] == 501
 
-    # s2 -> s3
+    # s2 -> s3: exactly 1 definite CLOSED observation after prior OPEN -> PORT_REOPENED (INFO)
     ch23 = detect_changes(
         s2,
         s3,
@@ -960,8 +966,339 @@ def test_port_genuine_close_reopen_cycle():
     )
     port_ch23 = [c for c in ch23 if c["change_type"].startswith("PORT_")]
     assert len(port_ch23) == 1
-    assert port_ch23[0]["change_type"] == "PORT_NEWLY_OPEN"
+    assert port_ch23[0]["change_type"] == "PORT_REOPENED"
+    assert port_ch23[0]["severity"] == "INFO"
+    assert port_ch23[0]["category"] == "exposure"
     assert port_ch23[0]["baseline_scan_run_id"] == 502
+    assert describe_change(port_ch23[0]["change_type"], port_ch23[0]["detail"]) == (
+        "port observed open again after a single closed observation"
+    )
+
+
+def test_port_confirmed_closure_reopen_emits_alert_eligible():
+    """OPEN -> CLOSED -> CLOSED -> OPEN (>=2 definite CLOSED) emits PORT_NEWLY_OPEN."""
+    host = "api.example.com"
+    s1 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+    s2 = _make_port_scan(host, closed_ports=[80])
+    s3 = _make_port_scan(host, closed_ports=[80])
+    s4 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+
+    ch34 = detect_changes(
+        s3,
+        s4,
+        historical_baselines=[
+            {"scan_run_id": 503, "reports": s3},
+            {"scan_run_id": 502, "reports": s2},
+            {"scan_run_id": 501, "reports": s1},
+        ],
+        baseline_scan_run_id=503,
+    )
+    port_ch34 = [c for c in ch34 if c["change_type"].startswith("PORT_")]
+    assert len(port_ch34) == 1
+    assert port_ch34[0]["change_type"] == "PORT_NEWLY_OPEN"
+    assert port_ch34[0]["baseline_scan_run_id"] == 503
+
+
+def test_port_first_ever_open_is_alert_eligible():
+    """First-ever OPEN without prior history is alert-eligible PORT_NEWLY_OPEN."""
+    host = "api.example.com"
+    s1 = _make_port_scan(host, open_ports=[{"port": 3306, "state": "OPEN"}])
+
+    changes = detect_changes(
+        {},
+        s1,
+        historical_baselines=[],
+        baseline_scan_run_id=None,
+    )
+    port_ch = [c for c in changes if c["change_type"] == "PORT_NEWLY_OPEN"]
+    assert len(port_ch) == 1
+    assert port_ch[0]["severity"] in ("CRITICAL", "HIGH", "MEDIUM")
+
+
+def test_port_unknown_observations_never_count_as_closed():
+    """UNKNOWN observations (filtered / unprobed) never count as CLOSED or break history."""
+    host = "api.example.com"
+    s_open = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+    s_closed = _make_port_scan(host, closed_ports=[80])
+    s_filtered = _make_port_scan(host, filtered_ports=[80])
+
+    # 1. OPEN -> FILTERED -> OPEN: latest definite is OPEN -> no change emitted
+    ch_filt_open = detect_changes(
+        s_filtered,
+        s_open,
+        historical_baselines=[
+            {"scan_run_id": 702, "reports": s_filtered},
+            {"scan_run_id": 701, "reports": s_open},
+        ],
+        baseline_scan_run_id=702,
+    )
+    assert not any(c["change_type"].startswith("PORT_") for c in ch_filt_open)
+
+    # 2. OPEN -> CLOSED -> FILTERED -> OPEN: 1 definite CLOSED + 1 UNKNOWN -> PORT_REOPENED (INFO)
+    ch_c_u_o = detect_changes(
+        s_filtered,
+        s_open,
+        historical_baselines=[
+            {"scan_run_id": 703, "reports": s_filtered},
+            {"scan_run_id": 702, "reports": s_closed},
+            {"scan_run_id": 701, "reports": s_open},
+        ],
+        baseline_scan_run_id=703,
+    )
+    port_c_u_o = [c for c in ch_c_u_o if c["change_type"].startswith("PORT_")]
+    assert len(port_c_u_o) == 1
+    assert port_c_u_o[0]["change_type"] == "PORT_REOPENED"
+    assert port_c_u_o[0]["severity"] == "INFO"
+
+    # 3. OPEN -> FILTERED -> CLOSED -> OPEN: 1 definite CLOSED preceded by UNKNOWN
+    # -> PORT_REOPENED (INFO)
+    ch_u_c_o = detect_changes(
+        s_closed,
+        s_open,
+        historical_baselines=[
+            {"scan_run_id": 703, "reports": s_closed},
+            {"scan_run_id": 702, "reports": s_filtered},
+            {"scan_run_id": 701, "reports": s_open},
+        ],
+        baseline_scan_run_id=703,
+    )
+    port_u_c_o = [c for c in ch_u_c_o if c["change_type"].startswith("PORT_")]
+    assert len(port_u_c_o) == 1
+    assert port_u_c_o[0]["change_type"] == "PORT_REOPENED"
+    assert port_u_c_o[0]["severity"] == "INFO"
+
+    # 4. OPEN -> CLOSED -> FILTERED -> CLOSED -> OPEN: 2 definite CLOSED separated by UNKNOWN
+    # -> PORT_NEWLY_OPEN
+    ch_confirmed = detect_changes(
+        s_closed,
+        s_open,
+        historical_baselines=[
+            {"scan_run_id": 704, "reports": s_closed},
+            {"scan_run_id": 703, "reports": s_filtered},
+            {"scan_run_id": 702, "reports": s_closed},
+            {"scan_run_id": 701, "reports": s_open},
+        ],
+        baseline_scan_run_id=704,
+    )
+    port_conf = [c for c in ch_confirmed if c["change_type"].startswith("PORT_")]
+    assert len(port_conf) == 1
+    assert port_conf[0]["change_type"] == "PORT_NEWLY_OPEN"
+
+
+def test_port_worker_and_replay_parity_on_alert_semantics():
+    """Worker and replay paths produce identical change types and severities."""
+    host = "api.example.com"
+    s1 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+    s2 = _make_port_scan(host, closed_ports=[80])
+    s3 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+
+    hist = [{"scan_run_id": 802, "reports": s2}, {"scan_run_id": 801, "reports": s1}]
+    ch_detector = detect_changes(s2, s3, historical_baselines=hist, baseline_scan_run_id=802)
+    p_detector = [c for c in ch_detector if c["change_type"].startswith("PORT_")]
+    assert len(p_detector) == 1
+    assert p_detector[0]["change_type"] == "PORT_REOPENED"
+    assert p_detector[0]["severity"] == "INFO"
+
+
+def test_port_option_a_unknown_to_open_emits_informational():
+    """Option A: UNKNOWN (unprobed/timeout) -> OPEN on existing asset emits
+    PORT_OBSERVED_OPEN (INFO).
+    """
+    host = "api.example.com"
+    s1 = {
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": host,
+                    "status": "TIMEOUT",
+                    "open_ports": [],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            ]
+        }
+    }
+    s2 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+
+    hist = [{"scan_run_id": 901, "reports": s1}]
+    changes = detect_changes(s1, s2, historical_baselines=hist, baseline_scan_run_id=901)
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_OBSERVED_OPEN"
+    assert port_changes[0]["severity"] == "INFO"
+    assert port_changes[0]["category"] == "exposure"
+    assert describe_change(port_changes[0]["change_type"], port_changes[0]["detail"]) == (
+        "port observed open; no earlier definite observation for comparison"
+    )
+
+
+def test_port_option_a_filtered_to_open_emits_informational():
+    """Option A: FILTERED -> OPEN on existing asset emits PORT_OBSERVED_OPEN (INFO)."""
+    host = "api.example.com"
+    s1 = _make_port_scan(host, filtered_ports=[80])
+    s2 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+
+    hist = [{"scan_run_id": 911, "reports": s1}]
+    changes = detect_changes(s1, s2, historical_baselines=hist, baseline_scan_run_id=911)
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_OBSERVED_OPEN"
+    assert port_changes[0]["severity"] == "INFO"
+    assert describe_change(port_changes[0]["change_type"], port_changes[0]["detail"]) == (
+        "port observed open; no earlier definite observation for comparison"
+    )
+
+
+def test_port_option_a_nxdomain_baseline_to_resolved_open_emits_informational():
+    """Option A: NXDOMAIN baseline -> resolved + OPEN on existing asset emits
+    PORT_OBSERVED_OPEN (INFO).
+    """
+    host = "mail.example.com"
+    s1 = {
+        "discover": {
+            "domain": "example.com",
+            "results": [{"subdomain": host, "status": "NXDOMAIN", "resolved": False}],
+        },
+        "portscan": {"results": []},
+    }
+    s2 = {
+        "discover": {
+            "domain": "example.com",
+            "results": [{"subdomain": host, "status": "RESOLVED", "resolved": True}],
+        },
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": host,
+                    "status": "PROBED",
+                    "open_ports": [{"port": 25, "state": "OPEN"}],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            ]
+        },
+    }
+
+    changes = detect_changes(
+        s1,
+        s2,
+        historical_baselines=[{"scan_run_id": 921, "reports": s1}],
+        baseline_scan_run_id=921,
+    )
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_OBSERVED_OPEN"
+    assert port_changes[0]["severity"] == "INFO"
+    # Also verify DNS transition was emitted
+    dns_changes = [c for c in changes if c["change_type"] == "NEWLY_RESOLVING"]
+    assert len(dns_changes) == 1
+
+
+def test_port_option_a_closed_to_open_emits_alert_eligible():
+    """Option A: CLOSED -> OPEN on existing asset emits alert-eligible PORT_NEWLY_OPEN."""
+    host = "api.example.com"
+    s1 = _make_port_scan(host, closed_ports=[80])
+    s2 = _make_port_scan(host, open_ports=[{"port": 80, "state": "OPEN"}])
+
+    hist = [{"scan_run_id": 931, "reports": s1}]
+    changes = detect_changes(s1, s2, historical_baselines=hist, baseline_scan_run_id=931)
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_NEWLY_OPEN"
+    assert port_changes[0]["baseline_scan_run_id"] == 931
+
+
+def test_port_option_a_genuinely_new_host_first_open_emits_alert_eligible():
+    """Option A: Genuinely new host first OPEN emits alert-eligible PORT_NEWLY_OPEN."""
+    host = "new-internal-db.example.com"
+    s1 = {
+        "discover": {
+            "domain": "example.com",
+            "results": [{"subdomain": "api.example.com", "status": "RESOLVED", "resolved": True}],
+        },
+        "portscan": {"results": []},
+    }
+    s2 = {
+        "discover": {
+            "domain": "example.com",
+            "results": [
+                {"subdomain": "api.example.com", "status": "RESOLVED", "resolved": True},
+                {"subdomain": host, "status": "RESOLVED", "resolved": True},
+            ],
+        },
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": host,
+                    "status": "PROBED",
+                    "open_ports": [
+                        {
+                            "port": 3306,
+                            "state": "OPEN",
+                            "banner": "5.7.34-MySQL",
+                            "service_guess": "mysql",
+                        }
+                    ],
+                    "closed_ports": [],
+                    "filtered_ports": [],
+                }
+            ]
+        },
+    }
+
+    changes = detect_changes(
+        s1,
+        s2,
+        historical_baselines=[{"scan_run_id": 941, "reports": s1}],
+        baseline_scan_run_id=941,
+    )
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_NEWLY_OPEN"
+    assert port_changes[0]["severity"] == "CRITICAL"
+
+
+def test_port_option_a_critical_finding_severity_preserved_for_db_3306():
+    """Option A: The Critical finding for db:3306 is still visible in scan results even
+    when PORT_OBSERVED_OPEN is emitted.
+    """
+    from asm.scoring import evaluate_portscan_findings
+
+    host = "db.example.com"
+    # Host exists in baseline with filtered port 3306
+    s1 = _make_port_scan(host, filtered_ports=[3306])
+    s2 = _make_port_scan(
+        host,
+        open_ports=[
+            {
+                "port": 3306,
+                "state": "OPEN",
+                "banner": "5.7.34-MySQL",
+                "service_guess": "mysql",
+            }
+        ],
+    )
+
+    # 1. Verify scan finding retains CRITICAL severity
+    findings_map = evaluate_portscan_findings(s2["portscan"]["results"])
+    assert host in findings_map
+    db_findings = findings_map[host]
+    assert len(db_findings) >= 1
+    f_3306 = next(f for f in db_findings if f.port == 3306)
+    assert f_3306.tier == "CRITICAL"
+    assert "Database port 3306" in f_3306.evidence
+
+    # 2. Verify change event emitted is PORT_OBSERVED_OPEN with INFO severity (non-alert)
+    changes = detect_changes(
+        s1,
+        s2,
+        historical_baselines=[{"scan_run_id": 951, "reports": s1}],
+        baseline_scan_run_id=951,
+    )
+    port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
+    assert len(port_changes) == 1
+    assert port_changes[0]["change_type"] == "PORT_OBSERVED_OPEN"
+    assert port_changes[0]["severity"] == "INFO"
 
 
 def test_port_repeated_stable_observations_emit_no_change():
@@ -1067,7 +1404,8 @@ def test_port_window_boundary_definite_inside_vs_outside():
     assert port_ch_a[0]["change_type"] == "PORT_NO_LONGER_OPEN"
     assert port_ch_a[0]["baseline_scan_run_id"] == 101  # Retained in window
 
-    # Case B: Exactly 3 unknowns in window; original definite observation expired
+    # Case B: Exactly 3 unknowns in window; original definite observation expired.
+    # On an existing asset, uncertainty beyond window emits PORT_OBSERVED_OPEN (INFO) per Option A.
     # Window = [s4 (filtered), s3 (filtered), s2 (filtered)] -> s5 (open)
     hist_outside = [
         {"scan_run_id": 104, "reports": s_filt},
@@ -1079,7 +1417,8 @@ def test_port_window_boundary_definite_inside_vs_outside():
     )
     port_ch_b = [c for c in ch_b if c["change_type"].startswith("PORT_")]
     assert len(port_ch_b) == 1
-    assert port_ch_b[0]["change_type"] == "PORT_NEWLY_OPEN"
+    assert port_ch_b[0]["change_type"] == "PORT_OBSERVED_OPEN"
+    assert port_ch_b[0]["severity"] == "INFO"
     assert port_ch_b[0]["baseline_scan_run_id"] == 104  # Immediate fallback
     assert port_ch_b[0]["previous_state"] is None  # Uncertainty policy
 
@@ -1136,7 +1475,8 @@ def test_port_more_recent_closed_overrides_older_open():
     port_changes = [c for c in changes if c["change_type"].startswith("PORT_")]
     assert len(port_changes) == 1
     ch = port_changes[0]
-    assert ch["change_type"] == "PORT_NEWLY_OPEN"
+    assert ch["change_type"] == "PORT_REOPENED"
+    assert ch["severity"] == "INFO"
     assert ch["baseline_scan_run_id"] == 302  # Attributed to s2 (CLOSED), not s1
     assert ch["previous_state"] == {"port": 80, "state": "CLOSED"}
 
@@ -1201,8 +1541,9 @@ def test_port_multiple_changes_draw_from_different_baseline_ids():
     hist = [{"scan_run_id": 602, "reports": s2}, {"scan_run_id": 601, "reports": s1}]
     changes = detect_changes(s2, s3, historical_baselines=hist, baseline_scan_run_id=602)
 
-    ch80 = next(c for c in changes if c["change_type"] == "PORT_NEWLY_OPEN")
+    ch80 = next(c for c in changes if c["change_type"] == "PORT_REOPENED")
     assert ch80["detail"] == "80"
+    assert ch80["severity"] == "INFO"
     assert ch80["baseline_scan_run_id"] == 602  # From s2 where port 80 was CLOSED
 
     ch443 = next(c for c in changes if c["change_type"] == "PORT_NO_LONGER_OPEN")

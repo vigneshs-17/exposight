@@ -81,6 +81,8 @@ def test_describe_change_port_newly_open_covers_initial_and_reopening():
             ]
         }
     }
+    # Verify against actual production detector reopening path:
+    # 1. OPEN -> CLOSED -> OPEN emits PORT_REOPENED (honest description)
     reopened = detect_changes(
         scan_2,
         scan_3,
@@ -91,7 +93,41 @@ def test_describe_change_port_newly_open_covers_initial_and_reopening():
         baseline_scan_run_id=2,
         current_scan_run_id=3,
     )
-    port_changes = [c for c in reopened if c["change_type"] == "PORT_NEWLY_OPEN"]
+    port_reopened = [c for c in reopened if c["change_type"] == "PORT_REOPENED"]
+    assert len(port_reopened) == 1
+    assert port_reopened[0]["previous_state"] == {"port": 5432, "state": "CLOSED"}
+    assert port_reopened[0]["severity"] == "INFO"
+    assert (
+        describe_change(port_reopened[0]["change_type"], port_reopened[0]["detail"])
+        == "port observed open again after a single closed observation"
+    )
+
+    # 2. OPEN -> CLOSED -> CLOSED -> OPEN emits PORT_NEWLY_OPEN (alert-eligible)
+    scan_2b = {
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": "api.example.com",
+                    "status": "PROBED",
+                    "open_ports": [],
+                    "closed_ports": [5432],
+                    "filtered_ports": [],
+                }
+            ]
+        }
+    }
+    reopened_confirmed = detect_changes(
+        scan_2b,
+        scan_3,
+        historical_baselines=[
+            {"scan_run_id": 3, "reports": scan_2b},
+            {"scan_run_id": 2, "reports": scan_2},
+            {"scan_run_id": 1, "reports": scan_1},
+        ],
+        baseline_scan_run_id=3,
+        current_scan_run_id=4,
+    )
+    port_changes = [c for c in reopened_confirmed if c["change_type"] == "PORT_NEWLY_OPEN"]
     assert len(port_changes) == 1
     assert port_changes[0]["previous_state"] == {"port": 5432, "state": "CLOSED"}
     assert describe_change(port_changes[0]["change_type"], port_changes[0]["detail"]) == desc

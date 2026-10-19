@@ -394,6 +394,169 @@ class RunResult:
     noise_fired: Counter[str]
 
 
+def _is_state_reversed(
+    noisy: list[dict[str, dict[str, Any]]],
+    emitted_scan: int,
+    event_scan: int,
+    key: tuple[str, str, str],
+) -> bool:
+    """Check if the state emitted at `emitted_scan` reversed before or at `event_scan`.
+
+    Per ADR 0001 (owner decision):
+    An emitted state-change event counts as a match for a labelled event if it is
+    emitted at most 1 scan BEFORE the labelled scan AND the emitted state is not
+    reversed through the labelled scan.
+    """
+    if event_scan >= len(noisy):
+        return False
+
+    change_type, asset, detail = key
+    target_scan_rep = noisy[event_scan]
+
+    if change_type in ("PORT_NO_LONGER_OPEN",):
+        # Emitted state: port is not open (closed or filtered).
+        # Reversed: port is OPEN at event_scan.
+        try:
+            port_num = int(detail)
+        except ValueError:
+            return False
+        port_results = (target_scan_rep.get("portscan") or {}).get("results", [])
+        for r in port_results:
+            if isinstance(r, dict) and r.get("subdomain") == asset:
+                for p in r.get("open_ports", []):
+                    if (
+                        isinstance(p, dict)
+                        and p.get("port") == port_num
+                        and p.get("state") == "OPEN"
+                    ):
+                        return True
+        return False
+
+    if change_type in ("PORT_NEWLY_OPEN", "PORT_REOPENED", "PORT_OBSERVED_OPEN"):
+        # Emitted state: port is open.
+        # Reversed: port is NOT open (closed, filtered, or unprobed) at event_scan.
+        try:
+            port_num = int(detail)
+        except ValueError:
+            return False
+        port_results = (target_scan_rep.get("portscan") or {}).get("results", [])
+        for r in port_results:
+            if isinstance(r, dict) and r.get("subdomain") == asset:
+                for p in r.get("open_ports", []):
+                    if (
+                        isinstance(p, dict)
+                        and p.get("port") == port_num
+                        and p.get("state") == "OPEN"
+                    ):
+                        return False
+        return True
+
+    if change_type == "REMOVED_SUBDOMAIN":
+        # Emitted state: subdomain is absent.
+        # Reversed: subdomain is present in discovery at event_scan.
+        disc_results = (target_scan_rep.get("discover") or {}).get("results", [])
+        for s in disc_results:
+            if isinstance(s, dict) and s.get("subdomain") == asset:
+                return True
+        return False
+
+    if change_type == "NEW_SUBDOMAIN":
+        # Emitted state: subdomain is present.
+        # Reversed: subdomain is absent from discovery at event_scan.
+        disc_results = (target_scan_rep.get("discover") or {}).get("results", [])
+        for s in disc_results:
+            if isinstance(s, dict) and s.get("subdomain") == asset:
+                return False
+        return True
+
+    if change_type == "STOPPED_RESOLVING":
+        # Emitted state: does not resolve.
+        # Reversed: resolves at event_scan.
+        disc_results = (target_scan_rep.get("discover") or {}).get("results", [])
+        for s in disc_results:
+            if isinstance(s, dict) and s.get("subdomain") == asset:
+                if s.get("resolved") or s.get("status") == "RESOLVED":
+                    return True
+        return False
+
+    if change_type == "NEWLY_RESOLVING":
+        # Emitted state: resolves.
+        # Reversed: does not resolve at event_scan.
+        disc_results = (target_scan_rep.get("discover") or {}).get("results", [])
+        for s in disc_results:
+            if isinstance(s, dict) and s.get("subdomain") == asset:
+                if s.get("resolved") or s.get("status") == "RESOLVED":
+                    return False
+        return True
+
+    if change_type == "SECURITY_HEADER_REMOVED":
+        # Emitted state: header is missing.
+        # Reversed: header is present at event_scan.
+        inspect_results = (target_scan_rep.get("inspect") or {}).get("results", [])
+        for r in inspect_results:
+            if isinstance(r, dict) and r.get("subdomain") == asset:
+                headers = r.get("headers", {})
+                if isinstance(headers, dict) and detail in headers:
+                    return True
+        return False
+
+    if change_type == "SECURITY_HEADER_ADDED":
+        # Emitted state: header is present.
+        # Reversed: header is missing at event_scan.
+        inspect_results = (target_scan_rep.get("inspect") or {}).get("results", [])
+        for r in inspect_results:
+            if isinstance(r, dict) and r.get("subdomain") == asset:
+                headers = r.get("headers", {})
+                if isinstance(headers, dict) and detail in headers:
+                    return False
+        return True
+
+    if change_type == "CERTIFICATE_CHANGED":
+        # Emitted state: cert attribute changed.
+        # Reversed: cert attribute at event_scan reverted to pre-change value.
+        prev_scan = max(0, emitted_scan - 1)
+        prev_results = (noisy[prev_scan].get("inspect") or {}).get("results", [])
+        cur_results = (target_scan_rep.get("inspect") or {}).get("results", [])
+        prev_r = next(
+            (r for r in prev_results if isinstance(r, dict) and r.get("subdomain") == asset),
+            None,
+        )
+        cur_r = next(
+            (r for r in cur_results if isinstance(r, dict) and r.get("subdomain") == asset),
+            None,
+        )
+        if prev_r and cur_r:
+            prev_cert = prev_r.get("cert") or {}
+            cur_cert = cur_r.get("cert") or {}
+            if prev_cert.get(detail) == cur_cert.get(detail):
+                return True
+        return False
+
+    return False
+
+
+def _matches_event(
+    ev: Event,
+    k: tuple[str, str, str],
+    t: int,
+    noisy: list[dict[str, dict[str, Any]]],
+) -> bool:
+    """Determine whether an emitted change matches a labelled ground-truth event.
+
+    Per owner decision:
+    - Matches on-time or delayed detection (ev.scan <= t).
+    - Matches if emitted at most 1 scan BEFORE the labelled scan (t == ev.scan - 1)
+      AND the emitted state is not reversed through the labelled scan.
+    """
+    if ev.key != k:
+        return False
+    if ev.scan <= t:
+        return True
+    if t == ev.scan - 1 and not _is_state_reversed(noisy, t, ev.scan, k):
+        return True
+    return False
+
+
 def replay(
     probs: dict[str, float],
     seed: int,
@@ -421,8 +584,16 @@ def replay(
         clean_keys = {change_key(c) for c in p0_compare(clean[t - 1], clean[t])}
         for c in p0_compare(noisy[t - 1], noisy[t]):
             k = change_key(c)
-            ev = next((e for e in EVENTS if e.key == k and e.scan <= t
-                       and e.name in detected and detected[e.name] is None), None)
+            ev = next(
+                (
+                    e
+                    for e in EVENTS
+                    if _matches_event(e, k, t, noisy)
+                    and e.name in detected
+                    and detected[e.name] is None
+                ),
+                None,
+            )
             if ev is not None:
                 detected[ev.name] = t
             elif k not in clean_keys:
@@ -528,8 +699,7 @@ def replay_candidate(
                 (
                     e
                     for e in EVENTS
-                    if e.key == k
-                    and e.scan <= t
+                    if _matches_event(e, k, t, noisy)
                     and e.name in detected
                     and detected[e.name] is None
                 ),
