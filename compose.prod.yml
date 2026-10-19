@@ -172,7 +172,7 @@ services:
 
   caddy:
     logging: *default-logging
-    image: caddy:2.11.4-alpine
+    image: caddy:2.11.7-alpine
     restart: unless-stopped
     environment:
       DOMAIN: ${DOMAIN:-exposight.dev}

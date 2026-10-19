@@ -46,7 +46,7 @@ Staging resources must be provisioned inside a dedicated, isolated Azure resourc
   - Image configuration IDs are distinct from **image manifest digests** (`@sha256:...`), which identify the OCI image manifest document rather than the image config blob. Ordinary version tags provide build traceability, but are neither image configuration IDs nor immutable manifest digests.
 - Pinned third-party images (referenced in `compose.prod.yml` and Dockerfile):
   - `postgres:18.6-alpine`
-  - `caddy:2.11.4-alpine`
+  - `caddy:2.11.7-alpine`
   - `python:3.12.15-slim-trixie`
 
 ---

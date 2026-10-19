@@ -9,7 +9,7 @@ This guide documents deploying Exposight to a single **ARM64 Ubuntu Linux Virtua
 All third-party images and services used in production are pinned to specific immutable tags and architectures:
 
 ### Reverse Proxy & Ingress
-- **Image**: `caddy:2.11.4-alpine` (latest Caddy release v2.11.4 at time of pinning; tag rebuilt by Docker Hub, so the tag is pinned, not the digest)
+- **Image**: `caddy:2.11.7-alpine` (latest Caddy release v2.11.7 at time of pinning; tag rebuilt by Docker Hub, so the tag is pinned, not the digest)
 - **Supported Architectures**: `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v6`, `linux/ppc64le`, `linux/s390x`
 - **Role**: Termination of TLS on ports 80/443, automatic Let's Encrypt / ZeroSSL HTTPS certificate provisioning via ACME, and reverse proxy to `api:8000`. Caddy adds only `Strict-Transport-Security` (the app does not set HSTS); it never overrides the application's CSP or other security headers.
 
