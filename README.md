@@ -3,27 +3,87 @@
 
 # Exposight - Attack Surface Management
 
-Exposight is a multi-tenant Attack Surface Management (ASM) service: a FastAPI web app (JSON API and server-rendered dashboard) where organizations verify the domains they own and schedule scans, a background worker that runs the scans, detects changes and sends email alerts, and the original `asm` command-line scanner.
+**Live:** https://exposight.dev (invite-only student beta)
+
+Exposight watches the internet-facing side of a domain you own. It finds subdomains through Certificate Transparency logs, checks which hosts are live, scans a fixed set of common ports, inspects TLS and security headers, scores the risk, and tells you **what changed since the last scan**.
+
+The hard part is the last step. Real scans are noisy: DNS times out, ports flap, CDNs rotate certificates. A naive diff turns that noise into false alerts. Exposight separates real changes from scan noise and only emails alerts for changes it has confirmed.
+
+## Results
+
+Change detection is measured with a seeded replay benchmark (`experiments/change_replay/`): synthetic domains with 9 labelled real events per seed, and realistic noise injected at measured rates (DNS timeouts, NXDOMAIN blips, partial CT results, port flaps, CDN certificate rotation, probe and inspect timeouts).
+
+| Version | Seeds | Asset-scans | False changes per 1,000 | **Alert-eligible false changes per 1,000** | Missed real events |
+|---|---|---|---|---|---|
+| P0 (naive diff) | 1-20 | 7,080 | 157.63 | **11.86** | 7 |
+| Current | 1-80 | 28,320 | 45.09 | **0.00** | **0** |
+
+The remaining false changes are informational only (for example `PORT_REOPENED` after a single-scan closure); they appear in the dashboard and never trigger an email. The gates (alert-eligible ≤ 0.1 per 1,000, zero misses) were fixed before tuning and were never relaxed: see [docs/decisions/0001-scanner-benchmark-gates.md](docs/decisions/0001-scanner-benchmark-gates.md). Results come from simulated noise; live false-alert rates on real domains are still being measured.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[Browser] -->|HTTPS| C[Caddy<br/>TLS, HSTS]
+    C --> A[API + dashboard<br/>FastAPI, Jinja2, HTMX]
+    A -->|JWT check| S[(Supabase Auth)]
+    A --> D[(PostgreSQL 18<br/>owner + app roles)]
+    W[Worker<br/>scan pipeline] --> D
+    W --> E[Egress firewall<br/>blocks private, metadata,<br/>loopback, CGNAT, IPv6]
+    E -->|public internet only| T[Verified target domains<br/>crt.sh / Cert Spotter]
+    W -.->|SMTP 587| M[Email alerts]
+```
+
+- **API + dashboard**: server-rendered pages with a strict CSP (no inline scripts, no CDNs). Supabase issues the login token; the API verifies it against Supabase's public keys.
+- **Worker**: claims queued and scheduled scans from Postgres, runs the 5-stage pipeline (`discover -> probe -> portscan -> inspect -> score`), stores results, computes changes and queues alerts.
+- **Egress firewall**: the worker can only reach Postgres and the public internet. It cannot reach the VM's private network or the cloud metadata service, even if a scanned host redirects there.
+- **Database**: migrations run as an owner role; the app connects as a least-privilege role. The audit log is append-only and protected by a trigger.
+
+## Security design
+
+- **Tenant isolation**: every route is classified as tenant-scoped, list-scoped or public; a test sends another organization's ids to every tenant route and expects 404 with no data leaked.
+- **Scan only what you own**: a domain must be verified with a DNS TXT record before any active scan, and it is re-verified in the background.
+- **SSRF defense**: each host is resolved once, checked against private and reserved ranges, and connections go only to that pinned IP; redirects must stay in scope.
+- **Limited scanning**: 16 fixed TCP ports, TCP connect only, no payloads, response bodies capped at 64 KB.
+- **CI security gates**: bandit, pip-audit, gitleaks and trivy run on every push.
+
+## Testing
+
+- 1,216 tests (unit, database and API), 91.28% line+branch coverage, enforced at 90% in CI. Local run of 19 Oct 2026.
+- 38 Playwright browser tests against a live server, including 0 CSP violations.
+- 12 CI checks on every pull request: Python 3.11 and 3.12, Docker and ARM64 builds, migrations, browser tests, egress firewall, and the four security scanners.
+
+## Stack
+
+Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, Jinja2 + HTMX, Supabase Auth, Docker Compose, Caddy, GitHub Actions. Deployed on an Azure VM (Ubuntu 24.04).
+
+## Run locally
+
+```bash
+cp .env.example .env      # set the Postgres values
+docker compose up --build
+curl http://127.0.0.1:8000/health
+```
+
+Setup, environment variables, the CLI scanner and the full API are documented in the reference below and in [docs/DEPLOY.md](docs/DEPLOY.md).
+
+## Limits
+
+- Passive discovery depends on Certificate Transparency; hosts that never had a public certificate are not found.
+- Port scanning covers 16 common ports, not full ranges.
+- Alert precision is proven on simulated noise; real-world rates are being measured.
+- Single VM, no high availability. Student project, invite-only.
 
 ---
 
-## Project Status
+# Full reference
+
+## Project status
 
 - **v1 CLI**: Done. 5-stage scanner (`discover`, `probe`, `portscan`, `inspect`, `score`).
 - **v2.0.0 Service**: Done. API + database, job queue with crash recovery, Cert Spotter fallback, change detection, scheduled scans, and email alerts. See [CHANGELOG.md](CHANGELOG.md).
-- **v3.1a User Auth & Organizations**: Done. Supabase JWT authentication, organization RBAC, and multi-tenant scoping.
-- **v3.1b Tenant Isolation**: Done. Foreign keys, row-level organization fences, and anti-enumeration defenses.
-- **v3.2 Domain Verification**: Done. Domain ownership proof via DNS TXT, continuous background re-verification, operator overrides, and scan gating.
-- **v3.3 Audit Log & Event Tracking**: Done. Append-only audit events table, trigger against app tampering, structured actions (21 today), and organization audit API.
-- **v3.4a Dashboard Shell & Verification UI**: Done. Server-rendered dashboard (FastAPI + Jinja2 + HTMX), Supabase browser authentication, organization management, domains list, and DNS TXT verification UI.
-- **v3.4b Scans, Results & Changes UI**: Done. Scans list (latest 20 runs, status, trigger, duration, changes summary), Run scan button (gated by domain verification and role), scan detail with 5 pipeline stages, Fix first prioritized findings (capped at 50 with overflow count), per-tier count cards, and changes table with auto-polling (3s, 15m cap).
-- **v3.4c Schedule, Alerts & Audit Log UI**: Done. Domain schedule settings with presets (Off, 6h, 12h, 24h, 7 days, 30 days) and next scan time; email alerts settings (toggle, min severity, up to 5 recipients) with viewer email redaction; domain alert history outbox log with offset paging; and organization audit log with action/domain filtering, keyset pagination, and escaped metadata.
-- **v3.4d Playwright Browser Tests**: Done. Real browser interaction tests in Chromium with live uvicorn server, route interception, 0 CSP violations, and multi-tenant UI verification.
-- **v3.5 Landing Page**: Done. Public landing page at `/` and terms page at `/terms`.
-- **v3.6 Production hardening**: Done. Production compose with Caddy (v3.6a); security hardening, least-privilege database roles and invites (v3.6b); log redaction, account suspension, org and account deletion, retention purge (v3.6c); DNS pinning for every scanner connection and a worker egress firewall (v3.6d); CI security scanners and a coverage gate (Phase G); cleanup (Phase E).
-- **Current: Phase H, deployment on Azure (in progress)**: the worker blocks the Azure WireServer (`168.63.129.16`) in the egress firewall and the SSRF checks; the public domain is still pending.
-
----
+- **v3.1-v3.6**: Done. Supabase auth and organization RBAC, tenant isolation, DNS domain verification, append-only audit log, dashboard, browser tests, landing page, production hardening (least-privilege roles, log redaction, retention, DNS pinning, worker egress firewall, CI security gates).
+- **Phase H, deployment**: Done. Live at https://exposight.dev on Azure since October 2026 (latest deploy `170cbd0`, 19 Oct 2026, schema `0015_domain_subdomains_inventory`).
 
 ## What It Does
 

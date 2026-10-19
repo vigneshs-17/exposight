@@ -6,7 +6,8 @@ Add these in Dynadot: **My Domains → exposight.dev → DNS Settings**. Keep th
 
 | Host | Type | Value | Why |
 |---|---|---|---|
-| `@` | CAA | `0 issue "letsencrypt.org"` | Only Let's Encrypt (used by Caddy) may issue certificates for the domain. |
+| `@` | CAA | `0 issue "letsencrypt.org"` | Let's Encrypt, Caddy's first certificate issuer, may issue for the domain. |
+| `@` | CAA | `0 issue "sectigo.com"` | ZeroSSL (CAA name `sectigo.com`), Caddy's default fallback issuer when Let's Encrypt fails, may issue too. Without this line the fallback is blocked. |
 | `@` | CAA | `0 issuewild ";"` | No certificate authority may issue wildcard certificates. |
 | `@` | TXT | `v=spf1 -all` | The apex sends no email; receivers reject mail that claims to come from it. |
 | `_dmarc` | TXT | `v=DMARC1; p=reject; adkim=s; aspf=s` | Receivers reject unauthenticated mail from the apex. A subdomain with its own `_dmarc` record (below) uses its own policy instead. |
@@ -41,4 +42,4 @@ nslookup -type=TXT notify.exposight.dev 1.1.1.1
 nslookup -type=TXT _dmarc.notify.exposight.dev 1.1.1.1
 ```
 
-After adding CAA, Caddy renewals keep working because they use Let's Encrypt.
+After adding CAA, Caddy renewals keep working: the `Caddyfile` sets no issuer, so Caddy uses Let's Encrypt and falls back to ZeroSSL, and both are allowed.

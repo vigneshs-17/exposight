@@ -34,6 +34,13 @@
   - GitHub Actions CI workflows (`.github/workflows/ci.yml` and `.github/workflows/security.yml`) have not yet executed against this local working tree. Local execution of tests and linters does not establish or substitute for remote CI pass.
 
 ### User-reported deployed behavior
+- **Production deploy of `170cbd0` on 19 Oct 2026 (https://exposight.dev)**, owner-run with `docs/DEPLOY_NEXT.md`:
+  - Pre-deploy: VM at `ec52e8e`, schema `0014_cancelled_scan_status`, clean tree; backup `exposight_db_20261019_075856Z.sql.gz` (gzip OK, 12 tables) copied to the owner laptop.
+  - `migrate` exited 0 (`0014_cancelled_scan_status -> 0015_domain_subdomains_inventory`); db, egress and api healthy; worker and caddy (2.11.7) running.
+  - Worker `egress check: PASSED`.
+  - Checked from outside the VM: `/health` 200 with database connected; CSP with `frame-ancestors 'none'`, HSTS, nosniff, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, no `Server` header; `security.txt` and `/privacy` served. A `HEAD /` request answers 405 (open item for the next test pass).
+  - Scheduled scan #23 of `exposight.dev` succeeded in all 5 stages (15 s) while crt.sh returned 502: discovery fell back to Cert Spotter. The first scan after `0015` reported no changes, so the inventory bootstrap did not flag known subdomains as new.
+  - DNS hardening live: apex `v=spf1 -all`, `_dmarc` `p=reject`, CAA for `letsencrypt.org` and `sectigo.com` (Caddy's ZeroSSL fallback), no wildcard issuance.
 - **Azure VM deployment (`2e886e2`)**:
   - User reports Exposight is live on Azure VM (`exposight.indiasouthcentral.cloudapp.azure.com`).
   - Caddy automatic TLS certificate provisioning via Let's Encrypt.
