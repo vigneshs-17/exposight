@@ -45,6 +45,7 @@ ROUTES: dict[tuple[str, str], tuple[str, str]] = {
     # routes_ui.py
     ("GET", "/"): (PUBLIC, "public landing page, static content"),
     ("GET", "/terms"): (PUBLIC, "public terms page, static content"),
+    ("GET", "/.well-known/security.txt"): (PUBLIC, "RFC 9116 security contact, static content"),
     ("GET", "/app"): (PUBLIC, "dashboard shell; only public Supabase URL and publishable key"),
     ("GET", "/ui/empty-org"): (PUBLIC, "create-organization form, no data"),
     ("GET", "/ui/orgs/{org_id}/domains"): (LIST, ""),
