@@ -86,3 +86,12 @@
 - **Item 7** `docs/BACKUP_SETUP.md`: age key on the laptop, public key at `/etc/exposight/backup_age_recipient.pub`, root cron 03:30 UTC, weekly PowerShell `scp`, restore test into a throwaway container. Restore commands drilled locally against PostgreSQL 18.6 with the production role layout.
 - **Item 8** `docs/MONITORING_SETUP.md`: UptimeRobot HTTP(s) check on `/health` with email alert; notes that `/health` does not cover the worker.
 - **Item 9**: `CERTSPOTTER_API_KEY` Bearer support was already on `main` (`tests/test_discovery.py::test_certspotter_api_key_sent_as_bearer_and_not_leaked`); no code change. Terms question recorded as P-1 in `docs/DECISIONS_PENDING.md`.
+- **PRs**: #40 (item 3), #41 (item 4), #42 (items 5-9), all 12 CI checks green before each merge.
+
+## Final batch Item 1: DEPLOY_NEXT.md Rewrite
+- **Target**: `main` at `36248a3957774a0946931a184c955d7bd04fb34c` (includes #40-#42); VM corrected to `Standard_B2als_v2`, x86_64.
+- **Fix**: pre-deploy `backup_db.sh` + PowerShell `scp` to `D:\exposight-backups\`; `git pull --ff-only`; `up -d --build` with `migrate` as a service; `alembic_version` read through the db container's own `$POSTGRES_USER`/`$POSTGRES_DB`; post-deploy egress check, headers, `/health`, `security.txt`, `/privacy`, worker, one manual scan of `exposight.dev`.
+- **Rollback**: restore into a dropped and recreated database (owner and grants as `10-roles.sh`), never on top; code-only rollback only when `0015` was not applied; `0015` downgrade refuses on populated `domain_subdomains` by design. Drop/recreate/restore drilled locally on PostgreSQL 18.6.
+
+## Final batch Item 10: Repo Hygiene (report only)
+- Nothing deleted. Recommendations are in the final batch report to the owner.
