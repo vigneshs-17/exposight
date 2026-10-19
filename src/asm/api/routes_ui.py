@@ -3,12 +3,13 @@
 import json
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Query, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import select
 
@@ -154,6 +155,27 @@ def get_terms_page(
     return template.render(
         last_updated=TERMS_LAST_UPDATED,
         txt_label=get_verification_record_name("<your-domain>"),
+    )
+
+
+SECURITY_CONTACT = "https://github.com/vigneshs-17/exposight/security/advisories/new"
+# RFC 9116 requires Expires under one year ahead; a rolling date can never go stale.
+SECURITY_TXT_VALIDITY = timedelta(days=180)
+
+
+@ui_router.get(
+    "/.well-known/security.txt",
+    response_class=PlainTextResponse,
+    summary="RFC 9116 security contact",
+)
+def get_security_txt() -> str:
+    """Serve security.txt pointing at GitHub private vulnerability reporting."""
+    expires = (datetime.now(UTC) + SECURITY_TXT_VALIDITY).replace(microsecond=0)
+    return (
+        f"Contact: {SECURITY_CONTACT}\n"
+        f"Expires: {expires.isoformat().replace('+00:00', 'Z')}\n"
+        "Preferred-Languages: en\n"
+        "Canonical: https://exposight.dev/.well-known/security.txt\n"
     )
 
 

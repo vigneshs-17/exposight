@@ -102,6 +102,16 @@
 ## Plans & Decisions
 Plans are written here and approved before coding starts.
 
+### Final build batch plan (requested 2026-10-19, Claude Code sole builder)
+Worktree `D:\exposight-final-wt` from `origin/main` `2534056`. One PR per item; related doc items may share one.
+1. Fix `docs/DEPLOY_NEXT.md`: target = current main SHA, VM `Standard_B2als_v2` (x86_64), pre-deploy `backup_db.sh` + PowerShell `scp` to `D:\exposight-backups\`, `git pull --ff-only` + `up -d --build` (migrate is a service), alembic_version via `$POSTGRES_USER`/`$POSTGRES_DB`, egress check / headers / `/health` / worker / one manual scan, rollback restores into a dropped and recreated database, 0015 populated downgrade blocked by design.
+2. Docker log rotation (json-file 10m x 3) on every service: already on main with `test_every_service_has_log_rotation`; no change.
+3. `/.well-known/security.txt` (RFC 9116), `text/plain`, Expires under one year ahead, test.
+4. `/privacy` page on the landing theme, matching the code; linked from landing, terms and app footers; tests.
+5-8. Owner docs: `docs/EMAIL_SETUP.md` (Brevo, `notify.exposight.dev`, 587 STARTTLS), `docs/DNS_RECORDS.md`, `docs/BACKUP_SETUP.md` (age, cron 03:30 UTC, weekly scp, restore test), `docs/MONITORING_SETUP.md`.
+9. Cert Spotter key: `CERTSPOTTER_API_KEY` Bearer support already on main with test; add the terms question to `docs/DECISIONS_PENDING.md`.
+10. Repo hygiene: report only, delete nothing.
+
 ### B-5 plan (approved 2026-10-05)
 - `DELETE /orgs/{id}` (owner only) turns the org into a tombstone: deletes its domains (cascading to scans, changes, alert notifications), memberships and invites; keeps the org row renamed `deleted-org-<id>` and its audit events (`audit_events.org_id` is `ON DELETE RESTRICT` and the log is append-only); records `org.deleted`. Refused with 409 while any scan in the org is running (same rule as `move-domain`); queued scans and schedules are cancelled in the same transaction as the delete (added 2026-10-06).
 - `DELETE /me` deletes the `users` row (memberships cascade) and invites addressed to the user's email; 409 while the user is the only owner of any org (D6). A suspended account cannot self-delete (403); its deletion requests go to the operator.
