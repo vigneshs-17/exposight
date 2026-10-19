@@ -27,7 +27,6 @@ from asm.api.routes import _domain_to_read, _notification_to_read
 from asm.audit import AUDIT_ACTIONS, build_audit_query
 from asm.auth.config import AuthSettings
 from asm.change_wording import describe_change
-from asm.retention import INVITE_RETENTION, NOTIFICATION_RETENTION, SCAN_RETENTION
 from asm.db.models import (
     AlertNotification,
     Domain,
@@ -38,6 +37,7 @@ from asm.db.models import (
     ScanRun,
     ScanStage,
 )
+from asm.retention import INVITE_RETENTION, NOTIFICATION_RETENTION, SCAN_RETENTION
 from asm.ui_views import (
     STATUS_DISPLAY_NAMES,
     check_polling_status,
