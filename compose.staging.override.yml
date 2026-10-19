@@ -58,7 +58,7 @@ services:
   # - The sink publishes no host ports; inspect messages programmatically via internal API inside the namespace.
   mailsink:
     profiles: ["mailsink"]
-    image: axllent/mailpit:v1.24
+    image: axllent/mailpit:v1.31.5
     restart: unless-stopped
     network_mode: "service:egress"
     environment:
