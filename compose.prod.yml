@@ -64,7 +64,7 @@ services:
     # Single worker (--workers 1): rate limits are kept in memory (src/asm/ratelimit.py).
     # Multiple worker processes would each keep their own in-memory counters.
     # --proxy-headers and --forwarded-allow-ips restrict trusted upstream proxy headers strictly
-    # to the fixed app-tier subnet (10.89.0.0/24), preventing client IP header spoofing.
+    # to Caddy's fixed IP (10.89.0.20), preventing client IP header spoofing by other containers.
     command:
       - "asm.api.main:app"
       - "--host"
@@ -74,7 +74,7 @@ services:
       - "--workers"
       - "1"
       - "--proxy-headers"
-      - "--forwarded-allow-ips=10.89.0.0/24"
+      - "--forwarded-allow-ips=10.89.0.20"
       - "--no-server-header"
     restart: unless-stopped
     environment:
@@ -188,6 +188,7 @@ services:
         condition: service_healthy
     networks:
       app-tier:
+        ipv4_address: 10.89.0.20
 
 networks:
   app-tier:

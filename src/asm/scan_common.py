@@ -389,3 +389,47 @@ def validate_host_and_scope(
         return None, f"Host '{hostname}' is out of scope for root domain '{base_domain}'"
 
     return validated_host, None
+
+
+def is_redirect_target_safe(target_url: str, base_domain: str | None = None) -> bool:
+    """Verify that a redirect target URL is safe, on standard ports, and within scope.
+
+    Defense-in-depth:
+    1. Scheme must strictly be 'http' or 'https'.
+    2. Port must strictly be 80 for http or 443 for https. Non-standard ports (e.g. 8080, 8443, 22)
+       are forbidden on redirect hops.
+    3. Hostname must be non-empty and have valid domain syntax.
+    4. If base_domain is supplied, hostname must match or be a subdomain of base_domain.
+    """
+    try:
+        parsed = urlsplit(target_url)
+    except Exception:
+        return False
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False
+
+    port = parsed.port
+    if scheme == "http" and port is not None and port != 80:
+        return False
+    if scheme == "https" and port is not None and port != 443:
+        return False
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+    hostname = hostname.lower().rstrip(".")
+
+    try:
+        validated_host = validate_domain(hostname)
+    except DomainValidationError:
+        return False
+
+    if base_domain is not None:
+        norm_base = base_domain.lower().rstrip(".")
+        if not (validated_host == norm_base or validated_host.endswith(f".{norm_base}")):
+            return False
+
+    return True
+

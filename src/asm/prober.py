@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import re
 import ssl
@@ -24,6 +23,7 @@ from asm.models import (
 )
 from asm.scan_common import (
     check_host_for_ssrf,
+    is_redirect_target_safe,
     is_safe_public_ip,
     pin_host,
     pinned_request,
@@ -128,39 +128,7 @@ def is_redirect_in_scope(target_url: str, base_domain: str) -> bool:
     Returns:
         True if redirect is in-scope, False otherwise.
     """
-    try:
-        parsed = urllib.parse.urlsplit(target_url)
-    except Exception:
-        return False
-
-    scheme = parsed.scheme.lower()
-    if scheme not in ("http", "https"):
-        return False
-
-    # Check port constraints: only default ports allowed
-    port = parsed.port
-    if scheme == "http" and port is not None and port != 80:
-        return False
-    if scheme == "https" and port is not None and port != 443:
-        return False
-
-    hostname = parsed.hostname
-    if not hostname:
-        return False
-    hostname = hostname.lower().rstrip(".")
-
-    # Reject IP addresses as redirect targets
-    try:
-        ipaddress.ip_address(hostname)
-        return False
-    except ValueError:
-        pass
-
-    normalized_base = base_domain.lower().rstrip(".")
-    if hostname == normalized_base or hostname.endswith(f".{normalized_base}"):
-        return True
-
-    return False
+    return is_redirect_target_safe(target_url, base_domain=base_domain)
 
 
 class _TitleExtractor(HTMLParser):

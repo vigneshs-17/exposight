@@ -20,6 +20,7 @@ import httpx
 from asm.models import CertInfo, HeaderInfo, HostInspectResult, HostProbeStatus, InspectReport
 from asm.prober import DeadlineExceeded, hop_timeout
 from asm.scan_common import (
+    is_redirect_target_safe,
     pin_host,
     pinned_request,
     skip_status_for,
@@ -166,17 +167,7 @@ def extract_header_info(
 
 def is_redirect_in_scope(target_url: str, base_domain: str) -> bool:
     """Verify that a redirect URL remains within the allowed base domain and safe ports."""
-    try:
-        parsed = urlparse(target_url)
-        if parsed.scheme not in ("http", "https"):
-            return False
-        hostname = (parsed.hostname or "").lower()
-        if not (hostname == base_domain or hostname.endswith("." + base_domain)):
-            return False
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        return port in (80, 443)
-    except Exception:
-        return False
+    return is_redirect_target_safe(target_url, base_domain=base_domain)
 
 
 def inspect_single_host(
