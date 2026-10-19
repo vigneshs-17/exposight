@@ -34,7 +34,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install --require-hashes --no-deps -r requirements/dev.lock.txt
+          pip install --no-deps -e .
 
       # Every finding fails, at any severity or confidence. Accepted findings carry
       # "# nosec B###" with a written reason (tests/test_security_tooling.py checks that).
@@ -57,16 +58,26 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install --require-hashes --no-deps -r requirements/dev.lock.txt
+          pip install --no-deps -e .
 
-      # Audits the installed runtime + dev dependency set (frozen, without the editable
-      # project itself, so --strict can fail on any package it cannot audit). Any known
-      # vulnerability fails; an unfixable one may only be ignored with --ignore-vuln <ID>
-      # and a written reason here.
+      # IC-1 (D-IC1): uv.lock is the source of truth for every install. Fail when it, or the
+      # two hashed exports the Docker image and CI install from, no longer match pyproject.toml.
+      - name: Check the dependency lock is current
+        run: |
+          pip install "uv==0.10.7"
+          uv lock --check
+          uv export --frozen --no-emit-project --no-dev --format requirements-txt -o /tmp/runtime.lock.txt -q
+          uv export --frozen --no-emit-project --no-dev --extra dev --format requirements-txt -o /tmp/dev.lock.txt -q
+          diff -I '^#    uv export' requirements/runtime.lock.txt /tmp/runtime.lock.txt
+          diff -I '^#    uv export' requirements/dev.lock.txt /tmp/dev.lock.txt
+
+      # Audits the hashed lock (runtime + dev, a superset of what the image installs), so
+      # the audited set is exactly the deployed set. Any known vulnerability fails; an
+      # unfixable one may only be ignored with --ignore-vuln <ID> and a written reason here.
       - name: Run pip-audit
         run: |
-          pip freeze --exclude-editable > audit-requirements.txt
-          pip-audit --strict --desc --no-deps --disable-pip -r audit-requirements.txt
+          pip-audit --strict --desc --disable-pip --require-hashes -r requirements/dev.lock.txt
 
   gitleaks:
     name: gitleaks (secrets, full history)

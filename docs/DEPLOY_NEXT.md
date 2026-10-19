@@ -19,6 +19,13 @@ Everything merged since `2e886e2`, including:
 - Ops: encrypted backup script, Uvicorn trusts forwarded headers only from Caddy `10.89.0.20`, Python `3.12.15-slim-trixie`, Caddy `2.11.7-alpine`.
 - New public pages: `/.well-known/security.txt` and `/privacy`.
 - **New migration `0015_domain_subdomains_inventory`** (new table `domain_subdomains`).
+- IC-1 (fixes from the 2026-10-19 independent check, **no migration**): Python dependencies installed from the hashed lock `requirements/runtime.lock.txt`; GET and HEAD on `/` and `/health`; per-IP rate limit for every request without a verified identity; `/health` database check cached for 2 s; `Permissions-Policy` on every response; wider log redaction; stale JWKS keys served for at most 24 h; worker log `lease=` instead of `token=`; `/robots.txt`; Caddyfile drops `Via` and serves its own HTTP-to-HTTPS 308 without `Server`.
+
+### 1.1 IC-1 deploy notes (added 2026-10-19)
+
+- [ ] **Supabase auth settings (owner, dated 2026-10-19).** In the Supabase dashboard (Authentication → Sign In / Providers → Email), confirm **"Confirm email" is ON** and **"Allow new users to sign up" is OFF**, and write the date you checked into `STATUS.md`. Invite acceptance and the org-creation allowlist trust the email in the Supabase token; with "Confirm email" off, someone could sign up with another person's address (see `docs/DEPLOY.md`, Supabase section). Re-check after any change to the Supabase project.
+- [ ] **Recreate Caddy after the pull.** The Caddyfile is a single-file bind mount; `git pull` replaces the file, and a running container keeps reading the old one. After `up -d --build` in section 3, run `docker compose -f compose.prod.yml up -d --force-recreate caddy`.
+- [ ] **Check the new headers** (section 4.2): `curl -sI http://exposight.dev/` shows `308` with no `Server` line; `curl -sI https://exposight.dev/` shows `200` (HEAD now works), `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and no `Via` line; `curl -s https://exposight.dev/robots.txt` shows `Disallow: /app`.
 
 ## 2. Pre-deploy
 

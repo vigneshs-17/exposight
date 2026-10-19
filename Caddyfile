@@ -1,8 +1,17 @@
+http://{$DOMAIN} {
+	# Explicit HTTP-to-HTTPS redirect instead of Caddy's automatic one, so it also drops
+	# Server (IC-1, F10). ACME HTTP challenges are still answered before this route.
+	header -Server
+	redir https://{host}{uri} 308
+}
+
 {$DOMAIN} {
 	# HSTS: the app does not set it, and it only makes sense on the HTTPS edge.
 	# No includeSubDomains/preload until every subdomain is confirmed HTTPS-only.
 	header Strict-Transport-Security "max-age=31536000"
 	# Do not disclose the server software (uvicorn already sends none; this drops Caddy's).
 	header -Server
+	# reverse_proxy adds "Via: 1.1 Caddy" to responses; drop it too (IC-1, F10).
+	header -Via
 	reverse_proxy api:8000
 }

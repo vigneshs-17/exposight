@@ -43,12 +43,15 @@ RUN groupadd -r -g 10001 asm \
 
 WORKDIR /app
 
-# Copy wheel artifact from builder stage and install runtime dependencies
+# Runtime dependencies come only from the hashed lock exported from uv.lock (IC-1, D-IC1);
+# the project wheel is installed with --no-deps so it cannot pull anything unpinned.
 COPY --from=builder /wheels /wheels
+COPY requirements/runtime.lock.txt /tmp/runtime.lock.txt
 # pip is removed afterwards (Phase G, D23): nothing at runtime installs packages, and its
 # known CVEs then cannot apply to the image.
-RUN pip install --no-cache-dir /wheels/*.whl \
-    && rm -rf /wheels \
+RUN pip install --no-cache-dir --require-hashes --no-deps -r /tmp/runtime.lock.txt \
+    && pip install --no-cache-dir --no-deps /wheels/*.whl \
+    && rm -rf /wheels /tmp/runtime.lock.txt \
     && python -m pip uninstall -y pip
 
 # Copy migrations and alembic configuration for container migrations
