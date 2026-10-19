@@ -385,3 +385,32 @@ def test_shell_scripts_are_executable_in_git():
     assert "scripts/backup_encrypted.sh" in modes, "scripts/backup_encrypted.sh must be tracked"
     not_executable = {path: mode for path, mode in modes.items() if mode != "100755"}
     assert not not_executable, f"run git update-index --chmod=+x on: {not_executable}"
+
+
+def test_compose_staging_override_structure():
+    """compose.staging.override.yml must define project name, tags, and mailpit pin."""
+    override_path = REPO_ROOT / "compose.staging.override.yml"
+    assert override_path.is_file(), "compose.staging.override.yml must exist"
+
+    raw_content = override_path.read_text(encoding="utf-8")
+    config = yaml.safe_load(raw_content)
+
+    assert config.get("name") == "exposight-staging"
+    services = config.get("services", {})
+    assert "migrate" in services
+    assert "api" in services
+    assert "egress" in services
+    assert "worker" in services
+    assert "mailsink" in services
+
+    # Worker forwards discovery resource limits
+    worker_env = services["worker"].get("environment", {})
+    assert "DISCOVERY_MAX_RESPONSE_BYTES" in worker_env
+    assert "DISCOVERY_MAX_HOSTS" in worker_env
+
+    # Mailsink service
+    mailsink = services["mailsink"]
+    assert mailsink.get("profiles") == ["mailsink"]
+    assert mailsink.get("image") == "axllent/mailpit:v1.31.5"
+    assert mailsink.get("network_mode") == "service:egress"
+
