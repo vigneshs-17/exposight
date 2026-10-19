@@ -30,6 +30,7 @@
     </div>
   </div>
 
+  {% if user_role in ('admin', 'owner') %}
   <div class="surface-panel-header">
     <h3 class="panel-title">DNS proof of control</h3>
     <p class="panel-subtitle">Publish this TXT record at your DNS provider so Exposight can verify control before scanning.</p>
@@ -55,14 +56,15 @@
   <div class="form-group">
     <label class="form-label">Record value</label>
     <div class="code-block">
-      <span class="code-value">{{ domain.verification_record_value }}</span>
+      <span class="code-value">{{ domain.verification_record_value or '' }}</span>
+      {% if domain.verification_record_value %}
       <button type="button" class="btn btn-secondary btn-sm btn-copy" data-copy-value="{{ domain.verification_record_value }}">
         Copy value
       </button>
+      {% endif %}
     </div>
   </div>
 
-  {% if user_role in ('admin', 'owner') %}
   <div class="action-row">
     <button type="button" id="btn-check-verification" class="btn btn-primary" data-org-id="{{ org.id }}" data-domain-id="{{ domain.id }}">
       Check now

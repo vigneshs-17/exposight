@@ -99,7 +99,7 @@ def _domain_to_read(domain: Domain, role: str) -> DomainRead:
         org_id=domain.org_id,
         name=domain.name,
         verification_status=domain.verification_status,
-        verification_token=domain.verification_token,
+        verification_token=domain.verification_token if is_privileged else None,
         verification_method=domain.verification_method,
         verified_at=domain.verified_at,
         last_checked_at=domain.last_checked_at,
@@ -115,7 +115,7 @@ def _domain_to_read(domain: Domain, role: str) -> DomainRead:
         created_at=domain.created_at,
         verification_record_name=domain.verification_record_name,
         verification_record_type="TXT",
-        verification_record_value=domain.verification_record_value,
+        verification_record_value=domain.verification_record_value if is_privileged else None,
         is_verified=domain.is_verified,
     )
 
@@ -298,10 +298,10 @@ def _domain_to_verification_read(
         domain_name=domain.name,
         status=domain.verification_status,  # type: ignore[arg-type]
         method=domain.verification_method,  # type: ignore[arg-type]
-        token=domain.verification_token,
+        token=domain.verification_token if is_privileged else None,
         record_name=domain.verification_record_name,
         record_type="TXT",
-        record_value=domain.verification_record_value,
+        record_value=domain.verification_record_value if is_privileged else None,
         verified_at=domain.verified_at,
         last_checked_at=domain.last_checked_at,
         consecutive_misses=domain.consecutive_misses,

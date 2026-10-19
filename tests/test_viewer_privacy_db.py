@@ -596,3 +596,133 @@ def test_g5_1_operator_verification_reasons_redacted_for_viewers_and_notificatio
     finally:
         app.dependency_overrides.clear()
 
+
+def test_g5_2_viewer_verification_token_redaction_and_ui_db(privacy_fixture):
+    """G5.2 Option A: Viewer cannot see verification_token or verification_record_value.
+
+    Verifies:
+    1. GET /orgs/{id}/domains/{domain_id} redacts verification_token and
+       verification_record_value to None for viewer, while admin/owner receive full values.
+    2. GET /orgs/{id}/domains redacts verification_token and verification_record_value to
+       None for viewer across domain list.
+    3. GET /orgs/{id}/domains/{domain_id}/verification redacts token and record_value to
+       None for viewer, while admin/owner receive full values.
+    4. GET /ui/orgs/{id}/domains/{domain_id} completely hides the 'DNS proof of control' setup
+       box and action buttons for viewer, while rendering them for admin/owner.
+    5. GET /orgs/{id}/members remains accessible to viewers (member directory unchanged).
+    6. Alert notification bodies redact verification record prefixes/tokens for viewers.
+    """
+    fix = privacy_fixture
+    org_id = fix["org"].id
+    dom_id = fix["dom_with_alerts"].id
+    db_s = fix["db_session"]
+    raw_token = fix["dom_with_alerts"].verification_token
+    raw_record_val = fix["dom_with_alerts"].verification_record_value
+
+    try:
+        # A. Viewer role checks
+        client_viewer = _make_client_for_user(fix["viewer"], db_s)
+
+        # 1. GET /orgs/{id}/domains/{domain_id}
+        res_v_dom = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_v_dom.status_code == 200
+        v_data = res_v_dom.json()
+        assert v_data["verification_token"] is None
+        assert v_data["verification_record_value"] is None
+        assert raw_token not in res_v_dom.text
+        assert raw_record_val not in res_v_dom.text
+
+        # 2. GET /orgs/{id}/domains (list)
+        res_v_list = client_viewer.get(f"/orgs/{org_id}/domains")
+        assert res_v_list.status_code == 200
+        for d in res_v_list.json():
+            assert d["verification_token"] is None
+            assert d["verification_record_value"] is None
+        assert raw_token not in res_v_list.text
+
+        # 3. GET /orgs/{id}/domains/{domain_id}/verification
+        res_v_ver = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}/verification")
+        assert res_v_ver.status_code == 200
+        ver_data = res_v_ver.json()
+        assert ver_data["token"] is None
+        assert ver_data["record_value"] is None
+        assert raw_token not in res_v_ver.text
+        assert raw_record_val not in res_v_ver.text
+
+        # 4. GET /ui/orgs/{id}/domains/{domain_id} (HTML partial)
+        res_v_ui = client_viewer.get(f"/ui/orgs/{org_id}/domains/{dom_id}")
+        assert res_v_ui.status_code == 200
+        assert "DNS proof of control" not in res_v_ui.text
+        assert "btn-check-verification" not in res_v_ui.text
+        assert "btn-rotate-token" not in res_v_ui.text
+        assert raw_token not in res_v_ui.text
+        assert raw_record_val not in res_v_ui.text
+
+        # 5. GET /orgs/{id}/members remains accessible to viewers (member directory unchanged)
+        res_v_members = client_viewer.get(f"/orgs/{org_id}/members")
+        assert res_v_members.status_code == 200
+        members = res_v_members.json()
+        assert len(members) == 3
+        member_roles = {m["role"] for m in members}
+        assert member_roles == {"owner", "admin", "viewer"}
+
+        # 6. Alert notification bodies mask verification token / record value for viewers
+        notif = AlertNotification(
+            domain_id=dom_id,
+            recipient="admin@privacy-corp.example",
+            subject="Verification Challenge",
+            body=f"Please verify domain with {raw_record_val} or token {raw_token}",
+            status="sent",
+            attempts=1,
+            max_attempts=3,
+            next_attempt_at=datetime.now(UTC),
+            sent_at=datetime.now(UTC),
+        )
+        db_s.add(notif)
+        db_s.commit()
+
+        res_v_notifs = client_viewer.get(f"/orgs/{org_id}/domains/{dom_id}/alert-notifications")
+        assert res_v_notifs.status_code == 200
+        v_notif = next(n for n in res_v_notifs.json() if n["subject"] == "Verification Challenge")
+        assert raw_record_val not in v_notif["body"]
+        assert raw_token not in v_notif["body"]
+        assert "[redacted]" in v_notif["body"]
+
+        # B. Admin role checks
+        client_admin = _make_client_for_user(fix["admin"], db_s)
+        res_a_dom = client_admin.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_a_dom.status_code == 200
+        a_data = res_a_dom.json()
+        assert a_data["verification_token"] == raw_token
+        assert a_data["verification_record_value"] == raw_record_val
+
+        res_a_ver = client_admin.get(f"/orgs/{org_id}/domains/{dom_id}/verification")
+        assert res_a_ver.status_code == 200
+        assert res_a_ver.json()["token"] == raw_token
+        assert res_a_ver.json()["record_value"] == raw_record_val
+
+        res_a_ui = client_admin.get(f"/ui/orgs/{org_id}/domains/{dom_id}")
+        assert res_a_ui.status_code == 200
+        assert "DNS proof of control" in res_a_ui.text
+        assert "btn-check-verification" in res_a_ui.text
+        assert "btn-rotate-token" in res_a_ui.text
+        assert raw_record_val in res_a_ui.text
+
+        res_a_notifs = client_admin.get(f"/orgs/{org_id}/domains/{dom_id}/alert-notifications")
+        assert res_a_notifs.status_code == 200
+        a_notif = next(n for n in res_a_notifs.json() if n["subject"] == "Verification Challenge")
+        assert raw_record_val in a_notif["body"]
+        assert raw_token in a_notif["body"]
+
+        # C. Owner role checks
+        client_owner = _make_client_for_user(fix["owner"], db_s)
+        res_o_dom = client_owner.get(f"/orgs/{org_id}/domains/{dom_id}")
+        assert res_o_dom.status_code == 200
+        o_data = res_o_dom.json()
+        assert o_data["verification_token"] == raw_token
+        assert o_data["verification_record_value"] == raw_record_val
+
+    finally:
+        app.dependency_overrides.clear()
+
+

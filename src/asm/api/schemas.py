@@ -37,10 +37,16 @@ class DomainVerificationRead(BaseModel):
     domain_name: str
     status: Literal["pending", "verified", "lapsed"]
     method: Literal["dns_txt", "operator"]
-    token: str
+    token: str | None = Field(
+        default=None,
+        description="Domain verification token. Redacted (None) for viewers.",
+    )
     record_name: str
     record_type: str = "TXT"
-    record_value: str
+    record_value: str | None = Field(
+        default=None,
+        description="Designated TXT record value. Redacted (None) for viewers.",
+    )
     verified_at: datetime | None = None
     last_checked_at: datetime | None = None
     consecutive_misses: int = 0
@@ -63,7 +69,10 @@ class DomainRead(BaseModel):
     org_id: int
     name: str
     verification_status: str
-    verification_token: str
+    verification_token: str | None = Field(
+        default=None,
+        description="Domain verification token. Redacted (None) for viewers.",
+    )
     verification_method: str
     verified_at: datetime | None = None
     last_checked_at: datetime | None = None
@@ -88,7 +97,10 @@ class DomainRead(BaseModel):
     created_at: datetime
     verification_record_name: str
     verification_record_type: str = "TXT"
-    verification_record_value: str
+    verification_record_value: str | None = Field(
+        default=None,
+        description="Designated TXT record value. Redacted (None) for viewers.",
+    )
     is_verified: bool = False
 
     model_config = ConfigDict(from_attributes=True)
