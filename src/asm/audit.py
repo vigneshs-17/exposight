@@ -15,10 +15,11 @@ from asm.db.models import AuditEvent, User
 
 ALLOWED_ACTOR_TYPES = {"user", "operator", "system"}
 
-# Regex patterns for redacting email addresses and IP addresses in free-text fields
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_RE = re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b")
+_VERIFY_RECORD_RE = re.compile(r"(?:exposight-verify|asm-verify)=[a-zA-Z0-9_\-]+", re.IGNORECASE)
+_VERIFY_TOKEN_RE = re.compile(r"\b(?:tok-[a-zA-Z0-9_\-]+|[a-zA-Z0-9_\-]{43})\b")
 
 # Action-specific metadata key and type definitions
 # Format: action -> dict of allowed_keys -> (allowed_types, is_free_text_to_redact)
@@ -134,10 +135,12 @@ def recipients_changed(old_emails: list[str], new_emails: list[str]) -> bool:
 
 
 def redact_sensitive_text(val: str) -> str:
-    """Mask email addresses and IP addresses as [redacted]."""
+    """Mask email addresses, IP addresses, and verification tokens as [redacted]."""
     val = _EMAIL_RE.sub("[redacted]", val)
     val = _IPV4_RE.sub("[redacted]", val)
     val = _IPV6_RE.sub("[redacted]", val)
+    val = _VERIFY_RECORD_RE.sub("[redacted]", val)
+    val = _VERIFY_TOKEN_RE.sub("[redacted]", val)
     return val
 
 
