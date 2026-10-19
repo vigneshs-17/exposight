@@ -51,8 +51,8 @@ Regenerate: `python -m experiments.change_replay.run --seed 1 --seeds 20 --candi
 
 ## Stop rule (combined profile)
 
-- false changes per 1,000 <= 60.0: pass
-- alert-eligible false per 1,000 <= 2.0: pass
-- missed real events <= 1: pass
+- informational false changes per 1,000: 45.06 (report-only)
+- alert-eligible false per 1,000 <= 0.1: FAIL
+- missed real events <= 0: pass
 
-**Verdict: NEGLIGIBLE: keep P0.**
+**Verdict: NOT NEGLIGIBLE.**
