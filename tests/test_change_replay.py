@@ -327,3 +327,52 @@ def test_scanner_benchmark_gates_adr_alignment(tmp_path):
     assert "- missed real events <= 0: pass" in summary_text
 
 
+def test_seed_79_port_closure_matches_under_owner_rule():
+    """Seed 79: scan 19 early emission matches scan 20 port_closed when unreversed."""
+    from experiments.change_replay.harness import REALISTIC, replay_candidate
+
+    res = replay_candidate(REALISTIC, 79)
+    # port_closed was emitted at scan 19 (one scan early) and unreversed through scan 20
+    assert res.detected["port_closed"] == 19
+    missed = sum(v is None for v in res.detected.values())
+    assert missed == 0
+
+
+def test_benchmark_matching_rule_early_emission_unreversed_and_reversed():
+    """Matching rule matches at most 1 scan early if unreversed, but rejects if reversed."""
+    from experiments.change_replay.harness import (
+        Event,
+        _is_state_reversed,
+        _matches_event,
+    )
+
+    ev = Event(
+        1, "port_closed", "api.example.com", "ports", {},
+        ("PORT_NO_LONGER_OPEN", "api.example.com", "5432"),
+    )
+
+    # Case A: unreversed (port remains closed at scan 1)
+    noisy_unreversed = [
+        {},  # scan 0
+        {"portscan": {"results": [{"subdomain": "api.example.com", "open_ports": []}]}},  # scan 1
+    ]
+    assert not _is_state_reversed(noisy_unreversed, 0, 1, ev.key)
+    assert _matches_event(ev, ev.key, 0, noisy_unreversed)
+
+    # Case B: reversed (port reopened at scan 1)
+    port_open_res = [{"port": 5432, "state": "OPEN"}]
+    noisy_reversed = [
+        {},  # scan 0
+        {"portscan": {"results": [{"subdomain": "api.example.com", "open_ports": port_open_res}]}},
+    ]
+    assert _is_state_reversed(noisy_reversed, 0, 1, ev.key)
+    assert not _matches_event(ev, ev.key, 0, noisy_reversed)
+
+    # Case C: 2 scans early (scan 0 for event at scan 2) -> never matches
+    ev2 = Event(
+        2, "port_closed", "api.example.com", "ports", {},
+        ("PORT_NO_LONGER_OPEN", "api.example.com", "5432"),
+    )
+    assert not _matches_event(ev2, ev2.key, 0, noisy_unreversed)
+
+

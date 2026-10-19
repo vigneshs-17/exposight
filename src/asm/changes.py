@@ -475,6 +475,68 @@ def _find_latest_definite_port_observation(
     return None
 
 
+def _classify_port_open_history(
+    history_indexed: list[tuple[int | None, dict[str, dict[str, Any]]]],
+    host: str,
+    port: int,
+) -> tuple[str | None, int | None, dict[str, Any] | None, int, bool]:
+    """Inspect bounded historical scans for host and port to classify an OPEN observation.
+
+    Returns:
+        (latest_state, latest_scan_id, latest_port_obj, consecutive_closed_count, has_prior_open)
+        where:
+        - latest_state: 'OPEN', 'CLOSED', or None (if no definite observation exists in history).
+        - latest_scan_id: scan ID of the latest definite observation.
+        - latest_port_obj: port dict from the latest definite observation (if OPEN).
+        - consecutive_closed_count: number of consecutive definite CLOSED observations
+          immediately preceding the current scan (skipping UNKNOWN observations).
+        - has_prior_open: True if a definite OPEN observation exists in the bounded history
+          window (prior to the consecutive CLOSED streak).
+    """
+    definite_obs: list[tuple[str, int | None, dict[str, Any] | None]] = []
+    for scan_id, host_map in history_indexed:
+        host_data = host_map.get(host)
+        if not host_data or str(host_data.get("status", "")).upper() != "PROBED":
+            # Missing results, timeout, or unprobed host -> UNKNOWN observation, skipped
+            continue
+
+        open_ports_list = host_data.get("open_ports")
+        open_match = None
+        if isinstance(open_ports_list, list):
+            for p in open_ports_list:
+                if isinstance(p, dict) and p.get("state") == "OPEN" and p.get("port") == port:
+                    open_match = p
+                    break
+
+        if open_match is not None:
+            definite_obs.append(("OPEN", scan_id, open_match))
+            continue
+
+        closed_ports_list = host_data.get("closed_ports")
+        if isinstance(closed_ports_list, list) and port in closed_ports_list:
+            definite_obs.append(("CLOSED", scan_id, None))
+            continue
+
+        # Port in filtered_ports or omitted -> UNKNOWN observation, skipped
+
+    if not definite_obs:
+        return (None, None, None, 0, False)
+
+    latest_state, latest_scan_id, latest_port_obj = definite_obs[0]
+    if latest_state == "OPEN":
+        return ("OPEN", latest_scan_id, latest_port_obj, 0, True)
+
+    consecutive_closed = 0
+    for st, _, _ in definite_obs:
+        if st == "CLOSED":
+            consecutive_closed += 1
+        else:
+            break
+
+    has_prior_open = any(st == "OPEN" for st, _, _ in definite_obs[consecutive_closed:])
+    return ("CLOSED", latest_scan_id, latest_port_obj, consecutive_closed, has_prior_open)
+
+
 def _tombstone_retention_sort_key(
     sub: str, item: dict[str, Any]
 ) -> tuple[int, int, float, str, int]:
@@ -1201,6 +1263,46 @@ def detect_changes(
         n_host_data = new_port_hosts.get(host, {})
         n_probed = str(n_host_data.get("status", "")).upper() == "PROBED"
 
+        # Check if host is genuinely newly discovered in this scan vs an existing asset
+        is_new_host = False
+        if any(
+            c.get("change_type") == "NEW_SUBDOMAIN" and c.get("asset") == host
+            for c in changes
+        ):
+            is_new_host = True
+        elif persisted_inventory is not None:
+            inv_item = persisted_inventory.get(host)
+            if inv_item is None:
+                is_new_host = True
+            elif (
+                current_scan_run_id is not None
+                and inv_item.get("first_seen_scan_run_id") == current_scan_run_id
+            ):
+                is_new_host = True
+        else:
+            base_subs = {
+                s_name
+                for _, _, _, _, s_subs in disc_history_indexed
+                for s_name in s_subs.keys()
+            }
+            if not base_subs and baseline_reports:
+                base_subs = {
+                    r["subdomain"]
+                    for r in (baseline_reports.get("discover") or {}).get("results", [])
+                    if isinstance(r, dict) and "subdomain" in r
+                }
+            base_probe_subs = {
+                h
+                for _, p_hosts in probe_history_indexed
+                for h in p_hosts.keys()
+            }
+            is_new_host = (
+                host not in base_port_hosts
+                and host not in base_probe_subs
+                and host not in base_subs
+                and not any(host in h_map for _, h_map in history_indexed)
+            )
+
         n_open_ports_map = {
             p["port"]: p
             for p in n_host_data.get("open_ports", [])
@@ -1216,25 +1318,48 @@ def detect_changes(
             else set()
         )
 
-        # 1. Port newly open
+        # 1. Port newly open, reopened, or observed open
         for port, p_obj in n_open_ports_map.items():
-            latest_def = _find_latest_definite_port_observation(history_indexed, host, port)
-            if latest_def is not None and latest_def[0] == "OPEN":
+            (
+                latest_state,
+                latest_scan_id,
+                _latest_p_obj,
+                consecutive_closed,
+                has_prior_open,
+            ) = _classify_port_open_history(history_indexed, host, port)
+
+            if latest_state == "OPEN":
                 # Latest definite observation was already OPEN (e.g. OPEN -> FILTERED -> OPEN).
-                # Do not emit PORT_NEWLY_OPEN.
+                # Do not emit any change.
                 continue
 
-            # Either latest_def was 'CLOSED', or no definite observation exists in bounded history.
-            port_finding = next(
-                (f for f in new_port_findings.get(host, []) if f.port == port),
-                None,
-            )
-            severity = port_finding.tier if port_finding else "INFO"
-            base_id = latest_def[1] if latest_def is not None else default_base_id
-            prev_state = {"port": port, "state": "CLOSED"} if latest_def is not None else None
+            base_id = latest_scan_id if latest_scan_id is not None else default_base_id
+            prev_state = {"port": port, "state": "CLOSED"} if latest_state is not None else None
+
+            # Determine whether this is:
+            # 1. PORT_REOPENED (informational): was OPEN, then CLOSED for 1 scan, then OPEN again.
+            # 2. PORT_OBSERVED_OPEN (informational): no prior definite observation on an existing
+            #    asset (previous scans were UNKNOWN/FILTERED/timeout or DNS was inconclusive).
+            # 3. PORT_NEWLY_OPEN (alert-eligible):
+            #    - after a prior definite CLOSED observation, OR
+            #    - after a confirmed closure (CLOSED in >= 2 consecutive definite scans), OR
+            #    - on a genuinely newly discovered host.
+            if has_prior_open and consecutive_closed == 1:
+                change_type = "PORT_REOPENED"
+                severity = "INFO"
+            elif latest_state is None and not is_new_host:
+                change_type = "PORT_OBSERVED_OPEN"
+                severity = "INFO"
+            else:
+                change_type = "PORT_NEWLY_OPEN"
+                port_finding = next(
+                    (f for f in new_port_findings.get(host, []) if f.port == port),
+                    None,
+                )
+                severity = port_finding.tier if port_finding else "INFO"
 
             change_dict: dict[str, Any] = {
-                "change_type": "PORT_NEWLY_OPEN",
+                "change_type": change_type,
                 "category": "exposure",
                 "severity": severity,
                 "asset": host,

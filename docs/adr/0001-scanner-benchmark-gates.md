@@ -29,6 +29,23 @@ The owner's gate decision was EXACTLY:
    - The benchmark harness now evaluates candidates strictly against the invariant owner gates (`<= 0.1` alert-eligible FC / 1k and `0` missed events).
    - If candidates exceed `0.1` alert-eligible FC / 1k or miss events, the stop rule reports an honest `FAIL` (`Verdict: NOT NEGLIGIBLE`).
 
+## Owner Decision (Option 3 Implementation)
+The owner approved Option 3 to address port alert semantics and benchmark matching without confirmation delays or threshold relaxation:
+1. **Port Alert Semantics Fix** (`src/asm/changes.py` and benchmark replay, shared code path):
+   - `PORT_NEWLY_OPEN` stays alert-eligible ONLY when the port is a new exposure: not `OPEN` in the asset's recent definite history, OR it returns after a confirmed closure (`CLOSED` in >= 2 consecutive definite scans).
+   - If a port was `OPEN`, then `CLOSED` for exactly one definite scan, then `OPEN` again: emit `PORT_REOPENED` as INFORMATIONAL (not alert-eligible), with honest wording ("port observed open again after a single closed observation").
+   - Every event is still emitted at the same scan as today; no delays, no suppression of closure events, no confirmation delays or retries.
+2. **Benchmark Matching Rule** (`experiments/change_replay/harness.py`, applied to all seeds equally):
+   - An emitted state-change event counts as a match for a labelled event if it is emitted at most 1 scan BEFORE the labelled scan AND the emitted state is not reversed through the labelled scan. Everything else unchanged. Detector events are not re-anchored or duplicated.
+   - Seed 79 miss on `port_closed` at scan 20 was resolved because the unreversed scan 19 closure matches the scan 20 labelled event.
+
+## Owner Decision (Option A Implementation)
+The owner approved Option A (and rejected Options B and C) to handle initial port observations without threshold relaxation or synthetic benchmark data changes:
+1. **Initial Port Observation Semantics** (`src/asm/changes.py` and benchmark replay, shared code path):
+   - If an asset's port has NO prior definite observation (only UNKNOWN/FILTERED/timeout, or the host's DNS was inconclusive) and is now observed OPEN on an existing asset, emit `PORT_OBSERVED_OPEN` as INFORMATIONAL with honest wording ("port observed open; no earlier definite observation for comparison").
+   - `PORT_NEWLY_OPEN` stays alert-eligible ONLY: (1) after a prior definite CLOSED observation (`CLOSED -> OPEN`), (2) after a confirmed closure (CLOSED in >= 2 consecutive definite scans), or (3) on a genuinely newly discovered host.
+   - Finding severity in scan results and dashboard remains completely intact (e.g. CRITICAL for `db:3306`).
+
 ## Consequences
 - Benchmark integrity is preserved without relaxing quality gates.
 - Detectors must be hardened through substantive algorithmic improvements rather than threshold adjustments.

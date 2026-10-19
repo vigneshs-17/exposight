@@ -96,7 +96,16 @@ def test_outbox_written_atomically_in_fenced_transaction(
             "results": [{"subdomain": "api.alert-atomic.com", "resolved": True}],
         },
         "probe": {"results": []},
-        "portscan": {"results": []},
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": "api.alert-atomic.com",
+                    "status": "PROBED",
+                    "open_ports": [],
+                    "closed_ports": [5432],
+                }
+            ]
+        },
         "inspect": {"results": []},
         "score": {"domain_score": 0, "domain_band": "INFO", "hosts": []},
     }
@@ -291,7 +300,16 @@ def test_digest_builder_exception_leaves_run_succeeded_with_alert_error(
             "results": [{"subdomain": "api.digest-err.com", "resolved": True}],
         },
         "probe": {"results": []},
-        "portscan": {"results": []},
+        "portscan": {
+            "results": [
+                {
+                    "subdomain": "api.digest-err.com",
+                    "status": "PROBED",
+                    "open_ports": [],
+                    "closed_ports": [5432],
+                }
+            ]
+        },
         "inspect": {"results": []},
         "score": {"domain_score": 0, "domain_band": "INFO", "hosts": []},
     }
