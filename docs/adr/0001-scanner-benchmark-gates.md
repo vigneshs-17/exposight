@@ -2,6 +2,7 @@
 
 ## Status
 Accepted (Owner Decision Re-affirmed; PR #33 Threshold Relaxation Reverted)
+Cross-reference: `docs/decisions/0001-scanner-benchmark-gates.md`
 
 ## Date
 2026-10-19
