@@ -25,11 +25,12 @@ from experiments.change_replay.harness import (
 RESULTS = Path(__file__).parent / "results"
 RESULTS_CANDIDATE = Path(__file__).parent / "results_candidate"
 
-# Stop rule thresholds approved in docs/adr/0001-scanner-benchmark-gates.md.
-# Calibrated against 80-seed baseline (45.13 total FC / 1k, 1.24 alert FC / 1k, 1 miss in Seed 79).
-MAX_FALSE_PER_1000 = 60.0
-MAX_ALERT_FALSE_PER_1000 = 2.0
-MAX_MISSED = 1
+# Stop rule thresholds per owner decision in docs/adr/0001-scanner-benchmark-gates.md:
+# - Alert-eligible false changes: <= 0.1 per 1,000 asset-scans — UNCHANGED.
+# - Missed labelled events: 0 — UNCHANGED.
+# - Informational (non-alert) false changes: NO hard gate; report the rate honestly.
+MAX_ALERT_FALSE_PER_1000 = 0.1
+MAX_MISSED = 0
 
 
 def profiles() -> dict[str, dict[str, float]]:
@@ -137,14 +138,13 @@ def main(argv: list[str] | None = None) -> None:
     alert = sum(c["alert_eligible"] for r in combined for c in r.false_changes)
     missed = sum(v is None for r in combined for v in r.detected.values())
     checks = [
-        (f"false changes per 1,000 <= {MAX_FALSE_PER_1000}",
-         1000 * false / assets <= MAX_FALSE_PER_1000),
         (f"alert-eligible false per 1,000 <= {MAX_ALERT_FALSE_PER_1000}",
          1000 * alert / assets <= MAX_ALERT_FALSE_PER_1000),
         (f"missed real events <= {MAX_MISSED}", missed <= MAX_MISSED),
     ]
     verdict = "NEGLIGIBLE: keep P0" if all(ok for _, ok in checks) else "NOT NEGLIGIBLE"
     lines += ["", "## Stop rule (combined profile)", ""]
+    lines += [f"- informational false changes per 1,000: {_per_1000(false, assets)} (report-only)"]
     lines += [f"- {label}: {'pass' if ok else 'FAIL'}" for label, ok in checks]
     lines += ["", f"**Verdict: {verdict}.**", ""]
     (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
