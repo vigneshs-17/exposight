@@ -261,14 +261,17 @@ docker compose -p exposight-staging -f compose.prod.yml -f compose.staging.overr
 
 ---
 
-## 4. Replay Acceptance Criteria: Open Release Blockers
+## 4. Replay acceptance criteria
 
-Successful completion of the staging validation runbook provides operational and isolation evidence strictly within the tested staging scope and configuration. **It does NOT prove general operational reliability, defect absence, or satisfy/waive the three failed synthetic replay acceptance criteria:**
-1. **False Changes:** 89.83 per 1,000 asset-scans (stop-rule threshold: $\le 1.0$) $\rightarrow$ **FAILED**.
-2. **Alert-Eligible False Changes:** 0.85 per 1,000 asset-scans (stop-rule threshold: $\le 0.1$) $\rightarrow$ **FAILED**.
-3. **Missed Real Events:** 1 missed event out of 180 (stop-rule threshold: $0$) $\rightarrow$ **FAILED**.
+Operational staging checks do not establish scanner accuracy or live false-alert rates. Evaluate the current candidate with the synthetic replay harness separately:
 
-*Policy Requirement:* Production release remains blocked until an explicit product ownership decision either approves these measured noise tradeoffs or mandates additional detector revisions.
+```bash
+python -m experiments.change_replay.run --candidate --seed 1 --seeds 80 --out output/staging-replay
+```
+
+Read `output/staging-replay/summary.md`. The accepted gates are **alert-eligible false changes <= 0.1 per 1,000 asset-scans** at the benchmark's default Medium alert threshold, and **zero missed labelled events**. Informational false changes are report-only; there is no total-false-change hard gate. See [ADR 0001](decisions/0001-scanner-benchmark-gates.md).
+
+The older 89.83 / 0.85 / 1 figures describe a historical candidate, not the current acceptance decision. The recorded 80-seed candidate passed the enforced gates (see [staging validation](STAGING_VALIDATION.md)); rerun after detector changes. Synthetic results do not prove live accuracy.
 
 ---
 

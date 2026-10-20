@@ -45,6 +45,10 @@ The owner approved Option A (and rejected Options B and C) to handle initial por
    - `PORT_NEWLY_OPEN` stays alert-eligible ONLY: (1) after a prior definite CLOSED observation (`CLOSED -> OPEN`), (2) after a confirmed closure (CLOSED in >= 2 consecutive definite scans), or (3) on a genuinely newly discovered host.
    - Finding severity in scan results and dashboard remains completely intact (e.g. CRITICAL for `db:3306`).
 
+## Alert threshold scope
+
+"Not alert-eligible" in the replay decisions above refers to the benchmark's default Medium threshold. `PORT_REOPENED` and `PORT_OBSERVED_OPEN` are stored as `INFO` exposure changes. A domain configured with an Info threshold can email them; the runtime alert rule selects exposure changes at or above the configured threshold.
+
 ## Consequences
 - Benchmark integrity is preserved without relaxing quality gates.
 - Detectors must be hardened through substantive algorithmic improvements rather than threshold adjustments.

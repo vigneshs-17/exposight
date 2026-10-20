@@ -2,7 +2,7 @@
 
 Deletes old scans, finished alert notifications and closed invites. Off by default:
 the worker runs it only when RETENTION_PURGE_ENABLED is true, and the operator can
-preview it with `asm-admin purge --dry-run`. audit_events are never touched (the app
+preview it with `asm admin purge --dry-run`. audit_events are never touched (the app
 role cannot delete them anyway).
 """
 

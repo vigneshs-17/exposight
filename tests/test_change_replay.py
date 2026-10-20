@@ -321,7 +321,9 @@ def test_scanner_benchmark_gates_adr_alignment(tmp_path):
     main(["--candidate", "--seed", "1", "--seeds", "3", "--out", str(out_dir)])
 
     summary_text = (out_dir / "summary.md").read_text(encoding="utf-8")
-    assert "- informational false changes per 1,000:" in summary_text
+    assert "- total false changes per 1,000:" in summary_text
+    assert "PASS: candidate meets synthetic replay gates" in summary_text
+    assert "keep P0" not in summary_text
     assert "(report-only)" in summary_text
     assert "- alert-eligible false per 1,000 <= 0.1:" in summary_text
     assert "- missed real events <= 0: pass" in summary_text

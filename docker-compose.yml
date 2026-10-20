@@ -44,7 +44,7 @@ services:
       ORG_CREATION_ALLOWED_EMAILS: '${ORG_CREATION_ALLOWED_EMAILS:-[]}'
       VERIFICATION_RESOLVERS: '${VERIFICATION_RESOLVERS:-["1.1.1.1", "9.9.9.9"]}'
     ports:
-      # Bound strictly to 127.0.0.1 (not 0.0.0.0) because there is no authentication yet.
+      # Bound strictly to 127.0.0.1 (not 0.0.0.0) to keep the development API off the public network.
       - "127.0.0.1:8000:8000"
     depends_on:
       migrate:

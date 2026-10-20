@@ -2,17 +2,17 @@
 
 | | |
 |---|---|
-| Target commit | `36248a3957774a0946931a184c955d7bd04fb34c` (`main`) |
+| Minimum target commit | `fc3a247` (Mailpit update and CLI report-output fix included; inspect later commits before deploying) |
 | VM | Azure `Standard_B2als_v2` (2 vCPU, 4 GiB, **x86_64 / amd64**), `172.198.136.164`, user `exposight` |
 | Deploy root | `/opt/exposight` |
 | Expected DB head after deploy | `0015_domain_subdomains_inventory` |
-| Last reported deploy | `2e886e2` (user-reported; schema before `0015`) |
+| Last reported deploy | `170cbd0` on 19 Oct 2026 (owner-reported; schema `0015_domain_subdomains_inventory`) |
 
 The owner runs every command. Lines marked **VM** run in an SSH session on the VM, lines marked **Laptop** run in PowerShell on the laptop. Nothing here prints a secret: database commands use the `POSTGRES_USER` / `POSTGRES_DB` / `OWNER_DB_USER` / `APP_DB_USER` variables that already exist inside the `db` container (from the VM `.env` via `compose.prod.yml`).
 
 ## 1. What this release contains
 
-Everything merged since `2e886e2`, including:
+The release history since `2e886e2` includes the changes below. The owner reported deploying through `170cbd0` on 19 Oct 2026; confirm the actual VM commit before deciding which changes remain to deploy.
 - Scanner and change-detection accuracy fixes (G3 inventory pruning, definite-DNS history, bootstrap, capacity ordering; port alert semantics Option 3 + Option A).
 - Authorization hardening: worker verification-loss handling, last-active-owner guards, pre-delivery recheck of alert authorization, viewer redaction of verification tokens and operator reasons.
 - Prober resource limits (no automatic decompression, 64 KB streaming cap), frontend org-switch/logout race guards.
@@ -72,11 +72,11 @@ This file is an **unencrypted** database dump (emails, domains, scan results). K
 ```bash
 cd /opt/exposight
 git pull --ff-only origin main
-git merge-base --is-ancestor 36248a3957774a0946931a184c955d7bd04fb34c HEAD && echo "target included"
+git merge-base --is-ancestor fc3a247 HEAD && echo "target included"
 git log --oneline -1
 ```
 
-`git pull --ff-only` refuses to merge if the VM history diverged; stop and investigate instead of forcing. `HEAD` may be newer than `36248a3957774a0946931a184c955d7bd04fb34c` if only documentation was merged later; check with `git diff --stat 36248a3957774a0946931a184c955d7bd04fb34c HEAD` (only `docs/` or `*.md` lines are fine).
+`git pull --ff-only` refuses to merge if the VM history diverged; stop and investigate instead of forcing. `HEAD` may be newer than `fc3a247`; review `git log --oneline fc3a247..HEAD` and `git diff --stat fc3a247 HEAD` before proceeding. Confirm any application, template or configuration changes are intended for this deployment.
 
 Build and start. The `migrate` service runs `alembic upgrade head` as the owner role; `api` and `worker` start only after it exits successfully:
 
@@ -89,7 +89,7 @@ docker compose -f compose.prod.yml ps
 ```
 
 Expected:
-- `migrate` logs end with `Running upgrade 0014_cancelled_scan_status -> 0015_domain_subdomains_inventory` and the container shows `Exited (0)`.
+- `migrate` exits successfully (`Exited (0)`). If upgrading from schema `0014`, its logs include `0014_cancelled_scan_status -> 0015_domain_subdomains_inventory`; if already at `0015`, no new migration is expected.
 - `alembic_version` is `0015_domain_subdomains_inventory`.
 - `db`, `egress`, `api` are `healthy`; `worker` and `caddy` are `running`.
 
