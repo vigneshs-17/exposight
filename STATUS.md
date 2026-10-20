@@ -1,9 +1,23 @@
 # Status
 
+## Current evidence snapshot — 20 Oct 2026
+
+- **Repository:** CLI output-error fix `4a8fb5b` is on `main`. Dependency PR [#46](https://github.com/vigneshs-17/exposight/pull/46) (Mailpit `v1.31.6`, development profile only) was merged after all 12 checks passed.
+- **Local verification of the CLI fix:** 849 passed, 421 skipped, 40 deselected on Python 3.12.12; lint and whitespace checks passed. Database tests were skipped because no test database was configured; browser and live integration tests were excluded by the default markers. This is not a full database or browser verification.
+- **Remote checks:** use the [CI](https://github.com/vigneshs-17/exposight/actions/workflows/ci.yml) and [Security](https://github.com/vigneshs-17/exposight/actions/workflows/security.yml) runs for the exact commit. The latest workflow result can change after this snapshot.
+- **Replay recheck (20 Oct):** seeds 1–80, 28,320 asset-scans, combined total false changes 1,277 (45.09 per 1,000), alert-eligible false changes 0, missed labelled events 0. This reproduces the README figures using the production candidate.
+- **Replay criteria:** the accepted gates are alert-eligible false changes <= 0.1 per 1,000 asset-scans at the benchmark's Medium threshold and zero missed labelled events. Informational false changes are report-only. See [ADR 0001](docs/decisions/0001-scanner-benchmark-gates.md) and the [staging validation record](docs/STAGING_VALIDATION.md). Older failed candidates below remain historical evidence.
+- **Production:** the owner reported deploying `170cbd0` on 19 Oct 2026, with schema `0015_domain_subdomains_inventory`. Later GitHub merges do not establish a production deployment. Current SMTP delivery, off-host backups and Supabase configuration still need operator verification; use [the deployment checklist](docs/DEPLOY_NEXT.md).
+- **Decisions still pending:** Cert Spotter usage terms, image/action digest pinning and HSTS subdomain policy are tracked in [DECISIONS_PENDING.md](docs/DECISIONS_PENDING.md). This review does not resolve those owner decisions.
+
+## Historical verification records
+
+The sections below preserve earlier checkpoints, plans and reported results. Test counts, uncommitted-state notes, pending-CI statements and benchmark failures describe the checkpoint in which they were recorded; they are not the current repository status.
+
 ## Test Suite
 - Test counts: see the CI run on the latest commit
 
-## Current Status Checklist
+### Earlier status checklist
 
 ### Implemented and locally verified
 - **Scanner observation validity & history traversal (E-1a)**:
@@ -56,7 +70,7 @@
   - External SMTP transport and alert dispatch: earlier notes record live SMTP delivery as pending; current live configuration requires confirmation.
   - Off-VM automated backup replication: backup creation and local restore drills verified; replication off-host noted as pending in earlier logs and requires confirmation.
 
-### Unresolved release criteria
+### Historical replay failures (superseded by ADR 0001 and later validation)
 - **Replay benchmark stop-rule criteria (seeds 1-20, 7,080 asset-scans)**:
   - Combined false changes per 1,000 asset-scans: **89.83** (target threshold: $\le 1.0$) — **FAILS** (driven primarily by CDN certificate rotation at 41.24/1k and synthetic port flap at 19.92/1k).
   - Alert-eligible false changes per 1,000 asset-scans: **0.85** (target threshold: $\le 0.1$) — **FAILS** (driven by 6 synthetic `PORT_NEWLY_OPEN` events from `port_flap_closed`; port policy retained as deliberate unresolved tradeoff).

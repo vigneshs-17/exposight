@@ -7,18 +7,18 @@
 
 Exposight watches the internet-facing side of a domain you own. It finds subdomains through Certificate Transparency logs, checks which hosts are live, scans a fixed set of common ports, inspects TLS and security headers, scores the risk, and tells you **what changed since the last scan**.
 
-The hard part is the last step. Real scans are noisy: DNS times out, ports flap, CDNs rotate certificates. A naive diff turns that noise into false alerts. Exposight separates real changes from scan noise and only emails alerts for changes it has confirmed.
+The hard part is the last step. Real scans are noisy: DNS times out, ports flap, CDNs rotate certificates. A naive diff turns that noise into false alerts. Exposight compares scan evidence with earlier observations to reduce noise. Email alerts depend on the change category, severity threshold and domain alert settings; an observation does not establish when or why an underlying change happened.
 
 ## Results
 
-Change detection is measured with a seeded replay benchmark (`experiments/change_replay/`): synthetic domains with 9 labelled real events per seed, and realistic noise injected at measured rates (DNS timeouts, NXDOMAIN blips, partial CT results, port flaps, CDN certificate rotation, probe and inspect timeouts).
+Change detection is measured with a seeded replay benchmark (`experiments/change_replay/`): synthetic domains with 9 labelled real events per seed, and synthetic noise injected at fixed, assumed rates (DNS timeouts, NXDOMAIN blips, partial CT results, port flaps, CDN certificate rotation, probe and inspect timeouts).
 
 | Version | Seeds | Asset-scans | False changes per 1,000 | **Alert-eligible false changes per 1,000** | Missed real events |
 |---|---|---|---|---|---|
 | P0 (naive diff) | 1-20 | 7,080 | 157.63 | **11.86** | 7 |
 | Current | 1-80 | 28,320 | 45.09 | **0.00** | **0** |
 
-The remaining false changes are informational only (for example `PORT_REOPENED` after a single-scan closure); they appear in the dashboard and never trigger an email. The gates (alert-eligible ≤ 0.1 per 1,000, zero misses) were fixed before tuning and were never relaxed: see [docs/decisions/0001-scanner-benchmark-gates.md](docs/decisions/0001-scanner-benchmark-gates.md). Results come from simulated noise; live false-alert rates on real domains are still being measured.
+The remaining false changes in this benchmark are informational (for example `PORT_REOPENED` after a single-scan closure). They appear in the dashboard and do not trigger email at the default Medium threshold; choosing Info can include them. The enforced gates are alert-eligible false changes ≤ 0.1 per 1,000 and zero missed labelled events. A prior threshold relaxation was reverted; the decision and subsequent detector changes are recorded in [docs/decisions/0001-scanner-benchmark-gates.md](docs/decisions/0001-scanner-benchmark-gates.md). Results come from simulated noise; live false-alert rates on real domains are still being measured.
 
 ## Architecture
 
@@ -42,16 +42,16 @@ flowchart LR
 ## Security design
 
 - **Tenant isolation**: every route is classified as tenant-scoped, list-scoped or public; a test sends another organization's ids to every tenant route and expects 404 with no data leaked.
-- **Scan only what you own**: a domain must be verified with a DNS TXT record before any active scan, and it is re-verified in the background.
+- **Scan only what you own**: a domain must be verified before active scanning, normally with a DNS TXT record, and it is re-verified in the background. Time-limited operator overrides are recorded in the audit log.
 - **SSRF defense**: each host is resolved once, checked against private and reserved ranges, and connections go only to that pinned IP; redirects must stay in scope.
-- **Limited scanning**: 16 fixed TCP ports, TCP connect only, no payloads, response bodies capped at 64 KB.
-- **CI security gates**: bandit, pip-audit, gitleaks and trivy run on every push.
+- **Limited scanning**: 16 fixed TCP ports, TCP connect only, no exploit payloads, response bodies capped at 64 KB.
+- **CI security gates**: bandit, pip-audit, gitleaks and trivy run on pushes and pull requests to `main`, with a weekly security scan.
 
 ## Testing
 
-- 1,216 tests (unit, database and API), 91.28% line+branch coverage, enforced at 90% in CI. Local run of 19 Oct 2026.
-- 38 Playwright browser tests against a live server, including 0 CSP violations.
-- 12 CI checks on every pull request: Python 3.11 and 3.12, Docker and ARM64 builds, migrations, browser tests, egress firewall, and the four security scanners.
+- Unit, database and API tests, with a 90% line+branch coverage gate in CI. Counts and coverage change as tests are added; see the [latest CI run](https://github.com/vigneshs-17/exposight/actions/workflows/ci.yml).
+- Playwright browser tests against a live test server, with assertions for zero CSP violations.
+- 12 CI and security checks on each pull request to `main`: Python 3.11 and 3.12, Docker and ARM64 builds, migrations, browser tests, egress firewall, and the four security scanners.
 
 ## Stack
 
@@ -60,7 +60,7 @@ Python 3.12, FastAPI, SQLAlchemy, Alembic, PostgreSQL 18, Jinja2 + HTMX, Supabas
 ## Run locally
 
 ```bash
-cp .env.example .env      # set the Postgres values
+cp .env.example .env      # set Postgres and Supabase values; see setup below
 docker compose up --build
 curl http://127.0.0.1:8000/health
 ```
@@ -71,7 +71,7 @@ Setup, environment variables, the CLI scanner and the full API are documented in
 
 - Passive discovery depends on Certificate Transparency; hosts that never had a public certificate are not found.
 - Port scanning covers 16 common ports, not full ranges.
-- Alert precision is proven on simulated noise; real-world rates are being measured.
+- Alert precision is evaluated with simulated noise; these results do not establish real-world accuracy.
 - Single VM, no high availability. Student project, invite-only.
 
 ---
@@ -207,16 +207,18 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$(pwd)/output:/app/output" exposi
 
 ---
 
-## Run the API (v2, local only)
+## Run the API locally
 
-In v2, Exposight expands into a modular reconnaissance service featuring a FastAPI REST API backed by PostgreSQL and SQLAlchemy 2.0.
+The service runs a FastAPI API, dashboard and background worker backed by PostgreSQL and SQLAlchemy 2.0.
 
 ### 1. Environment Configuration
 Create a local `.env` configuration file from the template:
 ```bash
 cp .env.example .env
 ```
-Ensure `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and `DATABASE_URL` are defined in `.env`.
+Set `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, and the matching `DATABASE_URL` in `.env`. For dashboard sign-in, also set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` from your Supabase project.
+
+Set `ORG_CREATION_ALLOWED_EMAILS` to a JSON list containing your confirmed sign-in email (for example `ORG_CREATION_ALLOWED_EMAILS=["you@example.com"]`). It defaults to an empty list, so nobody can create an organization until explicitly allowed. Invited members can still join existing organizations. See [Supabase setup](docs/DEPLOY.md) for provider configuration.
 Optionally set `CERTSPOTTER_API_KEY` for Cert Spotter fallback (free tier works without a key within daily limits).
 
 ### 2. Start the Stack with Docker Compose
@@ -225,8 +227,9 @@ docker compose up --build
 ```
 On startup:
 1. `db`: Initializes the pinned `postgres:18.6-alpine` database service and waits until healthy.
-2. `migrate`: Executes `alembic upgrade head` in a one-shot container to establish all tables (`domains`, `scan_runs`, `scan_results`).
-3. `api`: Starts `uvicorn` serving the FastAPI application once migrations succeed.
+2. `migrate`: Executes `alembic upgrade head` in a one-shot container to establish the current schema, including organizations, memberships, domains and scan results.
+3. `api`: Starts `uvicorn` serving the API and dashboard once migrations succeed.
+4. `worker`: Processes queued scans, schedules and alerts after migrations succeed.
 
 ### 3. Verify Health
 The `/health` endpoint is public and requires no authentication:
@@ -242,7 +245,7 @@ Response:
 
 ### 4. Authentication, Organizations & Tenant Isolation (v3.1a, v3.1b)
 
-All application API endpoints (except `/health`) require authentication via a valid Supabase JWT access token in the `Authorization: Bearer <token>` header, and are strictly scoped by organization under `/orgs/{org_id}/...`.
+Protected API endpoints require a valid Supabase JWT access token in the `Authorization: Bearer <token>` header. Organization resources are scoped under `/orgs/{org_id}/...`; account, organization-list and invite-acceptance routes use their own authenticated scope. Public routes include `/health`, the landing and sign-in pages, `/terms`, `/privacy`, `/robots.txt` and `/.well-known/security.txt`.
 
 #### Role-Based Access Control (RBAC) Matrix
 

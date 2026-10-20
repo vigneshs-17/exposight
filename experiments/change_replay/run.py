@@ -142,9 +142,14 @@ def main(argv: list[str] | None = None) -> None:
          1000 * alert / assets <= MAX_ALERT_FALSE_PER_1000),
         (f"missed real events <= {MAX_MISSED}", missed <= MAX_MISSED),
     ]
-    verdict = "NEGLIGIBLE: keep P0" if all(ok for _, ok in checks) else "NOT NEGLIGIBLE"
+    tested_model = "candidate" if args.candidate else "P0"
+    verdict = (
+        f"PASS: {tested_model} meets synthetic replay gates"
+        if all(ok for _, ok in checks)
+        else f"FAIL: {tested_model} does not meet synthetic replay gates"
+    )
     lines += ["", "## Stop rule (combined profile)", ""]
-    lines += [f"- informational false changes per 1,000: {_per_1000(false, assets)} (report-only)"]
+    lines += [f"- total false changes per 1,000: {_per_1000(false, assets)} (report-only)"]
     lines += [f"- {label}: {'pass' if ok else 'FAIL'}" for label, ok in checks]
     lines += ["", f"**Verdict: {verdict}.**", ""]
     (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8", newline="\n")
