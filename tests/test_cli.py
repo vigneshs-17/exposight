@@ -13,6 +13,47 @@ from asm.discovery import CertSpotterError, CrtshError
 from asm.models import HostProbeResult, HostProbeStatus, SubdomainResult, UrlProbeResult
 
 
+@pytest.mark.parametrize("command", ["discover", "probe", "portscan", "inspect", "score"])
+@pytest.mark.parametrize("failure", ["directory", "write"])
+def test_report_output_failure_returns_error(command, failure, tmp_path, capsys):
+    """Report output failures must return a useful error instead of crashing."""
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps({"domain": "example.com", "results": []}), encoding="utf-8")
+    output = tmp_path / "reports"
+    if failure == "directory":
+        output.write_text("This is a file, not a directory.", encoding="utf-8")
+    else:
+        output.mkdir()
+
+    if command == "discover":
+        args = [command, "example.com"]
+    elif command == "score":
+        args = [command, "--discover", str(source)]
+    else:
+        args = [command, str(source), "--authorized"]
+    args += ["--output", str(output)]
+
+    with patch("asm.cli.fetch_crtsh_data", return_value=[]):
+        if failure == "write":
+            original_open = Path.open
+
+            def open_with_write_failure(path, mode="r", *args, **kwargs):
+                if mode == "w":
+                    raise PermissionError("Report destination is read-only")
+                return original_open(path, mode, *args, **kwargs)
+
+            with patch.object(Path, "open", open_with_write_failure):
+                result = main(args)
+        else:
+            result = main(args)
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "Error:" in captured.err
+    assert str(output) in captured.err
+    assert "Traceback" not in captured.err
+
+
 class TestDiscoverCLIExecution:
     """Test suite for 'asm discover' command dispatch and error handling."""
 

@@ -35,6 +35,18 @@ from asm.validators import DomainValidationError, validate_domain
 logger = logging.getLogger("asm")
 
 
+def _write_report(report_path: Path, data: dict) -> bool:
+    """Save a report, reporting filesystem failures through the CLI error channel."""
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError as exc:
+        print(f"Error: Failed to write report to {report_path}: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure standard library logging format and log level."""
     log_level = logging.DEBUG if verbose else logging.INFO
@@ -375,14 +387,13 @@ def handle_discover(domain_arg: str, output_dir_arg: str) -> int:
 
     # 5. Save report to JSON file
     output_dir = Path(output_dir_arg)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Format Windows-safe UTC timestamp with no colons (e.g. 20260929T041500Z)
     filename_ts = scan_start_dt.strftime("%Y%m%dT%H%M%SZ")
     report_file = output_dir / f"{domain}_{filename_ts}.json"
 
-    with report_file.open("w", encoding="utf-8") as f:
-        json.dump(report.to_dict(), f, indent=2)
+    if not _write_report(report_file, report.to_dict()):
+        return 1
 
     # 6. Print summary to user
     print("\n=== Discovery Summary ===")
@@ -489,13 +500,12 @@ def handle_probe(report_file_arg: str, authorized: bool, output_dir_arg: str) ->
 
     # 5. Save probe report
     output_dir = Path(output_dir_arg)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     filename_ts = probe_start_dt.strftime("%Y%m%dT%H%M%SZ")
     report_file = output_dir / f"{domain}_probe_{filename_ts}.json"
 
-    with report_file.open("w", encoding="utf-8") as f:
-        json.dump(report.to_dict(), f, indent=2)
+    if not _write_report(report_file, report.to_dict()):
+        return 1
 
     # 6. Print summary
     print("\n=== Probe Summary ===")
@@ -615,13 +625,12 @@ def handle_portscan(report_file_arg: str, authorized: bool, output_dir_arg: str)
 
     # 5. Save report to JSON file
     output_dir = Path(output_dir_arg)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     filename_ts = scan_start_dt.strftime("%Y%m%dT%H%M%SZ")
     report_file = output_dir / f"{domain}_portscan_{filename_ts}.json"
 
-    with report_file.open("w", encoding="utf-8") as f:
-        json.dump(report.to_dict(), f, indent=2)
+    if not _write_report(report_file, report.to_dict()):
+        return 1
 
     # 6. Print summary
     print("\n=== Port Scan Summary ===")
@@ -693,11 +702,10 @@ def handle_inspect(report_file_arg: str, authorized: bool, output_dir_arg: str) 
     start_dt = datetime.fromisoformat(inspect_report.inspect_started_utc)
     filename_ts = start_dt.strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(output_dir_arg)
-    output_dir.mkdir(parents=True, exist_ok=True)
     report_file = output_dir / f"{domain}_inspect_{filename_ts}.json"
 
-    with report_file.open("w", encoding="utf-8") as f:
-        json.dump(inspect_report.to_dict(), f, indent=2)
+    if not _write_report(report_file, inspect_report.to_dict()):
+        return 1
 
     # 4. Print summary
     counts = inspect_report.counts
@@ -808,15 +816,10 @@ def handle_score(
         return 1
 
     out_dir = Path(output_dir_arg)
-    out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     report_path = out_dir / f"{report.domain}_score_{ts}.json"
 
-    try:
-        with report_path.open("w", encoding="utf-8") as f:
-            json.dump(report.to_dict(), f, indent=2)
-    except OSError as err:
-        print(f"Error: Failed to write score report to {report_path}: {err}", file=sys.stderr)
+    if not _write_report(report_path, report.to_dict()):
         return 1
 
     # CLI Output Summary
