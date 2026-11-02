@@ -1,6 +1,6 @@
 name: Security
 
-# Phase G security gates (STATUS.md "Phase G plan", D17-D26). Runs on every push and pull
+# Phase G security gates (docs/STATUS.md "Phase G plan", D17-D26). Runs on every push and pull
 # request to main, and weekly so newly published CVEs fail the build without a code change.
 on:
   push:

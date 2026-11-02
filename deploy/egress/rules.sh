@@ -1,5 +1,5 @@
 #!/bin/sh
-# Worker egress firewall rules (Phase D-2, STATUS.md "Phase D plan").
+# Worker egress firewall rules (Phase D-2, docs/STATUS.md "Phase D plan").
 #
 # Runs inside the egress container. The worker shares this network namespace, so
 # these OUTPUT rules apply to every connection the worker opens. The worker has no

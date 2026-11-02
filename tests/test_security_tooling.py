@@ -42,7 +42,7 @@ def test_every_nosec_names_a_test_id_and_gives_a_reason():
                 f"{where}: '# nosec {test_id}' needs a reason on the line or a "
                 f"'Bandit {test_id} accepted: ...' comment just above"
             )
-    assert found >= 9  # the accepted findings listed in STATUS.md "Phase G plan"
+    assert found >= 9  # the accepted findings listed in docs/STATUS.md "Phase G plan"
 
 
 def test_malformed_certificate_dates_are_logged_not_silently_dropped(caplog):

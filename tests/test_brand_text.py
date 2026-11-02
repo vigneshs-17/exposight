@@ -28,8 +28,8 @@ def test_served_templates_and_static_files_use_exposight():
 # History and the guard tests themselves may name the old brand; the distribution
 # name in pyproject.toml is kept until it is renamed on purpose.
 ALLOWED_FILES = {
-    "ENGINEERING_LOG.md",
-    "STATUS.md",
+    "docs/ENGINEERING_LOG.md",
+    "docs/STATUS.md",
     "tests/test_brand_text.py",
     "tests/test_dashboard_ui.py",
 }
