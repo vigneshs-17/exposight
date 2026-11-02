@@ -36,6 +36,6 @@ Every push and pull request to `main`, and a weekly run, go through `.github/wor
   vulnerabilities that have a fixed version. Unfixed ones are shown in the job log.
 
 The CI `db-test` job also enforces a test coverage floor (line and branch, `fail_under` in
-`pyproject.toml`). The current list of accepted findings and their reasons is in `STATUS.md`
+`pyproject.toml`). The current list of accepted findings and their reasons is in `docs/STATUS.md`
 ("Phase G plan").
 

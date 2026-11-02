@@ -76,7 +76,7 @@ NOISE_CLASSES = (
 REPORT_ONLY_NOISE_CLASSES = ("ct_empty",)
 ALL_KNOWN_NOISE_CLASSES = NOISE_CLASSES + REPORT_ONLY_NOISE_CLASSES
 
-# Fixed in STATUS.md (E-1a plan) before any result was produced. Priors, not measurements.
+# Fixed in docs/STATUS.md (E-1a plan) before any result was produced. Priors, not measurements.
 REALISTIC: dict[str, float] = {
     "dns_timeout": 0.01,
     "dns_nxdomain": 0.002,

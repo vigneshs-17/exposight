@@ -43,7 +43,7 @@ The release history since `2e886e2` includes the changes below. The owner report
 
 ### 1.1 IC-1 deploy notes (added 2026-10-19)
 
-- [ ] **Supabase auth settings (owner, dated 2026-10-19).** In the Supabase dashboard (Authentication → Sign In / Providers → Email), confirm **"Confirm email" is ON** and **"Allow new users to sign up" is OFF**, and write the date you checked into `STATUS.md`. Invite acceptance and the org-creation allowlist trust the email in the Supabase token; with "Confirm email" off, someone could sign up with another person's address (see `docs/DEPLOY.md`, Supabase section). Re-check after any change to the Supabase project.
+- [ ] **Supabase auth settings (owner, dated 2026-10-19).** In the Supabase dashboard (Authentication → Sign In / Providers → Email), confirm **"Confirm email" is ON** and **"Allow new users to sign up" is OFF**, and write the date you checked into `docs/STATUS.md`. Invite acceptance and the org-creation allowlist trust the email in the Supabase token; with "Confirm email" off, someone could sign up with another person's address (see `docs/DEPLOY.md`, Supabase section). Re-check after any change to the Supabase project.
 - [ ] **Recreate Caddy after the pull.** The Caddyfile is a single-file bind mount; `git pull` replaces the file, and a running container keeps reading the old one. After `up -d --build` in section 3, run `docker compose -f compose.prod.yml up -d --force-recreate caddy`.
 - [ ] **Check the new headers** (section 4.2): `curl -sI http://exposight.dev/` shows `308` with no `Server` line; `curl -sI https://exposight.dev/` shows `200` (HEAD now works), `Permissions-Policy: camera=(), microphone=(), geolocation=()`, and no `Via` line; `curl -s https://exposight.dev/robots.txt` shows `Disallow: /app`.
 
@@ -212,5 +212,5 @@ Data written between the backup and the rollback (scans, alerts, audit events) i
 
 ## 6. After the deploy
 
-- Record the deployed commit and the date in `STATUS.md` ("User-reported deployed behavior").
+- Record the deployed commit and the date in `docs/STATUS.md` ("User-reported deployed behavior").
 - Continue with the owner checklist: `docs/EMAIL_SETUP.md`, `docs/DNS_RECORDS.md`, `docs/BACKUP_SETUP.md`, `docs/MONITORING_SETUP.md`, `docs/DECISIONS_PENDING.md`.
