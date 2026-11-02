@@ -56,6 +56,17 @@ def test_script_starts_with_set_euo_pipefail() -> None:
     assert lines[0] == "set -euo pipefail", f"Expected 'set -euo pipefail' as first command line, got {lines[0]!r}"
 
 
+def test_final_non_empty_line_is_exit_0() -> None:
+    """The final non-empty line of deploy_remote.sh must be 'exit 0' to avoid trailing CRLF evaluation."""
+    lines = [
+        line.strip()
+        for line in DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert lines, "deploy_remote.sh is empty"
+    assert lines[-1] == "exit 0", f"Expected 'exit 0' as final line, got {lines[-1]!r}"
+
+
 def test_unknown_subcommand_exits_2() -> None:
     """An unknown subcommand must print a usage message and exit with code 2."""
     bash = get_bash_executable()
@@ -114,7 +125,21 @@ def test_remote_script_prints_machine_readable_markers() -> None:
         "PRE_REVISION=",
         "BACKUP_PATH=",
         "BACKUP_BYTES=",
+        "UP_STARTED=",
         "POST_REVISION=",
     ]
     for marker in required_markers:
         assert marker in content, f"Marker {marker!r} missing from deploy_remote.sh"
+
+
+def test_verify_checks_last_line_for_egress_passed() -> None:
+    """deploy_remote.sh must decide egress PASS based on the last non-empty line, not grep anywhere."""
+    content = DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8")
+    assert 'grep -q "egress check: PASSED"' not in content
+    assert 'egress check: PASSED' in content
+
+
+def test_verify_uses_since_for_worker_logs() -> None:
+    """deploy_remote.sh must check worker logs using --since."""
+    content = DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8")
+    assert "logs --since" in content

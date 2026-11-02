@@ -124,6 +124,10 @@ phase_pull() {
 phase_up() {
     cd /opt/exposight
 
+    local up_started
+    up_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "UP_STARTED=$up_started"
+
     local rc=0
     docker compose -f compose.prod.yml up -d --build --remove-orphans || rc=$?
 
@@ -219,19 +223,28 @@ phase_up() {
 }
 
 phase_verify() {
+    local since_time="${1:-}"
     cd /opt/exposight
 
     local egress_out
     egress_out=$(docker compose -f compose.prod.yml exec -T worker python - < scripts/egress_check.py 2>&1 || true)
     echo "$egress_out"
-    if ! echo "$egress_out" | grep -q "egress check: PASSED"; then
+
+    local last_line
+    last_line=$(printf '%s\n' "$egress_out" | awk 'NF { line = $0 } END { print line }')
+    if [ "$last_line" != "egress check: PASSED" ]; then
         docker compose -f compose.prod.yml stop worker >/dev/null 2>&1 || true
-        echo "FAIL verify: egress check failed (stopped worker)" >&2
+        echo "FAIL verify: egress check failed ($last_line)" >&2
         exit 1
     fi
 
     local worker_logs
-    worker_logs=$(docker compose -f compose.prod.yml logs --tail=50 worker 2>&1 || true)
+    if [ -n "$since_time" ]; then
+        worker_logs=$(docker compose -f compose.prod.yml logs --since "$since_time" worker 2>&1 || true)
+    else
+        worker_logs=$(docker compose -f compose.prod.yml logs worker 2>&1 || true)
+    fi
+
     if ! echo "$worker_logs" | grep -q "Starting ASM worker"; then
         echo "FAIL verify: worker log has no 'Starting ASM worker' line" >&2
         exit 1
@@ -257,9 +270,11 @@ case "${1:-}" in
         phase_up
         ;;
     verify)
-        phase_verify
+        phase_verify "${2:-}"
         ;;
     *)
         usage
         ;;
 esac
+
+exit 0

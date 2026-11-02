@@ -42,6 +42,7 @@ $preCommit = "N/A"
 $preRevision = "N/A"
 $postCommit = "N/A"
 $postRevision = "N/A"
+$upStarted = $null
 $localBackupPath = "N/A"
 $afterPull = $false
 $logFile = $null
@@ -92,14 +93,16 @@ function Restore-Environment {
 function Invoke-RemotePhase {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Phase
+        [string]$Phase,
+        [string]$Arg = $null
     )
 
+    $cmd = if ($Arg) { "bash -s -- $Phase $Arg" } else { "bash -s -- $Phase" }
     Write-Log "=== Executing remote phase: $Phase ==="
     $lines = New-Object System.Collections.Generic.List[string]
 
     # Stream script without carriage returns (\r)
-    $cleanScriptContent | & ssh -i $Key -o BatchMode=yes -o ConnectTimeout=15 $Vm "bash -s -- $Phase" 2>&1 | ForEach-Object {
+    $cleanScriptContent | & ssh -i $Key -o BatchMode=yes -o ConnectTimeout=15 $Vm $cmd 2>&1 | ForEach-Object {
         $str = $_.ToString()
         Write-Log $str
         $lines.Add($str)
@@ -378,6 +381,9 @@ try {
             }
 
             foreach ($line in $upRes.Output) {
+                if ($line -match '^UP_STARTED=(.*)$') {
+                    $upStarted = $matches[1].Trim()
+                }
                 if ($line -match '^POST_REVISION=(.*)$') {
                     $postRevision = $matches[1].Trim()
                 }
@@ -390,7 +396,7 @@ try {
             }
 
             # Step 6: Phase 'verify'
-            $verifyRes = Invoke-RemotePhase -Phase "verify"
+            $verifyRes = Invoke-RemotePhase -Phase "verify" -Arg $upStarted
             if ($verifyRes.ExitCode -ne 0) {
                 Fail-Deploy "verify phase failed with exit code $($verifyRes.ExitCode)" -AfterPull
             }
