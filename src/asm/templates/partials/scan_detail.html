@@ -167,6 +167,10 @@
   <p class="text-muted">Scan is {{ status_display|lower }}. Findings will be reported once all pipeline stages complete.</p>
   {% elif truncation_notice %}
   <p class="text-muted">No findings reported for scanned assets. (Note: asset discovery was truncated; see pipeline stage notices).</p>
+  {% elif discovery_empty %}
+  <div class="alert-box alert-warning">
+    <strong>Warning:</strong> No hosts discovered — results incomplete
+  </div>
   {% else %}
   <p class="text-muted">No findings reported for this scan run.</p>
   {% endif %}

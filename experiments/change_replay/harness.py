@@ -72,6 +72,10 @@ NOISE_CLASSES = (
     "inspect_timeout",  # e: probe saw HTTPS, the inspect connection then timed out
 )
 
+# Report-only scenarios outside the 9 fixed benchmark gate classes
+REPORT_ONLY_NOISE_CLASSES = ("ct_empty",)
+ALL_KNOWN_NOISE_CLASSES = NOISE_CLASSES + REPORT_ONLY_NOISE_CLASSES
+
 # Fixed in STATUS.md (E-1a plan) before any result was produced. Priors, not measurements.
 REALISTIC: dict[str, float] = {
     "dns_timeout": 0.01,
@@ -191,12 +195,12 @@ class Noise:
     """Independent seeded stream per noise class, so one class never shifts another's draws."""
 
     def __init__(self, probs: dict[str, float], seed: int) -> None:
-        unknown = set(probs) - set(NOISE_CLASSES)
+        unknown = set(probs) - set(ALL_KNOWN_NOISE_CLASSES)
         if unknown:
             raise ValueError(f"unknown noise classes: {sorted(unknown)}")
-        self.probs = {c: probs.get(c, 0.0) for c in NOISE_CLASSES}
+        self.probs = {c: probs.get(c, 0.0) for c in ALL_KNOWN_NOISE_CLASSES}
         # str seeds are hashed with SHA-512 by random.seed: stable across runs and platforms
-        self.rngs = {c: random.Random(f"{seed}:{c}") for c in NOISE_CLASSES}
+        self.rngs = {c: random.Random(f"{seed}:{c}") for c in ALL_KNOWN_NOISE_CLASSES}
         self.fired: Counter[str] = Counter()
 
     def fires(self, cls: str) -> bool:
@@ -234,6 +238,15 @@ def observe(truth: dict[str, Host], t: int, noise: Noise) -> dict[str, dict[str,
     # discover
     names = sorted(n for n, h in truth.items() if h.in_ct)
     source, fallback, truncated = "crt.sh", None, False
+    discovery_empty = False
+    if noise.fires("ct_empty"):
+        names = []
+        source, fallback, truncated, discovery_empty = (
+            "certspotter",
+            "crt.sh returned no in-scope names",
+            False,
+            True,
+        )
     if noise.fires("ct_partial"):
         names = noise.subset("ct_partial", names)
     if noise.fires("ct_truncated"):
@@ -257,7 +270,7 @@ def observe(truth: dict[str, Host], t: int, noise: Noise) -> dict[str, dict[str,
     resolved = sum(s.resolved for s in subs)
     discover = DiscoveryReport(
         domain=DOMAIN, scan_started_utc=_ts(t), scan_finished_utc=_ts(t, 1), source=source,
-        fallback_reason=fallback, truncated=truncated,
+        fallback_reason=fallback, truncated=truncated, discovery_empty=discovery_empty,
         counts={"total_discovered": len(subs), "resolved": resolved,
                 "unresolved": len(subs) - resolved},
         results=subs,

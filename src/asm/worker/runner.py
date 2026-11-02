@@ -74,6 +74,7 @@ class DirectScannerRunner:
         total_found = len(subdomains)
         observed_count = getattr(outcome, "observed_count", total_found)
         truncation_reason = getattr(outcome, "truncation_reason", None)
+        discovery_empty = getattr(outcome, "discovery_empty", False) or (total_found == 0)
 
         results: list[SubdomainResult] = []
         if total_found == 0:
@@ -102,6 +103,7 @@ class DirectScannerRunner:
             fallback_reason=fallback_reason,
             truncated=truncated,
             truncation_reason=truncation_reason,
+            discovery_empty=discovery_empty,
             counts=counts,
             results=results,
         )

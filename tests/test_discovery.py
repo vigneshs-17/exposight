@@ -481,6 +481,55 @@ class TestDiscoverSubdomainsOrchestrator:
             assert "crt.sh error: crt.sh 502 Bad Gateway" in str(err)
             assert "Cert Spotter error: Cert Spotter 429 rate limit" in str(err)
 
+    def test_discover_subdomains_crtsh_empty_falls_back_to_certspotter(self):
+        """Verify empty crt.sh response falls back to Cert Spotter with names."""
+        mock_crtsh = MagicMock(return_value=[])
+        cs_mock_data = ([{"dns_names": ["cs.example.com"]}], False)
+
+        with patch("asm.discovery.fetch_certspotter_data", return_value=cs_mock_data) as mock_cs:
+            outcome = discover_subdomains("example.com", crtsh_fetcher=mock_crtsh)
+
+            assert outcome.subdomains == ["cs.example.com"]
+            assert outcome.source == "certspotter"
+            assert outcome.fallback_reason == "crt.sh returned no in-scope names"
+            assert outcome.discovery_empty is False
+            assert outcome.truncated is False
+            mock_cs.assert_called_once()
+
+    def test_discover_subdomains_both_empty(self):
+        """Verify when both sources return zero names, discovery_empty is True."""
+        mock_crtsh = MagicMock(return_value=[])
+        cs_mock_data = ([], False)
+
+        with patch("asm.discovery.fetch_certspotter_data", return_value=cs_mock_data) as mock_cs:
+            outcome = discover_subdomains("example.com", crtsh_fetcher=mock_crtsh)
+
+            assert outcome.subdomains == []
+            assert outcome.source == "certspotter"
+            assert outcome.fallback_reason == "crt.sh returned no in-scope names"
+            assert outcome.discovery_empty is True
+            assert outcome.truncated is False
+            mock_cs.assert_called_once()
+
+    def test_discover_subdomains_crtsh_empty_and_certspotter_raises(self):
+        """Verify crt.sh empty + Cert Spotter error does NOT raise AllSourcesFailedError."""
+        mock_crtsh = MagicMock(return_value=[])
+
+        with patch(
+            "asm.discovery.fetch_certspotter_data",
+            side_effect=CertSpotterError("Cert Spotter 429 rate limit"),
+        ):
+            outcome = discover_subdomains("example.com", crtsh_fetcher=mock_crtsh)
+
+            assert outcome.subdomains == []
+            assert outcome.source == "crt.sh"
+            assert outcome.discovery_empty is True
+            expected_reason = (
+                "crt.sh returned no in-scope names; "
+                "Cert Spotter failed: Cert Spotter 429 rate limit"
+            )
+            assert outcome.fallback_reason == expected_reason
+
 
 class TestCrtshTransportErrors:
     """P1: protocol-level disconnects from crt.sh are retried, then raise CrtshError."""
@@ -1022,6 +1071,59 @@ class TestTruncationMetadataAndDownstream:
                 db=mock_db,
             )
             assert "Discovery results were truncated due to resource or provider limits." in html
+
+    def test_ui_discovery_empty_warning_rendered(self):
+        from datetime import UTC, datetime
+
+        from asm.api.routes_ui import get_org_scan_detail_ui
+        from asm.db.models import Domain, Membership, Organization, ScanResult, ScanRun, ScanStage
+
+        mock_db = MagicMock()
+        mock_org = Organization(id=1, name="Test Org")
+        mock_membership = Membership(id=1, org_id=1, user_id="u1", role="owner")
+        mock_domain = Domain(id=10, org_id=1, name="example.com")
+        mock_scan = ScanRun(
+            id=100, domain_id=10, domain=mock_domain, status="succeeded", trigger="manual"
+        )
+        mock_scan.created_at = datetime.now(UTC)
+
+        disc_result = ScanResult(
+            id=1,
+            scan_run_id=100,
+            stage="discover",
+            report={
+                "truncated": False,
+                "discovery_empty": True,
+                "counts": {"total_discovered": 0, "selected_hosts": 0, "observed_hosts": 0},
+                "source": "certspotter",
+                "results": [],
+            },
+        )
+        stage_discover = ScanStage(
+            id=1, scan_run_id=100, stage="discover", status="succeeded", duration_ms=250
+        )
+
+        with patch("asm.api.routes_ui.get_scan_for_org", return_value=mock_scan):
+            mock_db.scalars.side_effect = [
+                MagicMock(all=lambda: [disc_result]),  # ScanResult
+                MagicMock(all=lambda: []),  # ScanChange
+                MagicMock(all=lambda: [stage_discover]),  # ScanStage
+            ]
+            response = MagicMock()
+            response.headers = {}
+            auth_settings = MagicMock()
+            auth_settings.supabase_url = "https://test.supabase.co"
+
+            html = get_org_scan_detail_ui(
+                org_id=1,
+                scan_id=100,
+                response=response,
+                auth_context=(mock_org, mock_membership),
+                auth_settings=auth_settings,
+                db=mock_db,
+            )
+            assert "No hosts discovered — results incomplete" in html
+            assert "No findings reported for this scan run." not in html
 
 
 class TestDirectArgumentValidation:
