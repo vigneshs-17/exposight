@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -42,7 +43,9 @@ def get_bash_executable() -> str:
 def test_script_has_lf_line_endings() -> None:
     """The script must strictly use Unix LF line endings (no CR / CRLF)."""
     raw_bytes = DEPLOY_REMOTE_SCRIPT.read_bytes()
-    assert b"\r" not in raw_bytes, "scripts/deploy_remote.sh contains Windows CRLF line endings (\\r)"
+    assert b"\r" not in raw_bytes, (
+        "scripts/deploy_remote.sh contains Windows CRLF line endings (\\r)"
+    )
 
 
 def test_script_starts_with_set_euo_pipefail() -> None:
@@ -53,11 +56,16 @@ def test_script_starts_with_set_euo_pipefail() -> None:
         if line.strip() and not line.strip().startswith("#")
     ]
     assert lines, "Script is empty or contains only comments"
-    assert lines[0] == "set -euo pipefail", f"Expected 'set -euo pipefail' as first command line, got {lines[0]!r}"
+    assert lines[0] == "set -euo pipefail", (
+        f"Expected 'set -euo pipefail' as first command line, got {lines[0]!r}"
+    )
 
 
 def test_final_non_empty_line_is_exit_0() -> None:
-    """The final non-empty line of deploy_remote.sh must be 'exit 0' to avoid trailing CRLF evaluation."""
+    """The final non-empty line of deploy_remote.sh must be 'exit 0'.
+
+    Prevents bash from evaluating trailing CRLF appended by PowerShell.
+    """
     lines = [
         line.strip()
         for line in DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8").splitlines()
@@ -82,14 +90,16 @@ def test_unknown_subcommand_exits_2() -> None:
 
 
 def test_no_destructive_commands() -> None:
-    """The script must not contain hard resets, forced git operations, push, or DB restore commands."""
+    """The script must not contain hard resets, forced git operations, push, or DB restores."""
     content = DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8")
     assert "reset --hard" not in content, "deploy_remote.sh must not contain 'reset --hard'"
     assert not re.search(
         r"(?<!-)--force\b(?!-recreate)", content
     ), "deploy_remote.sh must not contain '--force' flags"
     assert "git push" not in content, "deploy_remote.sh must not push to remotes"
-    assert "pg_restore" not in content, "deploy_remote.sh must not run pg_restore (restores are manual only)"
+    assert "pg_restore" not in content, (
+        "deploy_remote.sh must not run pg_restore (restores are manual only)"
+    )
     assert "DROP DATABASE" not in content, "deploy_remote.sh must not drop databases"
 
 
@@ -133,7 +143,7 @@ def test_remote_script_prints_machine_readable_markers() -> None:
 
 
 def test_verify_checks_last_line_for_egress_passed() -> None:
-    """deploy_remote.sh must decide egress PASS based on the last non-empty line, not grep anywhere."""
+    """deploy_remote.sh must decide egress PASS from the last non-empty line, not grep."""
     content = DEPLOY_REMOTE_SCRIPT.read_text(encoding="utf-8")
     assert 'grep -q "egress check: PASSED"' not in content
     assert 'egress check: PASSED' in content
