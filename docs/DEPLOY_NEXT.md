@@ -10,6 +10,26 @@
 
 The owner runs every command. Lines marked **VM** run in an SSH session on the VM, lines marked **Laptop** run in PowerShell on the laptop. Nothing here prints a secret: database commands use the `POSTGRES_USER` / `POSTGRES_DB` / `OWNER_DB_USER` / `APP_DB_USER` variables that already exist inside the `db` container (from the VM `.env` via `compose.prod.yml`).
 
+## Automated path (recommended)
+
+Deploy directly from PowerShell on your Windows laptop. Run a dry run first to verify connectivity and preview actions, then run the live deploy:
+
+```powershell
+# 1. Preview read-only phases and run live HTTP checks
+.\scripts\deploy.ps1 -DryRun
+
+# 2. Execute full deployment (remote precheck, backup + scp, incoming check, pull, compose up, verify, live HTTP checks)
+.\scripts\deploy.ps1
+```
+
+To run only the live HTTP checks against `exposight.dev` at any time:
+```powershell
+.\scripts\deploy.ps1 -VerifyOnly
+```
+
+If any phase fails, the script aborts immediately and names the failed step. On failures after code pull, the script displays the pre-deploy commit and points to Section 5 below. The manual steps below remain the reference and fallback.
+
+
 ## 1. What this release contains
 
 The release history since `2e886e2` includes the changes below. The owner reported deploying through `170cbd0` on 19 Oct 2026; confirm the actual VM commit before deciding which changes remain to deploy.

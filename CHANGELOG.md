@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Operations & Automation
+- **Automated Production Deployment**: Added single-command deployment harness (`scripts/deploy.ps1` and `scripts/deploy_remote.sh`) for Azure production releases, featuring automated prechecks, remote database backup with local scp copy, fast-forward pull, compose rebuild with migrate exit code validation, egress firewall verification, and live HTTP security assertion.
+
 #### User Authentication & Organizations (v3.1a)
 - **Supabase JWT Authentication**: Dependency-injected token verification (`verify_access_token`, `JWKSManager`) validating RS256/ES256 signatures against Supabase JWKS endpoints with cache TTL, min refresh interval, and fail-closed security.
 - **Just-In-Time (JIT) User Provisioning**: Automatic upsertion of authenticated users into the `users` table upon verified token presentation.
