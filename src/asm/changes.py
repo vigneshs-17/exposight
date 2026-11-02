@@ -87,7 +87,15 @@ def evaluate_removal_eligibility(
     new_source = new_discover.get("source", "crt.sh")
     base_truncated = baseline_discover.get("truncated", False) is True
     new_truncated = new_discover.get("truncated", False) is True
+    base_empty = baseline_discover.get("discovery_empty", False) is True
+    new_empty = new_discover.get("discovery_empty", False) is True
 
+    if base_empty and new_empty:
+        return False, "Baseline and new discovery reports were empty"
+    if base_empty:
+        return False, "Baseline discovery report was empty"
+    if new_empty:
+        return False, "New discovery report was empty"
     if base_source != new_source:
         return False, f"Source mismatch ({base_source} vs {new_source})"
     if base_truncated and new_truncated:
@@ -652,7 +660,7 @@ def detect_changes(
             if isinstance(s_results, list)
             else {}
         )
-        s_empty = len(s_subs) == 0
+        s_empty = len(s_subs) == 0 or bool(d_rep.get("discovery_empty", False))
         disc_history_indexed.append((s_id, s_src, s_trunc, s_empty, s_subs))
 
     new_src = new_disc.get("source", "crt.sh")
@@ -663,7 +671,7 @@ def detect_changes(
         if isinstance(new_results, list)
         else {}
     )
-    new_empty = len(new_subs) == 0
+    new_empty = len(new_subs) == 0 or bool(new_disc.get("discovery_empty", False))
 
     default_base_id = (
         disc_history_indexed[0][0]
@@ -1767,7 +1775,7 @@ def detect_changes(
             if isinstance(d_res, list)
             else {}
         )
-        d_empty = len(d_subs) == 0
+        d_empty = len(d_subs) == 0 or bool(d_rep.get("discovery_empty", False))
         disc_meta_by_scan.append((d_src, d_trunc, d_empty, d_subs))
         disc_by_scan.append(d_subs if d_subs else None)
 

@@ -490,6 +490,16 @@ def get_org_scan_detail_ui(
     )
     duration = format_duration(scan_run.started_at, scan_run.finished_at)
     status_display = STATUS_DISPLAY_NAMES.get(scan_run.status, scan_run.status.capitalize())
+    discovery_empty = (
+        bool(discover_report.get("discovery_empty"))
+        or (
+            bool(discover_report)
+            and discover_report.get("counts", {}).get("total_discovered", 0) == 0
+            and len(discover_report.get("results", [])) == 0
+        )
+        if discover_report
+        else False
+    )
 
     template = templates_env.get_template("partials/scan_detail.html")
     return template.render(
@@ -505,6 +515,7 @@ def get_org_scan_detail_ui(
         is_stale_active=is_stale_active,
         user_role=membership.role,
         truncation_notice=truncation_notice,
+        discovery_empty=discovery_empty,
     )
 
 

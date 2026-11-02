@@ -140,6 +140,7 @@ class DiscoveryOutcome(tuple):
     truncated: bool
     truncation_reason: str | None
     observed_count: int
+    discovery_empty: bool
 
     def __new__(
         cls,
@@ -149,6 +150,7 @@ class DiscoveryOutcome(tuple):
         truncated: bool,
         truncation_reason: str | None = None,
         observed_count: int = 0,
+        discovery_empty: bool = False,
     ) -> DiscoveryOutcome:
         instance = super().__new__(cls, (subdomains, source, fallback_reason, truncated))
         instance.subdomains = subdomains
@@ -157,6 +159,7 @@ class DiscoveryOutcome(tuple):
         instance.truncated = truncated
         instance.truncation_reason = truncation_reason
         instance.observed_count = observed_count
+        instance.discovery_empty = discovery_empty
         return instance
 
 
@@ -832,6 +835,10 @@ def discover_subdomains(
     )
 
     fetcher = crtsh_fetcher or fetch_crtsh_data
+    crtsh_empty = False
+    crtsh_error: CrtshError | None = None
+    fallback_reason: str | None = None
+
     try:
         try:
             crtsh_entries = fetcher(domain, client=client, max_bytes=effective_max_bytes)
@@ -839,71 +846,99 @@ def discover_subdomains(
             crtsh_entries = fetcher(domain, client=client)
 
         parsed_subdomains = parse_subdomains(crtsh_entries, domain)
-        selected, hostname_truncated, observed_count = select_bounded_subdomains(
-            parsed_subdomains, domain, effective_max_hosts
-        )
-        provider_truncated = False
-        truncated = provider_truncated or hostname_truncated
-        truncation_reason = "hostname_cap_exceeded" if hostname_truncated else None
+        if parsed_subdomains:
+            selected, hostname_truncated, observed_count = select_bounded_subdomains(
+                parsed_subdomains, domain, effective_max_hosts
+            )
+            provider_truncated = False
+            truncated = provider_truncated or hostname_truncated
+            truncation_reason = "hostname_cap_exceeded" if hostname_truncated else None
 
-        return DiscoveryOutcome(
-            subdomains=selected,
-            source="crt.sh",
-            fallback_reason=None,
-            truncated=truncated,
-            truncation_reason=truncation_reason,
-            observed_count=observed_count,
-        )
+            return DiscoveryOutcome(
+                subdomains=selected,
+                source="crt.sh",
+                fallback_reason=None,
+                truncated=truncated,
+                truncation_reason=truncation_reason,
+                observed_count=observed_count,
+                discovery_empty=False,
+            )
+        else:
+            crtsh_empty = True
+            fallback_reason = "crt.sh returned no in-scope names"
+            logger.info(
+                "crt.sh returned no in-scope names for '%s'; engaging Cert Spotter fallback",
+                domain,
+            )
     except CrtshError as crtsh_exc:
         from asm.scan_common import sanitize_error_text
 
+        crtsh_error = crtsh_exc
         fallback_reason = sanitize_error_text(str(crtsh_exc), max_length=300)
         logger.warning(
             "Primary discovery via crt.sh failed for '%s': %s; engaging Cert Spotter fallback",
             domain,
             fallback_reason,
         )
-        try:
-            cs_entries, provider_truncated = fetch_certspotter_data(
-                domain,
-                client=client,
-                api_key=api_key,
-                max_total_bytes=effective_max_bytes,
-            )
-            adapted_records = transform_certspotter_to_raw_records(cs_entries)
-            parsed_subdomains = parse_subdomains(adapted_records, domain)
-            selected, hostname_truncated, observed_count = select_bounded_subdomains(
-                parsed_subdomains, domain, effective_max_hosts
-            )
-            truncated = provider_truncated or hostname_truncated
-            if provider_truncated and hostname_truncated:
-                truncation_reason = "provider_and_hostname_cap_exceeded"
-            elif hostname_truncated:
-                truncation_reason = "hostname_cap_exceeded"
-            elif provider_truncated:
-                truncation_reason = "provider_entry_limit"
-            else:
-                truncation_reason = None
 
+    from asm.scan_common import sanitize_error_text
+
+    try:
+        cs_entries, provider_truncated = fetch_certspotter_data(
+            domain,
+            client=client,
+            api_key=api_key,
+            max_total_bytes=effective_max_bytes,
+        )
+        adapted_records = transform_certspotter_to_raw_records(cs_entries)
+        parsed_subdomains = parse_subdomains(adapted_records, domain)
+        selected, hostname_truncated, observed_count = select_bounded_subdomains(
+            parsed_subdomains, domain, effective_max_hosts
+        )
+        truncated = provider_truncated or hostname_truncated
+        if provider_truncated and hostname_truncated:
+            truncation_reason = "provider_and_hostname_cap_exceeded"
+        elif hostname_truncated:
+            truncation_reason = "hostname_cap_exceeded"
+        elif provider_truncated:
+            truncation_reason = "provider_entry_limit"
+        else:
+            truncation_reason = None
+
+        discovery_empty = len(selected) == 0
+        return DiscoveryOutcome(
+            subdomains=selected,
+            source="certspotter",
+            fallback_reason=fallback_reason,
+            truncated=truncated,
+            truncation_reason=truncation_reason,
+            observed_count=observed_count,
+            discovery_empty=discovery_empty,
+        )
+    except CertSpotterError as cs_exc:
+        cs_error_sanitized = sanitize_error_text(str(cs_exc), max_length=300) or str(cs_exc)
+        logger.error(
+            "Cert Spotter fallback discovery failed for '%s': %s",
+            domain,
+            cs_error_sanitized,
+        )
+        if crtsh_empty:
+            reason_msg = (
+                f"crt.sh returned no in-scope names; Cert Spotter failed: {cs_error_sanitized}"
+            )
             return DiscoveryOutcome(
-                subdomains=selected,
-                source="certspotter",
-                fallback_reason=fallback_reason,
-                truncated=truncated,
-                truncation_reason=truncation_reason,
-                observed_count=observed_count,
+                subdomains=[],
+                source="crt.sh",
+                fallback_reason=reason_msg,
+                truncated=False,
+                truncation_reason=None,
+                observed_count=0,
+                discovery_empty=True,
             )
-        except CertSpotterError as cs_exc:
-            cs_error_sanitized = sanitize_error_text(str(cs_exc), max_length=300) or str(cs_exc)
-            logger.error(
-                "Cert Spotter fallback discovery failed for '%s': %s",
-                domain,
-                cs_error_sanitized,
-            )
-            crtsh_err_str = fallback_reason or str(crtsh_exc)
-            raise AllSourcesFailedError(
-                f"Discovery failed across all sources for '{domain}': "
-                f"crt.sh error: {crtsh_err_str}; Cert Spotter error: {cs_error_sanitized}",
-                crtsh_error=crtsh_err_str,
-                certspotter_error=cs_error_sanitized,
-            ) from cs_exc
+        crtsh_err_str = fallback_reason or (str(crtsh_error) if crtsh_error else "unknown error")
+        raise AllSourcesFailedError(
+            f"Discovery failed across all sources for '{domain}': "
+            f"crt.sh error: {crtsh_err_str}; Cert Spotter error: {cs_error_sanitized}",
+            crtsh_error=crtsh_err_str,
+            certspotter_error=cs_error_sanitized,
+        ) from cs_exc

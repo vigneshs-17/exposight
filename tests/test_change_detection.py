@@ -57,6 +57,25 @@ def test_evaluate_removal_eligibility():
     assert eligible is False
     assert reason == "Baseline and new discovery reports were truncated"
 
+    # 7. discovery_empty in baseline, new, or both -> skipped
+    b6 = {"source": "crt.sh", "discovery_empty": True}
+    n6 = {"source": "crt.sh", "discovery_empty": False}
+    eligible, reason = evaluate_removal_eligibility(b6, n6)
+    assert eligible is False
+    assert reason == "Baseline discovery report was empty"
+
+    b7 = {"source": "crt.sh", "discovery_empty": False}
+    n7 = {"source": "crt.sh", "discovery_empty": True}
+    eligible, reason = evaluate_removal_eligibility(b7, n7)
+    assert eligible is False
+    assert reason == "New discovery report was empty"
+
+    b8 = {"source": "crt.sh", "discovery_empty": True}
+    n8 = {"source": "crt.sh", "discovery_empty": True}
+    eligible, reason = evaluate_removal_eligibility(b8, n8)
+    assert eligible is False
+    assert reason == "Baseline and new discovery reports were empty"
+
 
 def test_expired_cert_yields_exactly_one_change():
     """An expired cert that is also self-signed/untrusted yields ONLY CERTIFICATE_BECAME_EXPIRED."""
@@ -2455,6 +2474,68 @@ def test_discovery_source_incomparability_primary_vs_fallback():
     ch_34 = detect_changes(s3, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
     assert not any(c["change_type"] == "NEW_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
     assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
+
+
+def test_empty_discovery_scan_never_qualifying_absence_and_resets_streak():
+    """An empty discovery scan is UNKNOWN: never a qualifying absence, resets streak to 0."""
+    sub = "target.example.com"
+    anchor = "other.example.com"
+    p_entry = {"subdomain": sub, "status": "RESOLVED", "resolved": True}
+    other_entry = {"subdomain": anchor, "status": "RESOLVED", "resolved": True}
+
+    s1 = _make_discover_scan([p_entry, other_entry], source="crt.sh")
+    s2 = _make_discover_scan([other_entry], source="crt.sh")  # QA 1 for sub
+    s3_empty = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": False,
+            "discovery_empty": True,
+            "results": [],
+            "counts": {"total_discovered": 0},
+        }
+    }
+    s4 = _make_discover_scan([other_entry], source="crt.sh")  # Would be QA 2 if streak not reset
+    s5_empty = {
+        "discover": {
+            "source": "crt.sh",
+            "truncated": False,
+            "discovery_empty": True,
+            "results": [],
+            "counts": {"total_discovered": 0},
+        }
+    }
+
+    # Step 1: s1 -> s2 (QA 1 for sub, streak = 1)
+    hist_2 = [{"scan_run_id": 1001, "reports": s1}]
+    ch_12 = detect_changes(s1, s2, historical_baselines=hist_2, baseline_scan_run_id=1001)
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_12)
+
+    # Step 2: s2 -> s3_empty (empty discovery -> UNKNOWN, resets streak to 0)
+    hist_3 = [
+        {"scan_run_id": 1002, "reports": s2},
+        {"scan_run_id": 1001, "reports": s1},
+    ]
+    ch_23 = detect_changes(s2, s3_empty, historical_baselines=hist_3, baseline_scan_run_id=1002)
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_23)
+
+    # Step 3: s3_empty -> s4 (s4 has other_entry, sub absent -> streak is now 1, NOT 2)
+    hist_4 = [
+        {"scan_run_id": 1003, "reports": s3_empty},
+        {"scan_run_id": 1002, "reports": s2},
+        {"scan_run_id": 1001, "reports": s1},
+    ]
+    ch_34 = detect_changes(s3_empty, s4, historical_baselines=hist_4, baseline_scan_run_id=1003)
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_34)
+
+    # Step 4: s4 -> s5_empty (empty discovery again -> resets streak to 0)
+    hist_5 = [
+        {"scan_run_id": 1004, "reports": s4},
+        {"scan_run_id": 1003, "reports": s3_empty},
+        {"scan_run_id": 1002, "reports": s2},
+        {"scan_run_id": 1001, "reports": s1},
+    ]
+    ch_45 = detect_changes(s4, s5_empty, historical_baselines=hist_5, baseline_scan_run_id=1004)
+    assert not any(c["change_type"] == "REMOVED_SUBDOMAIN" and c["asset"] == sub for c in ch_45)
 
 
 def test_discovery_fallback_confirmed_absence():

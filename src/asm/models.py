@@ -81,6 +81,7 @@ class DiscoveryReport:
     counts: dict[str, int] = field(default_factory=dict)
     results: list[SubdomainResult] = field(default_factory=list)
     truncation_reason: str | None = None
+    discovery_empty: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the full report to a dictionary suitable for JSON export."""
@@ -93,6 +94,7 @@ class DiscoveryReport:
             "truncated": self.truncated,
             "counts": self.counts,
             "results": [result.to_dict() for result in self.results],
+            "discovery_empty": self.discovery_empty,
         }
         if self.truncation_reason is not None:
             data["truncation_reason"] = self.truncation_reason

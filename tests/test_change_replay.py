@@ -119,6 +119,19 @@ def test_ct_truncated_one_scan():
     _assert_no_missed(r)
 
 
+def test_ct_empty_answer_one_scan():
+    got, r = _by_scan({"ct_empty": 1.0})
+    # Empty CT response sets discovery_empty=True, which blocks REMOVED_SUBDOMAIN in scan 3.
+    # On recovery in scan 4, subdomains and open ports are observed again.
+    assert got == Counter({
+        (3, "DOMAIN_RISK_BAND_DECREASED"): 1,
+        (4, "NEW_SUBDOMAIN"): 12,
+        (4, "PORT_NEWLY_OPEN"): 24,
+        (4, "DOMAIN_RISK_BAND_INCREASED"): 1,
+    })
+    _assert_no_missed(r)
+
+
 def test_port_flap_filtered_one_scan():
     got, r = _by_scan({"port_flap_filtered": 1.0})
     # A filtered port is not in closed_ports, so no PORT_NO_LONGER_OPEN (changes.py:349-351),

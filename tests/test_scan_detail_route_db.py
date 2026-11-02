@@ -422,3 +422,74 @@ def test_scan_detail_cross_tenant_isolation(
     resp = client_outsider.get(f"/ui/orgs/{org_b_id}/scans/{scan_b_id}")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Organization not found"
+
+
+def test_scan_detail_discovery_empty_warning(
+    scan_detail_db_fixture, db_session: Session
+):
+    """Verify warning rendered when discovery found 0 hosts, suppressing 'No findings'."""
+    fix = scan_detail_db_fixture
+    scan_id = fix["scan_a"].id
+    org_id = fix["org_a"].id
+
+    stage_disc = ScanStage(
+        scan_run_id=scan_id, stage="discover", status="succeeded", duration_ms=150
+    )
+    db_session.add(stage_disc)
+
+    disc_res = ScanResult(
+        scan_run_id=scan_id,
+        stage="discover",
+        report={
+            "domain": "alpha.example.com",
+            "truncated": False,
+            "discovery_empty": True,
+            "counts": {"total_discovered": 0, "selected_hosts": 0, "observed_hosts": 0},
+            "source": "certspotter",
+            "results": [],
+        },
+    )
+    db_session.add(disc_res)
+    db_session.flush()
+
+    client = _make_client_for_user(fix["user_a"], db_session)
+    response = client.get(f"/ui/orgs/{org_id}/scans/{scan_id}")
+    assert response.status_code == 200
+    html = response.text
+    assert "No hosts discovered — results incomplete" in html
+    assert "No findings reported for this scan run." not in html
+
+
+def test_scan_detail_legacy_discovery_empty_warning(
+    scan_detail_db_fixture, db_session: Session
+):
+    """Verify legacy report with 0 discovered hosts renders incomplete warning."""
+    fix = scan_detail_db_fixture
+    scan_id = fix["scan_a"].id
+    org_id = fix["org_a"].id
+
+    stage_disc = ScanStage(
+        scan_run_id=scan_id, stage="discover", status="succeeded", duration_ms=150
+    )
+    db_session.add(stage_disc)
+
+    disc_res = ScanResult(
+        scan_run_id=scan_id,
+        stage="discover",
+        report={
+            "domain": "alpha.example.com",
+            "truncated": False,
+            "counts": {"total_discovered": 0, "selected_hosts": 0, "observed_hosts": 0},
+            "source": "crt.sh",
+            "results": [],
+        },
+    )
+    db_session.add(disc_res)
+    db_session.flush()
+
+    client = _make_client_for_user(fix["user_a"], db_session)
+    response = client.get(f"/ui/orgs/{org_id}/scans/{scan_id}")
+    assert response.status_code == 200
+    html = response.text
+    assert "No hosts discovered — results incomplete" in html
+    assert "No findings reported for this scan run." not in html

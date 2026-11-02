@@ -100,6 +100,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (Database)**: Migration `0008_domain_verification` resets all existing domains to `verification_status = 'pending'`, pausing automated scheduled scans until DNS verification is completed.
 - **Alert Trigger Rules**: `should_trigger_alerts` requires explicit `verified: bool` argument; removed deprecated `authorized` parameter.
 
+### Fixed
+
+#### Discovery & Certificate Transparency Fallback
+- **Empty CT Log Handling**: When `crt.sh` returns zero in-scope names, discovery treats the response as inconclusive and falls back to Cert Spotter with `fallback_reason="crt.sh returned no in-scope names"`. If Cert Spotter fails or returns zero names, `discovery_empty=True` is recorded in the discovery report, and the scan detail page renders an explicit warning banner (`"No hosts discovered — results incomplete"`) instead of falsely claiming `"No findings"`.
+- **Change Detection Guard**: Verified and enforced that empty-discovery scans (`discovery_empty=True` or 0 discovered hosts) evaluate to `UNKNOWN` observations, never qualify as absences, and reset consecutive absence streaks to 0, preventing false `REMOVED_SUBDOMAIN` emissions.
+- **Operational Note**: The first successful scan after this fix for targets affected by earlier empty-discovery scans may emit one `NEW_SUBDOMAIN` change event for hosts missed by those earlier scans — this is expected behavior as valid asset inventory is restored.
+
 ## [2.0.0] - 2026-10-01
 
 ### Added
